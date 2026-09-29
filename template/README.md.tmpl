@@ -73,23 +73,24 @@ A product's gitops lives in **`products/<product>/`**:
 
 ```
 products/<product>/
-  image.yaml               the kpack Image that builds it (namespace builds)
-  <zone>/                  one directory per zone it is deployed to
+  build/image.yaml         the kpack Image that builds it (namespace builds)
+  zones/<zone>/values.yaml one directory per zone: its chart values and image pin
 ```
 [[ if .BuildRegistry ]]
-`image.yaml` is a kpack `Image` in namespace `builds` with
+`build/image.yaml` is a kpack `Image` in namespace `builds` with
 `serviceAccountName: builder`, builder ClusterBuilder `infrared-builder` and
 tag `[[ .BuildRegistry ]]/<product>`; see `components/builds/README.md`. The
 registry repository `[[ .BuildRegistry ]]/<product>` must exist first (ECR
 does not create repositories on push).
 [[ else ]]
 Builds are off on this cluster (no build registry), so there is nothing to
-build `image.yaml` yet; see `components/builds/README.md`.
+build `build/image.yaml` yet; see `components/builds/README.md`.
 [[ end ]]
 Add the product's Applications next to Infrared's, in
 `registry/clusters/[[ .ClusterName ]]/components/`, with file names starting
-**`product-<product>-`** (e.g. `product-shop-image.yaml`,
-`product-shop-dev.yaml`), project `platform`. The root Application syncs
+**`product-<product>-`** (e.g. `product-shop-build.yaml`,
+`product-shop-rc.yaml`), in an AppProject `products` that allows only the org's
+repos and the product's namespaces. The root Application syncs
 them like any other.
 
 Infrared re-renders its template into this repo when it upgrades it. That

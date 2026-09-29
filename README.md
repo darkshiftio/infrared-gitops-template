@@ -137,7 +137,7 @@ chart, so Argo CD's render keeps the operator's `INFRARED_BUILD_REGISTRY`.
 ### Products
 
 A product's gitops lives in `products/<product>/` of the gitops repo
-(`image.yaml`, the kpack Image, and one directory per zone). The org adds its
+(`build/image.yaml`, the kpack Image, and `zones/<zone>/values.yaml` per zone). The org adds its
 Applications in `registry/clusters/<cluster>/components/` with file names
 starting `product-<product>-`. The template never renders into `products/`
 or a `product-*` name, and hydration never deletes or overwrites a file it
