@@ -20,8 +20,9 @@ metadata:
 spec:
   project: infrared
   source:
-    # An OCI helm repository: no oci:// prefix. The operator writes the
-    # repository Secret argocd/infrared-oci-charts (type helm, enableOCI).
+    # An OCI helm repository: no oci:// prefix. components/argocd registers
+    # ghcr.io/darkshiftio/charts (public, no credentials); the operator adds
+    # argocd/infrared-oci-charts only when an image pull secret is configured.
     repoURL: [[ .InfraredChartRepo ]]
     chart: infrared
     targetRevision: [[ .InfraredChartVersion ]]

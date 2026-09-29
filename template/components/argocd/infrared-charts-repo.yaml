@@ -1,0 +1,15 @@
+# Argo CD needs an OCI helm repository registered to pull the Infrared chart
+# (wave 40, the `infrared` Application). The chart is public on ghcr, so this
+# entry carries no credentials.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: infrared-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  name: infrared-charts
+  type: helm
+  url: ghcr.io/darkshiftio/charts
+  enableOCI: "true"
