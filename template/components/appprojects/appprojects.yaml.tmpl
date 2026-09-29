@@ -41,6 +41,7 @@ spec:
   sourceRepos:
     - [[ .GitopsRepoURL ]]
     - [[ .InfraredChartRepo ]]
+    - https://github.com/darkshiftio/infrared-chart.git
   destinations:
     - server: https://kubernetes.default.svc
       namespace: [[ .InfraredNamespace ]]

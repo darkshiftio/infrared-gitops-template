@@ -20,12 +20,12 @@ metadata:
 spec:
   project: infrared
   source:
-    # An OCI helm repository: no oci:// prefix. components/argocd registers
-    # ghcr.io/darkshiftio/charts (public, no credentials); the operator adds
-    # argocd/infrared-oci-charts only when an image pull secret is configured.
-    repoURL: [[ .InfraredChartRepo ]]
-    chart: infrared
-    targetRevision: [[ .InfraredChartVersion ]]
+    # The chart's public git repo, at the release tag. Git works anonymously
+    # today; the OCI copy on ghcr (registered in components/argocd) is the
+    # intended source once that package is public.
+    repoURL: https://github.com/darkshiftio/infrared-chart.git
+    path: charts/infrared
+    targetRevision: v[[ .InfraredChartVersion ]]
     helm:
       releaseName: infrared
       valuesObject:
