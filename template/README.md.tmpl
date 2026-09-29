@@ -107,7 +107,7 @@ to the new chart version, in a pull request (a pin PR). Do not run
 ## Secrets
 
 Nothing secret is in this repo. The Secrets Infrared needs
-(`infrared-setup`, `infrared-session`, `infrared-mcp-token`,
+(`infrared-setup`, `infrared-session`, `infrared-mcp-token`, `infrared-mcp-access`,
 `infrared-api-tokens` in `[[ .InfraredNamespace ]]`) were created by the first
 `helm install`, and the `infrared` Application tells the chart they exist.
 `infisical-secrets` is generated once, on the first sync, and never rotated.

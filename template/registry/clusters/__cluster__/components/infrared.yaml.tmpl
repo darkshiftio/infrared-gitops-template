@@ -46,6 +46,9 @@ spec:
           existingSecret: infrared-session
         mcp:
           existingSecret: infrared-mcp-token
+          # The bearer token MCP clients send to /mcp.
+          access:
+            existingSecret: infrared-mcp-access
         # The registry prefix kpack builds product images into; empty leaves
         # the builds component out. Rendered from the operator's own
         # INFRARED_BUILD_REGISTRY so adoption keeps it.
