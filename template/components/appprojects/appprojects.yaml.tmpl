@@ -1,0 +1,55 @@
+# Rendered by the Infrared operator from infrared-gitops-template [[ .TemplateVersion ]].
+#
+# platform: the management cluster's shared components (cert-manager,
+#   external-secrets, infisical, kpack, monitoring, Argo CD itself).
+# infrared: the Infrared control plane, from its OCI chart.
+#
+# Source repos are listed explicitly: adding a component that pulls from a new
+# chart repository means adding that repository here first.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+spec:
+  description: Platform components of the [[ .ClusterName ]] management cluster
+  sourceRepos:
+    - [[ .GitopsRepoURL ]]
+    - https://charts.jetstack.io
+    - https://charts.external-secrets.io
+    - https://aws.github.io/eks-charts
+    - https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/
+    - https://victoriametrics.github.io/helm-charts/
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: infrared
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+spec:
+  description: The Infrared control plane on [[ .ClusterName ]]
+  sourceRepos:
+    - [[ .GitopsRepoURL ]]
+    - [[ .InfraredChartRepo ]]
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: [[ .InfraredNamespace ]]
+  # The chart ships the infrared.darkshift.io CRDs and the operator's and
+  # API's ClusterRoles.
+  clusterResourceWhitelist:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding

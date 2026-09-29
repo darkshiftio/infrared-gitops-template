@@ -1,0 +1,63 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: infisical
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "15"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    # PreSync hooks that create infisical/infisical-secrets if it is absent.
+    - repoURL: [[ .GitopsRepoURL ]]
+      targetRevision: [[ .DefaultBranch ]]
+      path: components/infisical
+    - repoURL: https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/
+      chart: infisical-standalone
+      targetRevision: 1.11.0
+      helm:
+        releaseName: infisical
+        valuesObject:
+          infisical:
+            replicaCount: 1
+            kubeSecretRef: infisical-secrets
+          # Access is by port-forward: svc/infisical-infisical-standalone-infisical 8080.
+          ingress:
+            enabled: false
+            nginx:
+              enabled: false
+          # Bundled postgres and redis. Their passwords are the chart's
+          # defaults: an MVP limitation, see README.
+          postgresql:
+            enabled: true
+          redis:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: infisical
+  # The chart stamps `updatedAt: now` on the Deployment and its pod template,
+  # which would read as drift on every manifest refresh.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /metadata/annotations/updatedAt
+        - /spec/template/metadata/annotations/updatedAt
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,8 @@
+# The second source of the `infisical` Application (wave 15): generates the
+# Secret `infisical-secrets` the infisical-standalone chart reads
+# (infisical.kubeSecretRef) and does not create itself.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: infisical
+resources:
+  - secret-generator.yaml

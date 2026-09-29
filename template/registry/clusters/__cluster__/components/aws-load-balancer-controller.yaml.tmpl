@@ -1,0 +1,52 @@
+[[- if eq .ClusterFlavor "eks" -]]
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-load-balancer-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    targetRevision: 3.5.0
+    helm:
+      releaseName: aws-load-balancer-controller
+      valuesObject:
+        clusterName: [[ .ClusterName ]]
+        region: [[ .Region ]]
+        replicaCount: 1
+        serviceAccount:
+          create: true
+          name: aws-load-balancer-controller
+          # EKS Pod Identity binds the IAM role to kube-system/aws-load-balancer-controller
+          # (infrared-iac-modules aws/mgmt-eks creates that association), so no
+          # annotation is needed. For IRSA instead, set
+          # eks.amazonaws.com/role-arn here.
+          annotations: {}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# aws-load-balancer-controller is installed only on eks management clusters.
+# This cluster's flavor is [[ .ClusterFlavor ]], so this file holds no objects.
+[[- end ]]

@@ -1,0 +1,63 @@
+# The Infrared control plane itself: operator, api, ui and mcp.
+#
+# The first `helm install` of the chart created this release and bootstrapped
+# this repo; this Application adopts it. Argo CD renders the chart with
+# `helm template`, where `lookup` returns nothing, so the chart would mint new
+# random Secrets on every render. The existingSecret values below tell it the
+# Secrets already exist, so adoption never rotates them.
+#
+# Upgrade Infrared with a pin PR that changes targetRevision, never with
+# `helm upgrade`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: infrared
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "40"
+spec:
+  project: infrared
+  source:
+    # An OCI helm repository: no oci:// prefix. The operator writes the
+    # repository Secret argocd/infrared-oci-charts (type helm, enableOCI).
+    repoURL: [[ .InfraredChartRepo ]]
+    chart: infrared
+    targetRevision: [[ .InfraredChartVersion ]]
+    helm:
+      releaseName: infrared
+      valuesObject:
+        managementCluster:
+          name: [[ .ClusterName ]]
+        gitops:
+          templateVersion: [[ .TemplateVersion ]]
+[[- if .ImagePullSecret ]]
+        imagePullSecrets:
+          - name: [[ .ImagePullSecret ]]
+[[- else ]]
+        imagePullSecrets: []
+[[- end ]]
+        setup:
+          existingSecret: infrared-setup
+        session:
+          existingSecret: infrared-session
+        mcp:
+          existingSecret: infrared-mcp-token
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: [[ .InfraredNamespace ]]
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,9 @@
+# Strategic-merge patch on upstream's argocd-cmd-params-cm.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+data:
+  # Access is by `kubectl port-forward`, so argocd-server serves plain HTTP and
+  # the tunnel is the transport security. Put TLS in front before exposing it.
+  server.insecure: "true"

@@ -1,0 +1,5 @@
+# AppProjects (wave 0). Every other Application lands in one of these.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - appprojects.yaml

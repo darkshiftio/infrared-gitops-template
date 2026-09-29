@@ -1,0 +1,104 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: victoria-metrics-k8s-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://victoriametrics.github.io/helm-charts/
+    chart: victoria-metrics-k8s-stack
+    targetRevision: 0.95.0
+    helm:
+      releaseName: victoria-metrics-k8s-stack
+      valuesObject:
+        # The chart's own guidance under Argo CD: name the release after the
+        # Application so its generated names are stable.
+        argocdReleaseOverride: victoria-metrics-k8s-stack
+        victoria-metrics-operator:
+          # The webhook's self-signed certificate is regenerated on every
+          # render, which Argo CD would show as permanent drift.
+          admissionWebhooks:
+            enabled: false
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+        vmsingle:
+          spec:
+            retentionPeriod: "14d"
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 1Gi
+            storage:
+              resources:
+                requests:
+                  storage: 10Gi
+        vmagent:
+          spec:
+            externalLabels:
+              cluster: [[ .ClusterName ]]
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                memory: 512Mi
+        vmalert:
+          spec:
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+        alertmanager:
+          spec:
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+        grafana:
+          enabled: true
+          # Access is by port-forward: svc/victoria-metrics-k8s-stack-grafana 80.
+          ingress:
+            enabled: false
+          resources:
+            requests:
+              cpu: 20m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+        # Neither flavor exposes these: EKS runs the control plane for you,
+        # and k3s runs it inside the k3s process without these endpoints.
+        kubeControllerManager:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      # The VictoriaMetrics operator CRDs are large.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

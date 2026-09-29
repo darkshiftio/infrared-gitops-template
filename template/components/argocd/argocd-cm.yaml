@@ -1,0 +1,12 @@
+# Strategic-merge patch on upstream's argocd-cm.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+data:
+  # Track by annotation, not by the app.kubernetes.io/instance label, so a
+  # chart that sets that label itself (most do) is not mistaken for ours, and
+  # resources a helm install created can be adopted cleanly.
+  application.resourceTrackingMethod: annotation
+  # Lets a kustomization under components/ inflate helm charts.
+  kustomize.buildOptions: --enable-helm

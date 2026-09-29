@@ -1,0 +1,32 @@
+# The root app-of-apps for management cluster [[ .ClusterName ]].
+# Rendered by the Infrared operator from infrared-gitops-template [[ .TemplateVersion ]].
+#
+# The operator applies this once, right after it applies components/argocd.
+# From then on everything under components/ next to this file is an
+# Application this one owns, synced in sync-wave order.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: registry-[[ .ClusterName ]]
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+spec:
+  project: default
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: registry/clusters/[[ .ClusterName ]]/components
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

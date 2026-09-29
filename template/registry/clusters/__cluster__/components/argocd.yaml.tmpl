@@ -1,0 +1,36 @@
+# Argo CD managing itself, from the same components/argocd the operator applied
+# at bootstrap. Last, so a bad Argo CD change cannot block the platform.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "100"
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Never prune Argo CD's own objects automatically: one bad commit must
+      # not be able to delete the thing that would roll it back.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+      # Argo CD's CRDs outgrow the last-applied annotation.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
