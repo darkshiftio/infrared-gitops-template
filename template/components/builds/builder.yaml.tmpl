@@ -23,6 +23,8 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: builder
   namespace: builds
 secrets:
@@ -42,6 +44,8 @@ imagePullSecrets:
 apiVersion: kpack.io/v1alpha2
 kind: ClusterStore
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
   name: paketo
 spec:
   sources:
@@ -60,6 +64,8 @@ spec:
 apiVersion: kpack.io/v1alpha2
 kind: ClusterStack
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
   name: noble
 spec:
   id: io.buildpacks.stacks.noble
@@ -88,6 +94,8 @@ spec:
 apiVersion: kpack.io/v1alpha2
 kind: ClusterBuilder
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
   name: infrared-builder
 spec:
   tag: [[ .BuildRegistry ]]/kpack-builder

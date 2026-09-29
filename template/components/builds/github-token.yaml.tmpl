@@ -4,7 +4,7 @@
 # GitHub App for the org.
 # =============================================================================
 # Every 45 minutes (installation tokens last 60) and once per sync of `builds`
-# (PostSync hook):
+# (Sync hook, sync wave -1):
 #   1. app    (alpine/k8s) reads the App ID and installation ID from the
 #             GitProvider `github` and the PEM from Secret `github-app`
 #             (key private-key.pem), both in namespace ir-org-[[ .OrgName ]];
@@ -21,6 +21,8 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: github-token
   namespace: builds
 ---
@@ -30,6 +32,8 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: github-token
   namespace: builds
 rules:
@@ -44,6 +48,8 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: github-token
   namespace: builds
 roleRef:
@@ -60,6 +66,8 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: builds-github-token
   namespace: ir-org-[[ .OrgName ]]
 rules:
@@ -75,6 +83,8 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: builds-github-token
   namespace: ir-org-[[ .OrgName ]]
 roleRef:
@@ -89,6 +99,8 @@ subjects:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: github-token
   namespace: builds
 spec:
@@ -172,7 +184,7 @@ spec:
                 medium: Memory
                 sizeLimit: 1Mi
 ---
-# The same job once per sync (PostSync hook), so the Secrets exist right after
+# The same job once per sync (Sync hook, sync wave -1), so the Secrets exist right after
 # bootstrap instead of up to 45 minutes later.
 apiVersion: batch/v1
 kind: Job
@@ -180,7 +192,8 @@ metadata:
   name: github-token-bootstrap
   namespace: builds
   annotations:
-    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 5

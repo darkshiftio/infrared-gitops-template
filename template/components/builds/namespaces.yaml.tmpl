@@ -5,6 +5,8 @@
 apiVersion: v1
 kind: Namespace
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
   name: builds
   labels:
     pod-security.kubernetes.io/enforce: restricted
@@ -25,6 +27,8 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
   name: build-credentials
   labels:
     pod-security.kubernetes.io/enforce: privileged

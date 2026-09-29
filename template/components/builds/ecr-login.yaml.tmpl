@@ -3,7 +3,7 @@
 # ecr-login: ECR push credentials for kpack, from the node's IAM role. No
 # long-lived keys.
 # =============================================================================
-# Every 6 hours (ECR tokens last 12) and once per sync of `builds` (PostSync
+# Every 6 hours (ECR tokens last 12) and once per sync of `builds` (a Sync hook at wave -1, before the builder at wave 1;
 # hook): writes builds/registry-push (kubernetes.io/dockerconfigjson,
 # annotation kpack.io/docker: <registry host>), which the ServiceAccount
 # builds/builder lists.
@@ -16,6 +16,8 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: ecr-login
   namespace: build-credentials
 ---
@@ -24,6 +26,8 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: ecr-login
   namespace: builds
 rules:
@@ -38,6 +42,8 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: ecr-login
   namespace: builds
 roleRef:
@@ -52,6 +58,8 @@ subjects:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
   name: ecr-login
   namespace: build-credentials
 spec:
@@ -123,7 +131,7 @@ spec:
               emptyDir:
                 sizeLimit: 16Mi
 ---
-# The same job once per sync (PostSync hook), so the Secret exists right after
+# The same job once per sync (Sync hook, sync wave -1), so the Secret exists right after
 # bootstrap instead of at the next schedule.
 apiVersion: batch/v1
 kind: Job
@@ -131,7 +139,8 @@ metadata:
   name: ecr-login-bootstrap
   namespace: build-credentials
   annotations:
-    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 5
