@@ -1,0 +1,53 @@
+[[- if contains ".dkr.ecr." .BuildRegistry -]]
+#!/bin/sh
+# =============================================================================
+# ecr-login: turn the node's IAM role into a registry Secret for kpack.
+# =============================================================================
+# Runs in namespace build-credentials with hostNetwork (IMDSv2, hop limit 1).
+# $REGISTRY is the build registry prefix, e.g.
+# 123456789012.dkr.ecr.us-east-1.amazonaws.com/acme; the host is everything
+# before the first `/`, the AWS region the host's 4th dot-separated field.
+# `aws ecr get-login-password` returns a 12-hour token; the CronJob renews it
+# every 6 hours. For every <namespace>/<name> in $TARGETS it server-side
+# applies a kubernetes.io/dockerconfigjson Secret for the host with the
+# annotation kpack.io/docker: <host> (never a client-side `kubectl apply`,
+# which would copy the Secret's data into the last-applied annotation). The
+# password never appears in a process's argv: it travels in shell variables,
+# the environment and stdin only.
+# =============================================================================
+set -eu
+: "${REGISTRY:?}" "${TARGETS:?}"
+host="${REGISTRY%%/*}"
+region="$(printf '%s' "$host" | cut -d. -f4)"
+case "$host" in
+  *.dkr.ecr.*.amazonaws.com|*.dkr.ecr.*.amazonaws.com.cn) ;;
+  *) echo "ecr-login: $host is not an ECR registry host" >&2; exit 1 ;;
+esac
+[ -n "$region" ] || { echo "ecr-login: no region in $host" >&2; exit 1; }
+
+password="$(aws ecr get-login-password --region "$region")"
+[ -n "$password" ] || { echo "ecr-login: empty password from ECR" >&2; exit 1; }
+AUTH="$(printf 'AWS:%s' "$password" | base64 | tr -d '\n')"
+export AUTH
+unset password
+
+for target in $TARGETS; do
+  ns="${target%%/*}" name="${target#*/}"
+  jq -n --arg ns "$ns" --arg name "$name" --arg reg "$host" '{
+    apiVersion: "v1",
+    kind: "Secret",
+    type: "kubernetes.io/dockerconfigjson",
+    metadata: {
+      name: $name,
+      namespace: $ns,
+      labels: {"app.kubernetes.io/managed-by": "ecr-login"},
+      annotations: {"kpack.io/docker": $reg}
+    },
+    data: {".dockerconfigjson": ({auths: {($reg): {username: "AWS", auth: env.AUTH}}} | tojson | @base64)}
+  }' | kubectl apply --server-side --force-conflicts --field-manager=ecr-login -f -
+  echo "ecr-login: refreshed $ns/$name for $host (region $region)"
+done
+[[- else -]]
+# No ECR login: builds is off, or the build registry is not ECR (the org
+# creates builds/registry-push itself; see components/builds/README.md).
+[[- end ]]

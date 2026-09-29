@@ -1,0 +1,35 @@
+[[- if .BuildRegistry -]]
+# builds: every product's kpack Image lives here, so every build pod runs here,
+# under Pod Security `restricted`. Also home of the ServiceAccount `builder`
+# (builds and the ClusterBuilder push with it) and the github-token job.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: builds
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+[[- if contains ".dkr.ecr." .BuildRegistry ]]
+---
+# build-credentials: the ECR login job, and nothing else.
+#
+# hostNetwork is needed so the ECR login job reaches the node's IMDSv2 with
+# hop limit 1: an ordinary pod is one hop further and gets no credentials, so
+# the job must run in the host network namespace to act with the node's IAM
+# role. Pod Security `baseline` forbids hostNetwork, so this namespace is
+# `privileged` for that one reason. Keeping the job out of `builds` keeps the
+# build pods under `restricted`.
+#
+# Anyone who can create pods here can use the node role. Treat create-pod
+# rights in build-credentials as rights to push to the build registry.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: build-credentials
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+[[- end ]]
+[[- else -]]
+# builds is off (no build registry): no namespaces.
+[[- end ]]

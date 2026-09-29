@@ -5,7 +5,8 @@
 //   - every file under template/ is rendered;
 //   - a file ending in .tmpl is a Go text/template with delimiters [[ and ]],
 //     executed with Data and missingkey=error, and written without the .tmpl
-//     suffix; no template functions beyond text/template's builtins exist;
+//     suffix; beyond text/template's builtins only Funcs exist (the operator's
+//     exact helper set);
 //   - every other file is copied byte for byte;
 //   - any path segment exactly equal to __cluster__ becomes Data.ClusterName.
 //
@@ -25,8 +26,10 @@ import (
 	"text/template"
 )
 
-// Data is the value every .tmpl file is executed against. JSON names equal Go
-// names, so a -data file and the operator's struct are interchangeable.
+// Data is the value every .tmpl file is executed against. encoding/json matches
+// field names case-insensitively, so a -data file written with Go names or
+// with the operator's camelCase names (clusterName, buildRegistry, ...) loads
+// the same.
 type Data struct {
 	ClusterName          string `json:"ClusterName"`
 	ClusterFlavor        string `json:"ClusterFlavor"` // "k3s" | "eks"
@@ -42,6 +45,32 @@ type Data struct {
 	InfraredChartVersion string `json:"InfraredChartVersion"`
 	InfraredNamespace    string `json:"InfraredNamespace"`
 	ImagePullSecret      string `json:"ImagePullSecret"`
+	// BuildRegistry is the registry prefix product images are built into, e.g.
+	// 123456789012.dkr.ecr.us-east-1.amazonaws.com/acme; empty leaves the
+	// builds component out.
+	BuildRegistry string `json:"buildRegistry"`
+}
+
+// Funcs are the helpers templates may use beyond text/template's builtins.
+// They mirror the operator's set (infrared-operator internal/gitopstemplate)
+// exactly, arguments included: the needle comes first, so
+// [[ if contains ".dkr.ecr." .BuildRegistry ]] reads naturally.
+var Funcs = template.FuncMap{
+	"lower":      strings.ToLower,
+	"upper":      strings.ToUpper,
+	"trimPrefix": func(prefix, s string) string { return strings.TrimPrefix(s, prefix) },
+	"trimSuffix": func(suffix, s string) string { return strings.TrimSuffix(s, suffix) },
+	"replace":    func(old, repl, s string) string { return strings.ReplaceAll(s, old, repl) },
+	"contains":   func(sub, s string) bool { return strings.Contains(s, sub) },
+	"hasPrefix":  func(prefix, s string) bool { return strings.HasPrefix(s, prefix) },
+	"hasSuffix":  func(suffix, s string) bool { return strings.HasSuffix(s, suffix) },
+	"quote":      func(s string) string { return fmt.Sprintf("%q", s) },
+	"default": func(def, v string) string {
+		if v == "" {
+			return def
+		}
+		return v
+	},
 }
 
 const (
@@ -73,6 +102,8 @@ func main() {
 	flag.StringVar(&d.InfraredChartVersion, "chart-version", "0.1.0", "InfraredChartVersion")
 	flag.StringVar(&d.InfraredNamespace, "namespace", "infrared", "InfraredNamespace")
 	flag.StringVar(&d.ImagePullSecret, "pull-secret", "", "ImagePullSecret (empty for none)")
+	flag.StringVar(&d.BuildRegistry, "build-registry", os.Getenv("INFRARED_BUILD_REGISTRY"),
+		"BuildRegistry, the registry prefix product images are built into (default $INFRARED_BUILD_REGISTRY; empty leaves builds out)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -90,7 +121,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s)\n", n, src, out, d.ClusterName, d.ClusterFlavor)
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q)\n", n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry)
 }
 
 // mergeDataFile loads a JSON Data file, then re-applies every flag the user set
@@ -125,6 +156,7 @@ func mergeDataFile(d *Data, path string) error {
 		"chart-version":    func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
 		"namespace":        func() { d.InfraredNamespace = explicit.InfraredNamespace },
 		"pull-secret":      func() { d.ImagePullSecret = explicit.ImagePullSecret },
+		"build-registry":   func() { d.BuildRegistry = explicit.BuildRegistry },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -198,7 +230,7 @@ func Render(src, out string, d Data) (int, error) {
 			return err
 		}
 		if strings.HasSuffix(rel, tmplSuffix) {
-			t, err := template.New(rel).Delims("[[", "]]").Option("missingkey=error").Parse(string(content))
+			t, err := template.New(rel).Delims("[[", "]]").Funcs(Funcs).Option("missingkey=error").Parse(string(content))
 			if err != nil {
 				return err
 			}

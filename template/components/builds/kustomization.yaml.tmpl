@@ -1,0 +1,33 @@
+[[- if .BuildRegistry -]]
+# Product image builds with kpack (the `builds` Application, wave 26).
+# Builds push to [[ .BuildRegistry ]]. See README.md.
+#
+# The objects span namespaces (builds, build-credentials, ir-org-[[ .OrgName ]]
+# and cluster scope), so every one names its own namespace and this
+# kustomization sets none.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespaces.yaml
+  - builder.yaml
+  - github-token.yaml
+[[- if contains ".dkr.ecr." .BuildRegistry ]]
+  - ecr-login.yaml
+[[- end ]]
+configMapGenerator:
+  - name: github-token-scripts
+    namespace: builds
+    files:
+      - scripts/github-app.sh
+      - scripts/github-jwt.sh
+      - scripts/github-token.sh
+[[- if contains ".dkr.ecr." .BuildRegistry ]]
+  - name: ecr-login-scripts
+    namespace: build-credentials
+    files:
+      - scripts/ecr-login.sh
+[[- end ]]
+[[- else -]]
+# builds is off: Infrared has no build registry (INFRARED_BUILD_REGISTRY), so
+# this component holds no objects and no Application points at it.
+[[- end ]]

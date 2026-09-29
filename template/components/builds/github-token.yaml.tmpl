@@ -1,0 +1,260 @@
+[[- if .BuildRegistry -]]
+# =============================================================================
+# github-token: short-lived GitHub credentials for kpack, from Infrared's own
+# GitHub App for the org.
+# =============================================================================
+# Every 45 minutes (installation tokens last 60) and once per sync of `builds`
+# (PostSync hook):
+#   1. app    (alpine/k8s) reads the App ID and installation ID from the
+#             GitProvider `github` and the PEM from Secret `github-app`
+#             (key private-key.pem), both in namespace ir-org-[[ .OrgName ]];
+#   2. jwt    (alpine/openssl) signs the App's JWT;
+#   3. token  (alpine/k8s) exchanges it for an installation token limited to
+#             contents:read and metadata:read, and server-side applies
+#             builds/github-git and builds/git-credentials.
+# Until the org's GitHub App is installed (no installation ID yet) the job logs
+# a notice and succeeds, so the sync is not marked failed; the next run picks
+# it up. No hostNetwork: it talks to the API server and GitHub only, so it runs
+# in `builds` under Pod Security restricted.
+# YAML anchors below are resolved when kustomize renders the component.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-token
+  namespace: builds
+---
+# Writes the two Secrets in builds. create cannot be limited by resourceNames,
+# so it is a rule of its own; the named Secrets can then be read and patched
+# (server-side apply), nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-token
+  namespace: builds
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["github-git", "git-credentials"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-token
+  namespace: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: github-token
+subjects:
+  - kind: ServiceAccount
+    name: github-token
+    namespace: builds
+---
+# Reads the org's GitHub App: its private key and its GitProvider, nothing else
+# in the org's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: builds-github-token
+  namespace: ir-org-[[ .OrgName ]]
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["github-app"]
+    verbs: ["get"]
+  - apiGroups: ["infrared.darkshift.io"]
+    resources: ["gitproviders"]
+    resourceNames: ["github"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: builds-github-token
+  namespace: ir-org-[[ .OrgName ]]
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: builds-github-token
+subjects:
+  - kind: ServiceAccount
+    name: github-token
+    namespace: builds
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: github-token
+  namespace: builds
+spec:
+  schedule: "*/45 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: github-token
+            app.kubernetes.io/part-of: infrared-gitops
+        spec:
+          serviceAccountName: github-token
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            fsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: app
+              # kubectl reads the App's ID, installation ID and PEM from the org.
+              image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+              command: ["/bin/sh", "/scripts/github-app.sh"]
+              env: &env
+                - name: HOME
+                  value: /work
+                - name: ORG_NAMESPACE
+                  value: ir-org-[[ .OrgName ]]
+              securityContext: &containerSecurity
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources: &resources
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              volumeMounts: &mounts
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+            - name: jwt
+              # openssl signs the App JWT (RS256); alpine/k8s has no openssl binary.
+              image: docker.io/alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b
+              command: ["/bin/sh", "/scripts/github-jwt.sh"]
+              env: *env
+              securityContext: *containerSecurity
+              resources: *resources
+              volumeMounts: *mounts
+          containers:
+            - name: token
+              # curl, jq and kubectl; nothing is installed at runtime.
+              image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+              command: ["/bin/sh", "/scripts/github-token.sh"]
+              env: *env
+              securityContext: *containerSecurity
+              resources: *resources
+              volumeMounts: *mounts
+          volumes:
+            - name: scripts
+              configMap:
+                name: github-token-scripts
+                defaultMode: 0555
+            # The PEM, the JWT and the token pass between the containers here, in
+            # memory only, and each script deletes what it has used.
+            - name: work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 1Mi
+---
+# The same job once per sync (PostSync hook), so the Secrets exist right after
+# bootstrap instead of up to 45 minutes later.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: github-token-bootstrap
+  namespace: builds
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: github-token
+        app.kubernetes.io/part-of: infrared-gitops
+    spec:
+      serviceAccountName: github-token
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: app
+          # kubectl reads the App's ID, installation ID and PEM from the org.
+          image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+          command: ["/bin/sh", "/scripts/github-app.sh"]
+          env: &env
+            - name: HOME
+              value: /work
+            - name: ORG_NAMESPACE
+              value: ir-org-[[ .OrgName ]]
+          securityContext: &containerSecurity
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources: &resources
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts: &mounts
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+        - name: jwt
+          # openssl signs the App JWT (RS256); alpine/k8s has no openssl binary.
+          image: docker.io/alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b
+          command: ["/bin/sh", "/scripts/github-jwt.sh"]
+          env: *env
+          securityContext: *containerSecurity
+          resources: *resources
+          volumeMounts: *mounts
+      containers:
+        - name: token
+          # curl, jq and kubectl; nothing is installed at runtime.
+          image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+          command: ["/bin/sh", "/scripts/github-token.sh"]
+          env: *env
+          securityContext: *containerSecurity
+          resources: *resources
+          volumeMounts: *mounts
+      volumes:
+        - name: scripts
+          configMap:
+            name: github-token-scripts
+            defaultMode: 0555
+        # The PEM, the JWT and the token pass between the containers here, in
+        # memory only, and each script deletes what it has used.
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+[[- else -]]
+# builds is off (no build registry): no github-token job.
+[[- end ]]

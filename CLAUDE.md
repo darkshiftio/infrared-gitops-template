@@ -13,7 +13,9 @@ anything under `template/`.
 - The rendering contract (delimiters `[[ ]]`, `.tmpl` stripped, `__cluster__`
   path segments, the Data fields) is shared with the operator. Changing it is a
   change to both repos, in step. `hack/render` must keep implementing it
-  exactly; templates use only text/template builtins (no sprig).
+  exactly; templates use only text/template builtins plus the operator's
+  small helper set (contains, hasPrefix, hasSuffix, quote, ...; listed in
+  README.md), never sprig.
 - `components/argocd`, `components/kpack` and `components/infisical` are
   verbatim (no `.tmpl`): the operator kustomize-builds `components/argocd`
   directly. Re-vendor upstream with `scripts/vendor-*.sh`, never by hand.

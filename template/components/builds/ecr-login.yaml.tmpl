@@ -1,0 +1,200 @@
+[[- if contains ".dkr.ecr." .BuildRegistry -]]
+# =============================================================================
+# ecr-login: ECR push credentials for kpack, from the node's IAM role. No
+# long-lived keys.
+# =============================================================================
+# Every 6 hours (ECR tokens last 12) and once per sync of `builds` (PostSync
+# hook): writes builds/registry-push (kubernetes.io/dockerconfigjson,
+# annotation kpack.io/docker: <registry host>), which the ServiceAccount
+# builds/builder lists.
+#
+# The node role must be allowed to push to the build registry's repositories
+# ([[ .BuildRegistry ]]/*) and to call ecr:GetAuthorizationToken.
+# =============================================================================
+# The job's ServiceAccount holds no rights in its own namespace, only the
+# Role below in builds.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ecr-login
+  namespace: build-credentials
+---
+# create cannot be limited by resourceNames, so it is a rule of its own; the
+# named Secret can then be read and patched (server-side apply), nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ecr-login
+  namespace: builds
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["registry-push"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ecr-login
+  namespace: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ecr-login
+subjects:
+  - kind: ServiceAccount
+    name: ecr-login
+    namespace: build-credentials
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ecr-login
+  namespace: build-credentials
+spec:
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: ecr-login
+            app.kubernetes.io/part-of: infrared-gitops
+        spec:
+          serviceAccountName: ecr-login
+          # The node role is only reachable from the host network namespace
+          # (IMDSv2 hop limit 1); see namespaces.yaml.
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: ecr-login
+              # alpine/k8s ships kubectl, the AWS CLI (has ecr get-login-password),
+              # jq and curl; nothing is installed at runtime.
+              image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+              command: ["/bin/sh", "/scripts/ecr-login.sh"]
+              env:
+                - name: HOME
+                  value: /tmp
+                # The build registry prefix; the script derives host and region.
+                - name: REGISTRY
+                  value: [[ .BuildRegistry | quote ]]
+                # <namespace>/<secret> pairs, space separated.
+                - name: TARGETS
+                  value: builds/registry-push
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: ecr-login-scripts
+                defaultMode: 0555
+            - name: tmp
+              emptyDir:
+                sizeLimit: 16Mi
+---
+# The same job once per sync (PostSync hook), so the Secret exists right after
+# bootstrap instead of at the next schedule.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ecr-login-bootstrap
+  namespace: build-credentials
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ecr-login
+        app.kubernetes.io/part-of: infrared-gitops
+    spec:
+      serviceAccountName: ecr-login
+      # The node role is only reachable from the host network namespace
+      # (IMDSv2 hop limit 1); see namespaces.yaml.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ecr-login
+          # alpine/k8s ships kubectl, the AWS CLI (has ecr get-login-password),
+          # jq and curl; nothing is installed at runtime.
+          image: docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdbe7ea5747472ce115f9fbc64a4e35970ec66777f9a00
+          command: ["/bin/sh", "/scripts/ecr-login.sh"]
+          env:
+            - name: HOME
+              value: /tmp
+            # The build registry prefix; the script derives host and region.
+            - name: REGISTRY
+              value: [[ .BuildRegistry | quote ]]
+            # <namespace>/<secret> pairs, space separated.
+            - name: TARGETS
+              value: builds/registry-push
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: ecr-login-scripts
+            defaultMode: 0555
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+[[- else -]]
+# No ECR login: builds is off, or the build registry is not ECR (the org
+# creates builds/registry-push itself; see README.md).
+[[- end ]]

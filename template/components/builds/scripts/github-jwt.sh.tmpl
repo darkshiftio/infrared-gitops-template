@@ -1,0 +1,28 @@
+[[- if .BuildRegistry -]]
+#!/bin/sh
+# =============================================================================
+# github-jwt: sign the org's GitHub App JWT (RS256) with openssl.
+# =============================================================================
+# Second init container (alpine/openssl). Reads the App ID and private key the
+# app container left in /work, writes an HTTP header file for curl
+# (/work/auth-header) and deletes the key, so neither the key nor the JWT ever
+# appears in a process's argv. The JWT is valid for 9 minutes (GitHub allows
+# 10), backdated 60s for clock skew.
+# =============================================================================
+set -eu
+work=/work
+[ -e "$work/skip" ] && exit 0
+b64url() { base64 | tr -d '\n=' | tr '/+' '_-'; }
+
+app_id="$(cat "$work/app-id")"
+now="$(date +%s)"
+header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)"
+payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$app_id" | b64url)"
+signature="$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$work/private-key.pem" -binary | b64url)"
+rm -f "$work/private-key.pem"
+umask 077
+printf 'Authorization: Bearer %s.%s.%s\n' "$header" "$payload" "$signature" >"$work/auth-header"
+echo "github-jwt: signed a JWT for GitHub App $app_id"
+[[- else -]]
+# builds is off (no build registry).
+[[- end ]]

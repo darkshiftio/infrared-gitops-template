@@ -1,7 +1,8 @@
 # Rendered by the Infrared operator from infrared-gitops-template [[ .TemplateVersion ]].
 #
 # platform: the management cluster's shared components (cert-manager,
-#   external-secrets, infisical, kpack, monitoring, Argo CD itself).
+#   external-secrets, infisical, kpack, builds, monitoring, Argo CD itself),
+#   and the org's own product Applications.
 # infrared: the Infrared control plane, from its OCI chart.
 #
 # Source repos are listed explicitly: adding a component that pulls from a new
@@ -22,6 +23,10 @@ spec:
     - https://aws.github.io/eks-charts
     - https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/
     - https://victoriametrics.github.io/helm-charts/
+  # Every namespace and every cluster-scoped kind. This covers, among the
+  # rest, builds (namespaces builds and build-credentials, the Role it adds in
+  # ir-org-[[ .OrgName ]], Namespaces, and kpack's ClusterStore, ClusterStack
+  # and ClusterBuilder). Narrowing either list means listing those.
   destinations:
     - server: https://kubernetes.default.svc
       namespace: "*"

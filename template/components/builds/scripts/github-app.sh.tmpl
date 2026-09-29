@@ -1,0 +1,44 @@
+[[- if .BuildRegistry -]]
+#!/bin/sh
+# =============================================================================
+# github-app: fetch the org's GitHub App credentials for the github-token job.
+# =============================================================================
+# First init container (alpine/k8s). Reads, in $ORG_NAMESPACE:
+#   GitProvider github   .spec.github.appID, .spec.github.installationID
+#   Secret github-app    private-key.pem
+# and writes them to /work (memory) for the jwt container. The key travels
+# through a pipe into a 0600 file; it never appears in a process's argv.
+# Anything not there yet (the org is still being set up, or the App is not
+# installed) is a notice, not a failure: the job writes /work/skip, succeeds,
+# and the next run picks it up.
+# =============================================================================
+set -eu
+: "${ORG_NAMESPACE:?}"
+work=/work
+skip() {
+  echo "github-app: $*; skipping, the next run picks it up"
+  : >"$work/skip"
+  exit 0
+}
+
+provider="$(kubectl get gitproviders.infrared.darkshift.io github -n "$ORG_NAMESPACE" --ignore-not-found \
+  -o 'jsonpath={.spec.github.appID} {.spec.github.installationID}')"
+[ -n "$provider" ] || skip "no GitProvider $ORG_NAMESPACE/github"
+app_id="${provider%% *}" installation_id="${provider#* }"
+case "$app_id" in *[!0-9]*|'') skip "GitProvider $ORG_NAMESPACE/github has no spec.github.appID" ;; esac
+case "$installation_id" in *[!0-9]*|'') skip "GitProvider $ORG_NAMESPACE/github has no spec.github.installationID (App not installed yet)" ;; esac
+
+# Into a variable first, so a failed read (e.g. forbidden) fails the job
+# instead of reading as "no key yet". printf is a shell builtin: no argv.
+pem_b64="$(kubectl get secret github-app -n "$ORG_NAMESPACE" --ignore-not-found \
+  -o 'jsonpath={.data.private-key\.pem}')"
+[ -n "$pem_b64" ] || skip "no private-key.pem in Secret $ORG_NAMESPACE/github-app"
+umask 077
+printf '%s' "$pem_b64" | base64 -d >"$work/private-key.pem"
+unset pem_b64
+printf '%s' "$app_id" >"$work/app-id"
+printf '%s' "$installation_id" >"$work/installation-id"
+echo "github-app: GitHub App $app_id, installation $installation_id"
+[[- else -]]
+# builds is off (no build registry).
+[[- end ]]

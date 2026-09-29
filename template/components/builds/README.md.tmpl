@@ -1,0 +1,103 @@
+# components/builds
+[[ if not .BuildRegistry ]]
+**Builds are off on [[ .ClusterName ]]**: Infrared has no build registry (chart
+value `builds.registry`, the operator's `INFRARED_BUILD_REGISTRY`), so every
+file in this directory holds no objects and no Application points at it. Set
+the registry and re-hydrate the template to turn builds on; the rest of this
+page describes what then runs.
+[[ else ]]
+Builds push to **`[[ .BuildRegistry ]]`**.
+[[ end ]]
+Product image builds with [kpack](https://github.com/buildpacks-community/kpack)
+on the management cluster. The `builds` Application (sync wave 26, right after
+`kpack` at 25) syncs this directory:
+
+| Object | What |
+|---|---|
+| Namespace `builds` | Pod Security `restricted`. Every product's kpack `Image`, and so every build pod, lives here. |
+| Namespace `build-credentials` | ECR registries only. Pod Security `privileged`, for the ECR login job's hostNetwork (see `namespaces.yaml`). |
+| ClusterStore `paketo` | Paketo `go`, `nodejs` and `web-servers` buildpacks, pinned by tag and digest. |
+| ClusterStack `noble` | Paketo's Ubuntu 24.04 build and run images, pinned. |
+| ClusterBuilder `infrared-builder` | Order `go`, `web-servers`, `nodejs`; pushed to `<build registry>/kpack-builder`. |
+| ServiceAccount `builds/builder` | What builds and the ClusterBuilder run as; lists `registry-push` and `github-git`. |
+| CronJob `build-credentials/ecr-login` | ECR only: every 6h (and once per sync) writes `builds/registry-push` from the node's IAM role. |
+| CronJob `builds/github-token` | Every 45m (and once per sync) writes `builds/github-git` and `builds/git-credentials` from Infrared's GitHub App for the org. |
+
+## Registry credentials
+
+`builds/registry-push` is a `kubernetes.io/dockerconfigjson` Secret with the
+annotation `kpack.io/docker: <registry host>`.
+
+- **ECR** (the build registry contains `.dkr.ecr.`): `ecr-login` writes it
+  with a 12-hour token from the node's IAM role, which it reaches over the
+  host network (IMDSv2, hop limit 1). The node role needs
+  `ecr:GetAuthorizationToken` and push rights on the repositories below.
+- **Any other registry**: nothing is rendered for it. The org creates the
+  Secret itself (and later from Infisical), and keeps it current:
+
+  ```bash
+  kubectl -n builds create secret docker-registry registry-push \
+    --docker-server=<registry host> --docker-username=<user> --docker-password=<token> \
+    --dry-run=client -o yaml \
+    | kubectl annotate --local -f - kpack.io/docker=<registry host> -o yaml \
+    | kubectl apply --server-side -f -
+  ```
+
+**Repositories must exist before the first push**: ECR does not create them
+on push. Create `<build registry>/kpack-builder` (the builder image) and one
+`<build registry>/<product>` per product.
+
+## Source credentials
+
+`github-token` signs a JWT for Infrared's own GitHub App for the org (App ID
+and installation ID from the GitProvider `github`, private key from Secret
+`github-app`, key `private-key.pem`, both in namespace
+`ir-org-[[ .OrgName ]]`), exchanges it for an installation token limited to
+`contents: read` and `metadata: read`, and server-side applies:
+
+- `builds/github-git`: `kubernetes.io/basic-auth`, annotation
+  `kpack.io/git: https://github.com`. kpack clones with it.
+- `builds/git-credentials`: `service.binding/git-credentials` in the
+  git-credential format Paketo's git buildpack reads. Bind it on an Image
+  when the build itself fetches private dependencies (Go modules, npm git
+  dependencies).
+
+The App must be installed on the repositories a product builds from. Until
+the org's App is installed (no installation ID yet) the job logs a notice and
+succeeds; the next run picks it up.
+
+## What a product adds
+
+A kpack `Image` in namespace `builds`, built by `infrared-builder` as
+`builder`, tagged `<build registry>/<product>`. It lives in the gitops repo at
+`products/<product>/image.yaml` (see the repo README, "Products"):
+
+```yaml
+apiVersion: kpack.io/v1alpha2
+kind: Image
+metadata:
+  name: <product>
+  namespace: builds
+spec:
+  tag: [[ if .BuildRegistry ]][[ .BuildRegistry ]][[ else ]]<build registry>[[ end ]]/<product>
+  serviceAccountName: builder
+  builder:
+    kind: ClusterBuilder
+    name: infrared-builder
+  source:
+    git:
+      url: https://github.com/<owner>/<repo>
+      revision: main
+  build:
+    # Only when the build fetches private dependencies itself.
+    services:
+      - apiVersion: v1
+        kind: Secret
+        name: git-credentials
+    # For a UI served by nginx:
+    # env:
+    #   - name: BP_WEB_SERVER
+    #     value: nginx
+    #   - name: BP_NODE_RUN_SCRIPTS
+    #     value: build
+```

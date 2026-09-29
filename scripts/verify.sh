@@ -2,8 +2,9 @@
 # =============================================================================
 # The gate for infrared-gitops-template. Runs locally (`make verify`) and in CI.
 # =============================================================================
-# It renders the template for both cluster flavors with hack/render (the same
-# contract the operator implements) and asserts, on the rendered trees:
+# It renders the template for both cluster flavors, each with and without a
+# build registry, with hack/render (the same contract the operator implements)
+# and asserts, on the rendered trees:
 #   - the render tool builds, is gofmt-clean, vets and passes its tests
 #   - no template syntax or __cluster__ segment survives rendering
 #   - aws-load-balancer-controller exists on eks and not on k3s
@@ -11,7 +12,10 @@
 #   - every Application under registry/ is labelled
 #     app.kubernetes.io/part-of=infrared-gitops, and every component carries a
 #     sync wave, a retry block and SkipDryRunOnMissingResource
-#   - every kustomization under components/ builds
+#   - every kustomization under components/ that holds objects builds
+#   - builds: with a build registry the Application, builder and credential
+#     jobs are there (ECR login only for an ECR registry); without one no file
+#     of it holds an object
 #   - kubeconform accepts all of it (-strict; Argo CD kinds are checked
 #     against the public CRDs-catalog schemas; other CRD kinds are skipped)
 #
@@ -39,79 +43,141 @@ go vet ./... && ok "go vet" || bad "go vet"
 go test ./... >/dev/null && ok "go test" || bad "go test"
 go build -o "$work/render" ./hack/render
 
-# --- render both flavors -------------------------------------------------------
-"$work/render" -out "$work/k3s" -cluster demo -flavor k3s
-"$work/render" -out "$work/eks" -cluster demo-eks -flavor eks -region us-west-2 \
-  -repo-url git@github.com:demo-org/gitops.git -pull-secret infrared-pull
+# --- render ----------------------------------------------------------------------
+# <variant> <cluster> <flavor> <build registry> [extra render flags]
+ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
+variants=(
+  "k3s demo k3s -"
+  "eks demo-eks eks - -region us-west-2 -repo-url git@github.com:demo-org/gitops.git -pull-secret infrared-pull"
+  "k3s-builds demo-b k3s $ecr_registry"
+  "eks-builds demo-eks-b eks $ecr_registry -region us-west-2 -pull-secret infrared-pull"
+)
+for v in "${variants[@]}"; do
+  read -r variant cluster flavor registry extra <<<"$v"
+  [ "$registry" = - ] && registry=""
+  # shellcheck disable=SC2086
+  "$work/render" -out "$work/$variant" -cluster "$cluster" -flavor "$flavor" -build-registry "$registry" $extra
+done
 
-for flavor in k3s eks; do
-  out="$work/$flavor"
+# holds_objects <file>: true when the YAML file has at least one object.
+holds_objects() { [ -n "$(yq -N -r '.kind // ""' "$1" 2>/dev/null | grep -v '^$' || true)" ]; }
+
+for v in "${variants[@]}"; do
+  read -r variant cluster flavor registry _ <<<"$v"
+  [ "$registry" = - ] && registry=""
+  out="$work/$variant"
 
   # Leftover template syntax, only in files that came from a .tmpl (vendored
   # upstream files are copied verbatim and are none of our business).
   while IFS= read -r t; do
     rel="${t#template/}"; rel="${rel%.tmpl}"
-    rel="${rel//__cluster__/$( [ "$flavor" = k3s ] && echo demo || echo demo-eks )}"
-    if grep -nE '\[\[|\]\]' "$out/$rel" >/dev/null; then bad "$flavor: template syntax left in $rel"; fi
+    rel="${rel//__cluster__/$cluster}"
+    if grep -nE '\[\[|\]\]' "$out/$rel" >/dev/null; then bad "$variant: template syntax left in $rel"; fi
   done < <(find template -type f -name '*.tmpl')
-  if find "$out" -name '*__cluster__*' | grep -q .; then bad "$flavor: __cluster__ left in a path"; fi
-  if find "$out" -name '*.tmpl' | grep -q .; then bad "$flavor: a .tmpl suffix survived"; fi
+  if find "$out" -name '*__cluster__*' | grep -q .; then bad "$variant: __cluster__ left in a path"; fi
+  if find "$out" -name '*.tmpl' | grep -q .; then bad "$variant: a .tmpl suffix survived"; fi
 
   # Every file parses.
   while IFS= read -r f; do
-    yq -e 'true' "$f" >/dev/null 2>&1 || yq '.' "$f" >/dev/null 2>&1 || bad "$flavor: $f does not parse as YAML"
+    yq -e 'true' "$f" >/dev/null 2>&1 || yq '.' "$f" >/dev/null 2>&1 || bad "$variant: $f does not parse as YAML"
   done < <(find "$out" -type f \( -name '*.yaml' -o -name '*.yml' \))
 
-  cluster="$( [ "$flavor" = k3s ] && echo demo || echo demo-eks )"
   reg="$out/registry/clusters/$cluster"
-  [ -f "$reg/registry.yaml" ] || bad "$flavor: no registry.yaml"
-  [ "$(yq -r '.metadata.name' "$reg/registry.yaml")" = "registry-$cluster" ] || bad "$flavor: root Application is not registry-$cluster"
+  [ -f "$reg/registry.yaml" ] || bad "$variant: no registry.yaml"
+  [ "$(yq -r '.metadata.name' "$reg/registry.yaml")" = "registry-$cluster" ] || bad "$variant: root Application is not registry-$cluster"
 
   # Application conventions.
   for f in "$reg/registry.yaml" "$reg"/components/*.yaml; do
-    kinds="$(yq -N -r '.kind // ""' "$f" | grep -v '^$' || true)"
-    [ -z "$kinds" ] && continue
+    holds_objects "$f" || continue
     [ "$(yq -N -r '.metadata.labels["app.kubernetes.io/part-of"]' "$f")" = "infrared-gitops" ] \
-      || bad "$flavor: $(basename "$f") lacks app.kubernetes.io/part-of: infrared-gitops"
-    [ "$(yq -N -r '.spec.syncPolicy.retry.limit' "$f")" = "5" ] || bad "$flavor: $(basename "$f") retry.limit is not 5"
+      || bad "$variant: $(basename "$f") lacks app.kubernetes.io/part-of: infrared-gitops"
+    [ "$(yq -N -r '.spec.syncPolicy.retry.limit' "$f")" = "5" ] || bad "$variant: $(basename "$f") retry.limit is not 5"
     if [ "$f" != "$reg/registry.yaml" ]; then
       [ "$(yq -N -r '.metadata.annotations["argocd.argoproj.io/sync-wave"] // ""' "$f")" != "" ] \
-        || bad "$flavor: $(basename "$f") has no sync wave"
+        || bad "$variant: $(basename "$f") has no sync wave"
       yq -N -e '.spec.syncPolicy.syncOptions[] | select(. == "SkipDryRunOnMissingResource=true")' "$f" >/dev/null \
-        || bad "$flavor: $(basename "$f") lacks SkipDryRunOnMissingResource=true"
+        || bad "$variant: $(basename "$f") lacks SkipDryRunOnMissingResource=true"
     fi
   done
 
   # Flavor-specific components.
   alb="$(yq -N -r '.kind // ""' "$reg/components/aws-load-balancer-controller.yaml" | grep -c Application || true)"
   if [ "$flavor" = eks ]; then
-    [ "$alb" = 1 ] && ok "eks: aws-load-balancer-controller present" || bad "eks: aws-load-balancer-controller missing"
+    [ "$alb" = 1 ] && ok "$variant: aws-load-balancer-controller present" || bad "$variant: aws-load-balancer-controller missing"
     [ "$(yq -r '.spec.source.helm.valuesObject.imagePullSecrets[0].name' "$reg/components/infrared.yaml")" = infrared-pull ] \
-      || bad "eks: imagePullSecrets not rendered into the infrared Application"
+      || bad "$variant: imagePullSecrets not rendered into the infrared Application"
   else
-    [ "$alb" = 0 ] && ok "k3s: aws-load-balancer-controller absent" || bad "k3s: aws-load-balancer-controller rendered"
+    [ "$alb" = 0 ] && ok "$variant: aws-load-balancer-controller absent" || bad "$variant: aws-load-balancer-controller rendered"
     [ "$(yq -r '.spec.source.helm.valuesObject.imagePullSecrets | length' "$reg/components/infrared.yaml")" = 0 ] \
-      || bad "k3s: imagePullSecrets should be empty"
+      || bad "$variant: imagePullSecrets should be empty"
   fi
+  [ "$(yq -r '.spec.source.helm.valuesObject.builds.registry' "$reg/components/infrared.yaml")" = "$registry" ] \
+    || bad "$variant: infrared Application builds.registry is not \"$registry\""
 
-  # Kustomize builds.
-  mkdir -p "$work/$flavor-built"
+  # Kustomize builds (a component that renders to comments only is skipped).
+  mkdir -p "$work/$variant-built"
   for k in "$out"/components/*/kustomization.yaml; do
     d="$(dirname "$k")"; name="$(basename "$d")"
-    if kubectl kustomize "$d" > "$work/$flavor-built/$name.yaml"; then :; else bad "$flavor: kustomize build components/$name"; fi
+    holds_objects "$k" || continue
+    if kubectl kustomize "$d" > "$work/$variant-built/$name.yaml"; then :; else bad "$variant: kustomize build components/$name"; fi
   done
+
+  # builds: all of it with a build registry, none of it without.
+  if [ -n "$registry" ]; then
+    app="$reg/components/builds.yaml"
+    [ "$(yq -N -r '.metadata.name' "$app")" = builds ] && [ "$(yq -N -r '.metadata.annotations["argocd.argoproj.io/sync-wave"]' "$app")" = 26 ] \
+      && [ "$(yq -N -r '.spec.source.path' "$app")" = components/builds ] \
+      && ok "$variant: builds Application (wave 26)" || bad "$variant: builds Application missing or wrong"
+    b="$work/$variant-built/builds.yaml"
+    if [ -s "$b" ]; then
+      has() { [ -n "$(yq -N -r "select(.kind == \"$1\" and .metadata.name == \"$2\") | .metadata.name" "$b")" ]; }
+      for want in Namespace/builds Namespace/build-credentials ClusterStore/paketo ClusterStack/noble \
+          ClusterBuilder/infrared-builder ServiceAccount/builder CronJob/github-token Job/github-token-bootstrap \
+          CronJob/ecr-login Job/ecr-login-bootstrap Role/builds-github-token; do
+        has "${want%%/*}" "${want#*/}" || bad "$variant: builds lacks $want"
+      done
+      [ "$(yq -N -r 'select(.kind == "ClusterBuilder") | .spec.tag' "$b")" = "$registry/kpack-builder" ] \
+        || bad "$variant: ClusterBuilder tag is not $registry/kpack-builder"
+      [ "$(yq -N -r 'select(.kind == "Role" and .metadata.name == "builds-github-token") | .metadata.namespace' "$b")" = ir-org-demo-org ] \
+        || bad "$variant: github App Role is not in ir-org-demo-org"
+      [ "$(yq -N -r 'select(.kind == "Namespace" and .metadata.name == "builds") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$b")" = restricted ] \
+        || bad "$variant: namespace builds is not restricted"
+      if grep -nE '\| *kubectl apply' "$b" | grep -v -- '--server-side' | grep -q .; then bad "$variant: a client-side kubectl apply in builds"; fi
+      ok "$variant: builds component complete"
+    else
+      bad "$variant: components/builds built nothing"
+    fi
+  else
+    left="$(for f in "$reg/components/builds.yaml" $(find "$out/components/builds" -name '*.yaml'); do holds_objects "$f" && echo "$f"; done || true)"
+    [ -z "$left" ] && ok "$variant: no build registry, no builds objects" || bad "$variant: builds objects rendered without a build registry: $left"
+    [ ! -e "$work/$variant-built/builds.yaml" ] || bad "$variant: components/builds was built without a build registry"
+  fi
 
   # Schemas.
   if kubeconform -strict -ignore-missing-schemas -summary \
       -schema-location default \
       -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-      "$reg" "$work/$flavor-built"; then
-    ok "$flavor: kubeconform"
+      "$reg" "$work/$variant-built"; then
+    ok "$variant: kubeconform"
   else
-    bad "$flavor: kubeconform"
+    bad "$variant: kubeconform"
   fi
-  ok "$flavor: rendered and checked ($(find "$out" -type f | wc -l | tr -d ' ') files)"
+  ok "$variant: rendered and checked ($(find "$out" -type f | wc -l | tr -d ' ') files)"
 done
+
+# --- a build registry that is not ECR ---------------------------------------------
+# No ECR login job and no privileged namespace; builds/registry-push is the org's.
+"$work/render" -out "$work/ghcr" -cluster demo-g -flavor k3s -build-registry ghcr.io/demo-org >/dev/null
+if kubectl kustomize "$work/ghcr/components/builds" > "$work/ghcr-builds.yaml"; then
+  if grep -qE 'ecr-login|build-credentials' "$work/ghcr-builds.yaml"; then
+    bad "ghcr: ECR login rendered for a non-ECR registry"
+  else
+    [ "$(yq -N -r 'select(.kind == "ClusterBuilder") | .spec.tag' "$work/ghcr-builds.yaml")" = ghcr.io/demo-org/kpack-builder ] \
+      && ok "ghcr: builds without ECR login" || bad "ghcr: ClusterBuilder tag wrong"
+  fi
+else
+  bad "ghcr: kustomize build components/builds"
+fi
 
 if [ "$fail" -ne 0 ]; then echo "verify: FAILED" >&2; exit 1; fi
 echo "verify: all checks passed"

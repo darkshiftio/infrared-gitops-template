@@ -1,0 +1,64 @@
+[[- if .BuildRegistry -]]
+#!/bin/sh
+# =============================================================================
+# github-token: mint an installation token, write the build Secrets.
+# =============================================================================
+# Main container (alpine/k8s). Exchanges the JWT for an installation access
+# token (1 hour, contents:read and metadata:read only) and server-side applies,
+# in namespace builds:
+#
+#   github-git       kubernetes.io/basic-auth, username x-access-token,
+#                    annotation kpack.io/git: https://github.com
+#                    -> kpack clones the org's private repositories
+#   git-credentials  service.binding/git-credentials, keys type, context,
+#                    credentials (git-credential format, as paketo-buildpacks/git
+#                    expects) -> private Go modules / npm git dependencies
+#                    inside the build (bind it on the Image, see README.md)
+#
+# Server-side apply only: a client-side `kubectl apply` would copy the Secret's
+# data into the last-applied-configuration annotation. The token goes from curl
+# to a file to `jq --rawfile`; never into argv.
+# =============================================================================
+set -eu
+work=/work
+if [ -e "$work/skip" ]; then
+  echo "github-token: no GitHub App credentials yet; nothing to do"
+  exit 0
+fi
+installation_id="$(cat "$work/installation-id")"
+
+curl -fsS -X POST \
+  -H @"$work/auth-header" \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  -d '{"permissions":{"contents":"read","metadata":"read"}}' \
+  "https://api.github.com/app/installations/$installation_id/access_tokens" >"$work/token.json"
+rm -f "$work/auth-header"
+jq -j '.token // empty' "$work/token.json" >"$work/token"
+jq -r '"github-token: token expires at \(.expires_at)"' "$work/token.json"
+rm -f "$work/token.json"
+[ -s "$work/token" ] || { echo "github-token: no token in the GitHub response" >&2; exit 1; }
+
+jq -n --rawfile t "$work/token" '{
+  apiVersion: "v1", kind: "Secret", type: "kubernetes.io/basic-auth",
+  metadata: {name: "github-git", namespace: "builds",
+    labels: {"app.kubernetes.io/managed-by": "github-token"},
+    annotations: {"kpack.io/git": "https://github.com"}},
+  data: {username: ("x-access-token" | @base64), password: ($t | @base64)}
+}' | kubectl apply --server-side --force-conflicts --field-manager=github-token -f -
+
+jq -n --rawfile t "$work/token" '{
+  apiVersion: "v1", kind: "Secret", type: "service.binding/git-credentials",
+  metadata: {name: "git-credentials", namespace: "builds",
+    labels: {"app.kubernetes.io/managed-by": "github-token"}},
+  data: {
+    type: ("git-credentials" | @base64),
+    context: ("https://github.com" | @base64),
+    credentials: ("protocol=https\nhost=github.com\nusername=x-access-token\npassword=\($t)\n" | @base64)
+  }
+}' | kubectl apply --server-side --force-conflicts --field-manager=github-token -f -
+rm -f "$work/token"
+echo "github-token: refreshed builds/github-git and builds/git-credentials"
+[[- else -]]
+# builds is off (no build registry).
+[[- end ]]

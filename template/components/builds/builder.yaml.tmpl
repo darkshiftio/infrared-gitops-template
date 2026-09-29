@@ -1,0 +1,112 @@
+[[- if .BuildRegistry -]]
+# =============================================================================
+# The ServiceAccount builds run with, and the buildpacks they use.
+# =============================================================================
+# `builder` (namespace builds) is the serviceAccountName of every product's
+# kpack Image, and the ClusterBuilder pushes the builder image with it too.
+# Neither Secret it lists is written by hand in the usual case:
+#   registry-push  kubernetes.io/dockerconfigjson, annotation
+#                  kpack.io/docker: <registry host>.
+[[- if contains ".dkr.ecr." .BuildRegistry ]]
+#                  A 12-hour ECR token from the node role, refreshed every 6h
+#                  by build-credentials/ecr-login (ecr-login.yaml).
+[[- else ]]
+#                  This registry is not ECR: the org creates builds/registry-push
+#                  itself (README.md, "Registry credentials").
+[[- end ]]
+#   github-git     kubernetes.io/basic-auth (x-access-token), annotation
+#                  kpack.io/git: https://github.com. A 1-hour installation token
+#                  of Infrared's GitHub App for the org, refreshed every 45m by
+#                  builds/github-token (github-token.yaml).
+# imagePullSecrets lets kpack (and the kubelet) read the builder it pushed.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: builder
+  namespace: builds
+secrets:
+  - name: registry-push
+  - name: github-git
+imagePullSecrets:
+  - name: registry-push
+---
+# =============================================================================
+# The buildpacks kpack may use, pinned by tag AND digest.
+# =============================================================================
+# Versions are the ones Paketo's own Ubuntu Noble builder ships
+# (github.com/paketo-buildpacks/ubuntu-noble-builder, builders/builder/builder.toml,
+# read 2026-09-28). Digests from `crane digest docker.io/paketobuildpacks/<bp>:<v>`.
+# To bump: change tag and digest together, in one pull request.
+# =============================================================================
+apiVersion: kpack.io/v1alpha2
+kind: ClusterStore
+metadata:
+  name: paketo
+spec:
+  sources:
+    - image: docker.io/paketobuildpacks/go:4.22.0@sha256:fd6781cc35b94c4f7c84b5c4085f80b282d5a5d296c40512b0727603937bd951
+    - image: docker.io/paketobuildpacks/nodejs:10.13.0@sha256:370e0352f0131a328b8fde4fcef208b377e8617ff686aa76932213e18881bbdf
+    - image: docker.io/paketobuildpacks/web-servers:4.13.0@sha256:b68057a454b2742d09ce8d3a228944c3523e6f7c835808e573ac77843764140a
+---
+# =============================================================================
+# Ubuntu 24.04 (Noble): Paketo's current stack.
+# =============================================================================
+# The stack id `io.buildpacks.stacks.noble` is the image's own
+# `io.buildpacks.stack.id` label. The run image is pinned, so kpack does NOT
+# rebase images onto a newer run image on its own: a stack bump is a reviewed
+# pull request, after which kpack rebases every Image (no rebuild needed).
+# =============================================================================
+apiVersion: kpack.io/v1alpha2
+kind: ClusterStack
+metadata:
+  name: noble
+spec:
+  id: io.buildpacks.stacks.noble
+  buildImage:
+    image: docker.io/paketobuildpacks/ubuntu-noble-build:0.0.136@sha256:d516afab8a0e034fb35a78dc1db080e6e46c03c5a46de5588f78b377c25694a7
+  runImage:
+    image: docker.io/paketobuildpacks/ubuntu-noble-run:0.0.136@sha256:1fc3397ff5fb46923b8dd91548b9196ecc7d56fd7ea79d9814cef8e3bcc3450a
+---
+# =============================================================================
+# `infrared-builder`: Go services, and web UIs (a Node build served by nginx).
+# =============================================================================
+# Order groups, first match wins:
+#   1. go           Go services
+#   2. web-servers  a UI: BP_WEB_SERVER=nginx on the Image makes it detect.
+#                   The web-servers composite already carries node-engine,
+#                   npm-install and node-run-script, so the Node build
+#                   (BP_NODE_RUN_SCRIPTS=build) happens inside this group.
+#   3. nodejs       a plain Node server.
+# web-servers and nodejs are separate groups rather than one: both composites
+# contain node-engine and npm-install, and one group would run the install
+# twice. This is also the order Paketo's own builder uses.
+#
+# The builder image is pushed to [[ .BuildRegistry ]]/kpack-builder; that
+# repository must exist (ECR does not create repositories on push).
+# =============================================================================
+apiVersion: kpack.io/v1alpha2
+kind: ClusterBuilder
+metadata:
+  name: infrared-builder
+spec:
+  tag: [[ .BuildRegistry ]]/kpack-builder
+  serviceAccountRef:
+    name: builder
+    namespace: builds
+  stack:
+    kind: ClusterStack
+    name: noble
+  store:
+    kind: ClusterStore
+    name: paketo
+  order:
+    - group:
+        - id: paketo-buildpacks/go
+    - group:
+        - id: paketo-buildpacks/web-servers
+    - group:
+        - id: paketo-buildpacks/nodejs
+[[- else -]]
+# builds is off (no build registry): no builder.
+[[- end ]]

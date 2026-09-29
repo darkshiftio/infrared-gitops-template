@@ -19,8 +19,10 @@ registry/clusters/[[ .ClusterName ]]/
 components/
   appprojects/             AppProjects platform and infrared
   argocd/                  Argo CD, vendored and pinned; Argo CD manages itself from here
+  builds/                  kpack builder and build credentials[[ if not .BuildRegistry ]] (off: no build registry)[[ end ]]
   infisical/               creates the Secret infisical/infisical-secrets on first sync
   kpack/                   kpack, vendored and pinned
+products/                  yours: one directory per product (see "Products")
 ```
 
 ## What runs here, in sync-wave order
@@ -35,6 +37,9 @@ components/
 [[- end ]]
 | 15 | `infisical` | Infisical, self-hosted, with bundled postgres and redis |
 | 25 | `kpack` | kpack, the in-cluster image builder |
+[[- if .BuildRegistry ]]
+| 26 | `builds` | ClusterBuilder `infrared-builder` and build credentials; pushes to `[[ .BuildRegistry ]]` |
+[[- end ]]
 | 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana |
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
 | 100 | `argocd` | Argo CD, managing itself |
@@ -61,6 +66,36 @@ kubectl -n monitoring port-forward svc/victoria-metrics-k8s-stack-grafana 3000:8
 # Infisical
 kubectl -n infisical port-forward svc/infisical-infisical-standalone-infisical 8082:8080
 ```
+
+## Products
+
+A product's gitops lives in **`products/<product>/`**:
+
+```
+products/<product>/
+  image.yaml               the kpack Image that builds it (namespace builds)
+  <zone>/                  one directory per zone it is deployed to
+```
+[[ if .BuildRegistry ]]
+`image.yaml` is a kpack `Image` in namespace `builds` with
+`serviceAccountName: builder`, builder ClusterBuilder `infrared-builder` and
+tag `[[ .BuildRegistry ]]/<product>`; see `components/builds/README.md`. The
+registry repository `[[ .BuildRegistry ]]/<product>` must exist first (ECR
+does not create repositories on push).
+[[ else ]]
+Builds are off on this cluster (no build registry), so there is nothing to
+build `image.yaml` yet; see `components/builds/README.md`.
+[[ end ]]
+Add the product's Applications next to Infrared's, in
+`registry/clusters/[[ .ClusterName ]]/components/`, with file names starting
+**`product-<product>-`** (e.g. `product-shop-image.yaml`,
+`product-shop-dev.yaml`), project `platform`. The root Application syncs
+them like any other.
+
+Infrared re-renders its template into this repo when it upgrades it. That
+hydration writes only the files the template renders: it never deletes or
+overwrites a file it does not render, so `product-*` Applications are safe,
+and it never touches `products/`.
 
 ## Upgrading Infrared
 

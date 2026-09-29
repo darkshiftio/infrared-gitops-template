@@ -1,0 +1,44 @@
+[[- if .BuildRegistry -]]
+# Product image builds with kpack (components/builds): the ClusterStore,
+# ClusterStack and ClusterBuilder `infrared-builder`, namespace `builds` where
+# products' kpack Images live, and the jobs that keep its registry and GitHub
+# credentials fresh. Wave 26: right after kpack (25), whose CRDs it uses.
+# Builds push to [[ .BuildRegistry ]].
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: builds
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "26"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/builds
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: builds
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The namespaces are objects of components/builds, not CreateNamespace.
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# builds (kpack product image builds) is off: Infrared has no build registry
+# (chart value builds.registry, INFRARED_BUILD_REGISTRY), so this file holds no
+# objects. Set it and re-hydrate the template to turn builds on.
+[[- end ]]

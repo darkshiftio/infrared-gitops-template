@@ -46,6 +46,11 @@ spec:
           existingSecret: infrared-session
         mcp:
           existingSecret: infrared-mcp-token
+        # The registry prefix kpack builds product images into; empty leaves
+        # the builds component out. Rendered from the operator's own
+        # INFRARED_BUILD_REGISTRY so adoption keeps it.
+        builds:
+          registry: [[ .BuildRegistry | quote ]]
   destination:
     server: https://kubernetes.default.svc
     namespace: [[ .InfraredNamespace ]]

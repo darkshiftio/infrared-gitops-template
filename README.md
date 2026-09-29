@@ -16,9 +16,13 @@ the operator relies on; change it only together with the operator.
    preserving relative paths.
 2. A file whose name ends in **`.tmpl`** is a Go `text/template` with
    delimiters **`[[` and `]]`**, so Helm's and Argo CD's `{{ }}` pass through
-   untouched. It is executed with `missingkey=error` and **no function map**:
-   only text/template's builtins (`if`, `eq`, `printf`, …) are available. The
-   `.tmpl` suffix is stripped from the output path.
+   untouched. It is executed with `missingkey=error`, text/template's builtins
+   (`if`, `eq`, `printf`, …) and exactly these helpers, needle first:
+   `contains`, `hasPrefix`, `hasSuffix` (e.g.
+   `[[ if contains ".dkr.ecr." .BuildRegistry ]]`), `trimPrefix`,
+   `trimSuffix`, `replace old new s`, `lower`, `upper`, `quote`,
+   `default def v`. Nothing else (no sprig). The `.tmpl` suffix is stripped
+   from the output path.
 3. Every other file is **copied byte for byte**.
 4. Any path **segment exactly equal to `__cluster__`** becomes the cluster
    name (the `.tmpl` suffix is stripped from the path first).
@@ -46,6 +50,10 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.InfraredChartVersion` | `0.1.0` | the `infrared` chart version to pin |
 | `.InfraredNamespace` | `infrared` | where the release lives |
 | `.ImagePullSecret` | `` or `infrared-pull` | name of a pull Secret in `.InfraredNamespace`, empty for none |
+| `.BuildRegistry` (JSON `buildRegistry`) | `` or `123456789012.dkr.ecr.us-east-1.amazonaws.com/acme` | registry prefix kpack pushes product images to (the operator's `INFRARED_BUILD_REGISTRY`, chart value `builds.registry`); empty turns builds off |
+
+The operator's JSON uses camelCase names (`clusterName`, …); encoding/json
+matches them case-insensitively, so `hack/render -data` reads either.
 
 ### What the operator does after rendering
 
@@ -90,6 +98,7 @@ Application never deletes the CRDs and with them every Infrared object.
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
+| 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared` | `.InfraredChartVersion` |
 | 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
@@ -106,6 +115,34 @@ be Healthy.
 is by port-forward), `kustomize.buildOptions: --enable-helm` and
 `application.resourceTrackingMethod: annotation`. The `argocd` Application
 does not prune automatically.
+
+### Builds
+
+With `.BuildRegistry` set, the wave-26 `builds` Application syncs
+`components/builds`: namespaces `builds` (Pod Security restricted, where
+products' kpack Images live) and, for ECR, `build-credentials` (privileged,
+for the ECR login job's hostNetwork), ClusterStore `paketo`, ClusterStack
+`noble`, ClusterBuilder `infrared-builder` (tag `<BuildRegistry>/kpack-builder`),
+ServiceAccount `builds/builder`, and two credential jobs: `ecr-login` (ECR
+only, node IAM role, every 6h) writes `builds/registry-push`, and
+`github-token` (Infrared's GitHub App for the org, every 45m) writes
+`builds/github-git` and `builds/git-credentials`. For a non-ECR registry the
+org creates `builds/registry-push` itself. With `.BuildRegistry` empty, every
+file of the component and `builds.yaml` render to a comment only.
+`components/builds/README.md` is the operator's and org's reference.
+
+The `infrared` Application passes `builds.registry: .BuildRegistry` to the
+chart, so Argo CD's render keeps the operator's `INFRARED_BUILD_REGISTRY`.
+
+### Products
+
+A product's gitops lives in `products/<product>/` of the gitops repo
+(`image.yaml`, the kpack Image, and one directory per zone). The org adds its
+Applications in `registry/clusters/<cluster>/components/` with file names
+starting `product-<product>-`. The template never renders into `products/`
+or a `product-*` name, and hydration never deletes or overwrites a file it
+does not render, so a re-hydration leaves both alone. Keep it that way: no
+template file may be named `product-*` or live under `products/`.
 
 ### Infisical: known MVP limitations
 
@@ -126,15 +163,19 @@ does not prune automatically.
 ```bash
 make render CLUSTER=demo FLAVOR=k3s     # renders into out/
 make render CLUSTER=demo FLAVOR=eks REGION=us-west-2
+make render BUILD_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 make verify                             # the CI gate
 ```
 
 `hack/render` (Go, stdlib only) implements the contract exactly; run it with
 `-h` for every Data flag, or `-data file.json` to render from the same JSON
-the operator uses. `scripts/verify.sh` renders both flavors and checks: no
-template syntax or `__cluster__` left, flavor-specific components, YAML
-parses, Application conventions, every `components/*` kustomization builds,
-and kubeconform (`-strict`, Argo CD kinds against the public CRDs-catalog).
+the operator uses. `scripts/verify.sh` renders both flavors, each with and without a build
+registry (plus a non-ECR one), and checks: no template syntax or
+`__cluster__` left, flavor-specific components, YAML parses, Application
+conventions, every non-empty `components/*` kustomization builds, builds is
+fully present with a registry (ECR login only for ECR) and renders no objects
+without one, and kubeconform (`-strict`, Argo CD kinds against the public
+CRDs-catalog).
 
 Bump upstream with `scripts/vendor-argocd.sh` / `scripts/vendor-kpack.sh`
 (edit the version at the top), or by editing a chart `targetRevision`.
