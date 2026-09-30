@@ -101,7 +101,7 @@ and it never touches `products/`.
 ## Upgrading Infrared
 
 Change `targetRevision` in `registry/clusters/[[ .ClusterName ]]/components/infrared.yaml`
-to the new chart version, in a pull request (a pin PR). Do not run
+to the new chart version, in a pull request. Do not run
 `helm upgrade`: Argo CD owns the release now and would revert it.
 
 ## Secrets
