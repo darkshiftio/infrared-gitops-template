@@ -20,10 +20,21 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
+  # Argo CD adds its own finalizers to child Applications, e.g.
+  # pre-delete-finalizer.argocd.argoproj.io when a chart has pre-delete hooks
+  # (victoria-metrics-k8s-stack). Without this the root app would be OutOfSync
+  # forever: self-heal strips them and Argo CD adds them back.
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      jsonPointers:
+        - /metadata/finalizers
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
     retry:
       limit: 5
       backoff:
