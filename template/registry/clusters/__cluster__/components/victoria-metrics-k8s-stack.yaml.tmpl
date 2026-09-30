@@ -32,7 +32,8 @@ spec:
               memory: 64Mi
         vmsingle:
           spec:
-            retentionPeriod: "14d"
+            # 30 days covers 28-day SLO windows; about 6-7 GB for one management cluster.
+            retentionPeriod: "30d"
             resources:
               requests:
                 cpu: 100m
