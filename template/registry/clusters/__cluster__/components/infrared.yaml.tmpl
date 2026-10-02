@@ -41,13 +41,44 @@ spec:
           managementCluster:
             name: [[ .ClusterName ]]
           gitops:
-            templateVersion: [[ .TemplateVersion ]]
+            templateVersion: [[ if hasPrefix "v" .TemplateVersion ]][[ .TemplateVersion ]][[ else ]][[ .TemplateVersion | quote ]][[ end ]]
 [[- if .ImagePullSecret ]]
           imagePullSecrets:
             - name: [[ .ImagePullSecret ]]
 [[- else ]]
           imagePullSecrets: []
 [[- end ]]
+[[- if .ImageRegistry ]]
+          # Infrared's own images as the install pinned them (the operator's
+          # INFRARED_IMAGE_REGISTRY and INFRARED_IMAGES), so adoption keeps every
+          # image in that registry, by digest.
+          image:
+            registry: [[ .ImageRegistry | quote ]]
+[[- end ]]
+[[- with index .Images "operator" ]][[ if or .Tag .Digest ]]
+          operator:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
+[[- with index .Images "api" ]][[ if or .Tag .Digest ]]
+          api:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
+[[- with index .Images "ui" ]][[ if or .Tag .Digest ]]
+          ui:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
+[[- with index .Images "runner" ]][[ if or .Tag .Digest ]]
+          runner:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
           setup:
             existingSecret: infrared-setup
           session:
@@ -57,6 +88,11 @@ spec:
             # The bearer token MCP clients send to /mcp.
             access:
               existingSecret: infrared-mcp-access
+[[- with index .Images "mcp" ]][[ if or .Tag .Digest ]]
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
           # The registry prefix kpack builds product images into; empty leaves
           # the builds component out. Rendered from the operator's own
           # INFRARED_BUILD_REGISTRY so adoption keeps it.

@@ -6,13 +6,20 @@ OUT     ?= out
 # $INFRARED_BUILD_REGISTRY); empty leaves the builds component out. E.g.
 # make render BUILD_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 BUILD_REGISTRY ?= $(INFRARED_BUILD_REGISTRY)
+# EDGE: "" or traefik (as before), or gateway; PLATFORM_DOMAIN and INFRARED_HOST
+# are the names a gateway edge serves. E.g.
+# make render EDGE=gateway PLATFORM_DOMAIN=preprod.example.com INFRARED_HOST=infrared.preprod.example.com
+EDGE            ?=
+PLATFORM_DOMAIN ?=
+INFRARED_HOST   ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
 ## render: render template/ into $(OUT)/ (make render CLUSTER=demo FLAVOR=k3s)
 render:
 	rm -rf $(OUT)
-	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)"
+	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
+		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)"
 
 ## verify: the gate CI runs
 verify:

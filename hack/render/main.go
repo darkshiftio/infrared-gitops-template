@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 )
@@ -49,6 +50,69 @@ type Data struct {
 	// 123456789012.dkr.ecr.us-east-1.amazonaws.com/acme; empty leaves the
 	// builds component out.
 	BuildRegistry string `json:"buildRegistry"`
+
+	// The fields below are the operator's, with JSON names equal to their Go
+	// names. The zero value of each renders exactly what the template rendered
+	// before it existed.
+
+	// Edge is the Installation's spec.edge: "" or "traefik" (as before), or
+	// "gateway", which turns on the edge components (Envoy Gateway, external-dns
+	// and Cloudflare's origin issuer). "" means traefik.
+	Edge string `json:"Edge"`
+	// PlatformDomain is the Installation's spec.previews.domain, "" when unset.
+	// In gateway mode zones answer at <zone>.<PlatformDomain>.
+	PlatformDomain string `json:"PlatformDomain"`
+	// InfraredHost is the host of the Installation's spec.previews.signInURL,
+	// "" when unset. In gateway mode it is Infrared's own name.
+	InfraredHost string `json:"InfraredHost"`
+	// ImageRegistry is the registry of Infrared's own images (the operator's
+	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
+	ImageRegistry string `json:"ImageRegistry"`
+	// Images is each component's pin (INFRARED_IMAGES), keyed by operator, api,
+	// ui, mcp and runner; empty keeps the chart's.
+	Images map[string]ImageRef `json:"Images"`
+	// Cloud is "", "aws" or "linode", from the nodes' providerID prefix.
+	Cloud string `json:"Cloud"`
+	// SubstrateCapable is the operator's preflight result; while it is false the
+	// template leaves Substrate out.
+	SubstrateCapable bool `json:"SubstrateCapable"`
+}
+
+// ImageRef is one component's image pin: Images["api"].Tag and .Digest.
+type ImageRef struct {
+	Tag    string `json:"Tag"`
+	Digest string `json:"Digest"`
+}
+
+// Edges and Clouds are the values Edge and Cloud may take.
+var (
+	Edges  = []string{"", "traefik", "gateway"}
+	Clouds = []string{"", "aws", "linode"}
+)
+
+// imagesFlag reads -images: a JSON object of component to {"tag", "digest"},
+// as the operator's INFRARED_IMAGES carries it.
+type imagesFlag struct{ m *map[string]ImageRef }
+
+func (f imagesFlag) String() string {
+	if f.m == nil || len(*f.m) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(*f.m)
+	return string(b)
+}
+
+func (f imagesFlag) Set(s string) error {
+	m := map[string]ImageRef{}
+	if strings.TrimSpace(s) != "" {
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&m); err != nil {
+			return fmt.Errorf("-images: %w", err)
+		}
+	}
+	*f.m = m
+	return nil
 }
 
 // Funcs are the helpers templates may use beyond text/template's builtins.
@@ -104,6 +168,13 @@ func main() {
 	flag.StringVar(&d.ImagePullSecret, "pull-secret", "", "ImagePullSecret (empty for none)")
 	flag.StringVar(&d.BuildRegistry, "build-registry", os.Getenv("INFRARED_BUILD_REGISTRY"),
 		"BuildRegistry, the registry prefix product images are built into (default $INFRARED_BUILD_REGISTRY; empty leaves builds out)")
+	flag.StringVar(&d.Edge, "edge", "", `Edge: "", "traefik" (both as before) or "gateway" (Envoy Gateway, external-dns, origin issuer)`)
+	flag.StringVar(&d.PlatformDomain, "platform-domain", "", "PlatformDomain: zones answer at <zone>.<domain> in gateway mode (empty for none)")
+	flag.StringVar(&d.InfraredHost, "infrared-host", "", "InfraredHost: Infrared's own name in gateway mode, the sign-in URL's host (empty for none)")
+	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
+	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
+	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws" or "linode"`)
+	flag.BoolVar(&d.SubstrateCapable, "substrate-capable", false, "SubstrateCapable: the preflight's result")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -121,7 +192,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q)\n", n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry)
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q)\n", n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge)
 }
 
 // mergeDataFile loads a JSON Data file, then re-applies every flag the user set
@@ -142,21 +213,28 @@ func mergeDataFile(d *Data, path string) error {
 	}
 	*d = fromFile
 	overrides := map[string]func(){
-		"cluster":          func() { d.ClusterName = explicit.ClusterName },
-		"flavor":           func() { d.ClusterFlavor = explicit.ClusterFlavor },
-		"region":           func() { d.Region = explicit.Region },
-		"org":              func() { d.OrgName = explicit.OrgName },
-		"repo-owner":       func() { d.GitopsRepoOwner = explicit.GitopsRepoOwner },
-		"repo-name":        func() { d.GitopsRepoName = explicit.GitopsRepoName },
-		"repo-url":         func() { d.GitopsRepoURL = explicit.GitopsRepoURL },
-		"branch":           func() { d.DefaultBranch = explicit.DefaultBranch },
-		"template-version": func() { d.TemplateVersion = explicit.TemplateVersion },
-		"infrared-version": func() { d.InfraredVersion = explicit.InfraredVersion },
-		"chart-repo":       func() { d.InfraredChartRepo = explicit.InfraredChartRepo },
-		"chart-version":    func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
-		"namespace":        func() { d.InfraredNamespace = explicit.InfraredNamespace },
-		"pull-secret":      func() { d.ImagePullSecret = explicit.ImagePullSecret },
-		"build-registry":   func() { d.BuildRegistry = explicit.BuildRegistry },
+		"cluster":           func() { d.ClusterName = explicit.ClusterName },
+		"flavor":            func() { d.ClusterFlavor = explicit.ClusterFlavor },
+		"region":            func() { d.Region = explicit.Region },
+		"org":               func() { d.OrgName = explicit.OrgName },
+		"repo-owner":        func() { d.GitopsRepoOwner = explicit.GitopsRepoOwner },
+		"repo-name":         func() { d.GitopsRepoName = explicit.GitopsRepoName },
+		"repo-url":          func() { d.GitopsRepoURL = explicit.GitopsRepoURL },
+		"branch":            func() { d.DefaultBranch = explicit.DefaultBranch },
+		"template-version":  func() { d.TemplateVersion = explicit.TemplateVersion },
+		"infrared-version":  func() { d.InfraredVersion = explicit.InfraredVersion },
+		"chart-repo":        func() { d.InfraredChartRepo = explicit.InfraredChartRepo },
+		"chart-version":     func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
+		"namespace":         func() { d.InfraredNamespace = explicit.InfraredNamespace },
+		"pull-secret":       func() { d.ImagePullSecret = explicit.ImagePullSecret },
+		"build-registry":    func() { d.BuildRegistry = explicit.BuildRegistry },
+		"edge":              func() { d.Edge = explicit.Edge },
+		"platform-domain":   func() { d.PlatformDomain = explicit.PlatformDomain },
+		"infrared-host":     func() { d.InfraredHost = explicit.InfraredHost },
+		"image-registry":    func() { d.ImageRegistry = explicit.ImageRegistry },
+		"images":            func() { d.Images = explicit.Images },
+		"cloud":             func() { d.Cloud = explicit.Cloud },
+		"substrate-capable": func() { d.SubstrateCapable = explicit.SubstrateCapable },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -182,6 +260,17 @@ func validate(d Data) error {
 	}
 	if strings.HasPrefix(d.InfraredChartRepo, "oci://") {
 		errs = append(errs, errors.New("InfraredChartRepo must not carry oci:// (Argo CD OCI helm repos take the bare host/path)"))
+	}
+	if !slices.Contains(Edges, d.Edge) {
+		errs = append(errs, fmt.Errorf("Edge must be one of %q, got %q", Edges, d.Edge))
+	}
+	if !slices.Contains(Clouds, d.Cloud) {
+		errs = append(errs, fmt.Errorf("Cloud must be one of %q, got %q", Clouds, d.Cloud))
+	}
+	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
+		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
+			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
+		}
 	}
 	return errors.Join(errs...)
 }
