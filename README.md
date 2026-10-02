@@ -196,7 +196,12 @@ it renders to a comment only otherwise.
 | `envoy-gateway` | Envoy Gateway's CRDs and controller. The Gateway API CRDs are the cluster's (k3s ships them) and are never installed here. |
 | `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. |
 | `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. |
-| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect` and HTTPRoute `.InfraredNamespace`/`infrared`. |
+| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect` and HTTPRoute `.InfraredNamespace`/`infrared`. In waves: the token's copy (-5), the issuer (-4), the certificate (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. |
+
+All three that read or make a token wait first, in a PreSync hook (see
+"Order on a fresh cluster"): `platform-tokens` for External Secrets' webhook,
+`external-dns` for the store, and `edge` for the store, cert-manager's webhook
+and the CRDs it uses.
 
 The Gateway's listeners:
 
@@ -219,6 +224,45 @@ for `.InfraredHost`. The certificate is `*.<PlatformDomain>`, plus
 `.InfraredHost` when the wildcard does not cover it. The cluster's firewall
 must admit only Cloudflare to ports 80 and 443; nothing here opens the node
 ports to anyone.
+
+### Order on a fresh cluster
+
+On a fresh cluster the root app-of-apps creates every Application within
+seconds: waves order the Applications, but Argo CD has no health check for
+an Application, so a wave never waits for the one before it to be Healthy.
+Each Application then syncs at once, and one that needs another component's
+webhook, CRD or store can reach the API server before that component answers.
+On a first install, the `edge` Application's ExternalSecret
+was refused by External Secrets' webhook, which had no endpoint yet. Argo CD
+applied the rest of that wave and waited for its health, which never came: the
+certificate needed the token, the Gateway the certificate. The failed apply was
+never retried, and the sync had to be restarted by hand.
+
+Two rules keep that from happening again, and `make verify` checks both on
+every component the template builds:
+
+1. **Wait before applying.** A component that needs another component's
+   webhook or store carries a PreSync hook, `<component>-wait` (alpine/k8s,
+   read-only RBAC on CRDs, EndpointSlices and ClusterSecretStores). It waits
+   until the CRDs it names are established, the Services it names have a ready
+   endpoint and the ClusterSecretStores it names are Ready, for up to half an
+   hour; then the sync applies. A webhook Service with a ready endpoint is
+   what admits the objects, and the store cannot be Ready before External
+   Secrets has admitted it. The wait spends none of the sync's five retries,
+   so a slow first start, an image pull say, no longer exhausts them. A
+   component that copies a token waits for its store, one that asks
+   cert-manager waits for cert-manager's webhook, and one that makes a store
+   waits for External Secrets' webhook.
+2. **An object a webhook admits has a wave of its own.** An ExternalSecret, a
+   cert-manager object or a CloudNativePG object never shares a sync wave with
+   an object of another kind in its component, and comes before what depends on
+   it. If its apply is refused after all, nothing in its wave waits on its
+   health, so the sync fails and Argo CD retries it.
+
+An Application health check in `argocd-cm`, the other cure, would make every
+wave wait for the one before it to be Healthy: one Degraded component would
+then hold back everything after it, the `infrared` Application included, and
+`components/argocd` is verbatim, so every cluster would get it.
 
 ### Products
 

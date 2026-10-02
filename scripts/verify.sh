@@ -24,6 +24,9 @@
 #     platform's tokens and the edge's Gateway, certificate and routes are
 #     there and wired to each other; without it no file of them holds an object
 #   - the infrared Application carries the operator's image registry and pins
+#   - order: a component that needs another one's webhook or store waits for it
+#     in a PreSync hook, and an object a webhook admits has a sync wave of its
+#     own in its component (the edge race of a first install)
 #   - every chart or repo a platform Application pulls from is a source of the
 #     AppProject platform, and nothing renders a LoadBalancer Service
 #   - nothing renders where the org's own files live (products/, product-*,
@@ -212,6 +215,36 @@ for v in "${variants[@]}"; do
     if kubectl kustomize "$d" > "$work/$variant-built/$name.yaml"; then :; else bad "$variant: kustomize build components/$name"; fi
   done
 
+  # Order (the edge race of a first install). On a fresh cluster
+  # every Application syncs at once, so a component that needs another one's
+  # webhook or store waits for it in a PreSync hook, and an object such a
+  # webhook admits has a sync wave of its own: a refused apply then fails the
+  # sync, which Argo CD retries, instead of leaving it waiting for ever on the
+  # health of what depended on that object.
+  for b in "$work/$variant-built"/*.yaml; do
+    name="$(basename "$b" .yaml)"
+    shared="$(yq -N -r 'select(.metadata.annotations["argocd.argoproj.io/hook"] == null)
+        | (.metadata.annotations["argocd.argoproj.io/sync-wave"] // "0") + " " + (.apiVersion | sub("/.*", "")) + "/" + .kind' "$b" \
+      | sort -u | awk '
+        $2 ~ /^(external-secrets\.io|cert-manager\.io|postgresql\.cnpg\.io)\// { admitted[$1] = admitted[$1] " " $2 }
+        { kinds[$1]++ }
+        END { for (w in admitted) if (kinds[w] > 1) print "wave " w ":" admitted[w] }')"
+    [ -z "$shared" ] || bad "$variant: components/$name: an object a webhook admits shares its wave with other kinds ($shared)"
+    waits="$(sel "$b" 'select(.kind == "Job" and .metadata.annotations["argocd.argoproj.io/hook"] == "PreSync") | .spec.template.spec.containers[].env[]? | select(.name | test("^WAIT_")) | .value' | tr '\n' ' ')"
+    for store in $(sel "$b" 'select(.kind == "ExternalSecret") | .spec.secretStoreRef | select(.kind == "ClusterSecretStore") | .name' | sort -u); do
+      grep -qw -- "$store" <<<"$waits" || bad "$variant: components/$name copies through $store but does not wait for it"
+    done
+    if [ -n "$(sel "$b" 'select(.apiVersion | test("^cert-manager\\.io/")) | .kind')" ]; then
+      grep -qw -- cert-manager/cert-manager-webhook <<<"$waits" || bad "$variant: components/$name asks cert-manager without waiting for its webhook"
+    fi
+    if [ -n "$(sel "$b" 'select(.kind == "ClusterSecretStore") | .kind')" ]; then
+      grep -qw -- external-secrets/external-secrets-webhook <<<"$waits" || bad "$variant: components/$name makes a store without waiting for External Secrets' webhook"
+    fi
+    if [ -n "$(sel "$b" 'select(.apiVersion | test("^postgresql\\.cnpg\\.io/")) | .kind')" ]; then
+      grep -qw -- cnpg-system/cnpg-webhook-service <<<"$waits" || bad "$variant: components/$name applies CloudNativePG objects without waiting for its webhook"
+    fi
+  done
+
   # builds: all of it with a build registry, none of it without.
   if [ -n "$registry" ]; then
     app="$reg/components/builds.yaml"
@@ -276,6 +309,13 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$e" 'select(.kind == "Certificate") | .spec.issuerRef.kind + "/" + .spec.issuerRef.name')" = "OriginIssuer/$(sel "$e" 'select(.kind == "OriginIssuer") | .metadata.name')" ] \
       && [ "$(line "$e" 'select(.kind == "Gateway") | .spec.listeners[] | .tls.certificateRefs[]?.name' | tr ' ' '\n' | sort -u)" = "$(sel "$e" 'select(.kind == "Certificate") | .spec.secretName')" ] \
       && ok "$variant: one origin certificate for *.$gw_domain on every HTTPS listener" || bad "$variant: the edge certificate is wrong"
+    # The token's copy, the issuer and the certificate, each in a wave of its
+    # own, before the Envoy fleet and the Gateway that need them.
+    order="$(for k in ExternalSecret OriginIssuer Certificate EnvoyProxy GatewayClass Gateway; do
+        sel "$e" "select(.kind == \"$k\") | .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] // \"0\""; done | tr '\n' ' ')"
+    awk '{ for (i = 2; i <= NF; i++) if ($i + 0 <= $(i - 1) + 0) exit 1; exit NF != 6 }' <<<"$order" \
+      && ok "$variant: the edge applies its token, issuer and certificate before the Gateway (waves $order)" \
+      || bad "$variant: the edge's waves are not token < issuer < certificate < EnvoyProxy < GatewayClass < Gateway: $order"
     [ "$(line "$e" 'select(.metadata.name == "https-redirect") | .spec.parentRefs[].sectionName')" = "http infrared-http" ] \
       && [ "$(sel "$e" 'select(.metadata.name == "https-redirect") | .spec.rules[0].filters[0].requestRedirect.scheme')" = https ] \
       && [ "$(line "$e" 'select(.kind == "HTTPRoute" and .metadata.name == "infrared") | .metadata.namespace + " " + .spec.hostnames[0] + " " + .spec.rules[0].backendRefs[0].name + ":" + (.spec.rules[0].backendRefs[0].port | tostring)')" = "infrared $gw_host infrared:80" ] \

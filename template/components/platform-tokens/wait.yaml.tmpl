@@ -1,0 +1,140 @@
+[[- if eq .Edge "gateway" -]]
+# =============================================================================
+# Before the store: External Secrets' webhook answers.
+# =============================================================================
+# On a fresh cluster every Application starts at once, and this one can reach
+# the API server before External Secrets' admission webhook has an endpoint:
+# the ClusterSecretStore is then refused. This PreSync hook waits, up to half
+# an hour, until the store's CRD is established and the webhook's Service has
+# a ready endpoint, so the sync starts when the store can be admitted and
+# spends none of its retries on the race.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-tokens-wait
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+---
+# Read only: CRDs, EndpointSlices and ClusterSecretStores, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-wait-platform-tokens
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["clustersecretstores"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-wait-platform-tokens
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-wait-platform-tokens
+subjects:
+  - kind: ServiceAccount
+    name: platform-tokens-wait
+    namespace: [[ .InfraredNamespace ]]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: platform-tokens-wait
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: platform-tokens-wait
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: WAIT_CRDS
+              value: "clustersecretstores.external-secrets.io"
+            - name: WAIT_SERVICES
+              value: "external-secrets/external-secrets-webhook"
+            - name: WAIT_STORES
+              value: ""
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Each list is space-separated; an empty one waits for nothing.
+              established() {
+                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+              }
+              answering() {
+                kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \
+                  -o jsonpath='{.items[*].endpoints[*].conditions.ready}' 2>/dev/null | grep -qw true
+              }
+              store_ready() {
+                [ "$(kubectl get clustersecretstore "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
+              }
+              for crd in $WAIT_CRDS; do
+                until established "$crd"; do echo "waiting for the CRD $crd"; sleep 5; done
+              done
+              for svc in $WAIT_SERVICES; do
+                until answering "$svc"; do echo "waiting for a ready endpoint of the Service $svc"; sleep 5; done
+              done
+              for store in $WAIT_STORES; do
+                until store_ready "$store"; do echo "waiting for the ClusterSecretStore $store to be Ready"; sleep 5; done
+              done
+              echo "everything this component needs answers"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# The platform's tokens are copied only when the edge is a Gateway: nothing to wait for.
+[[- end ]]

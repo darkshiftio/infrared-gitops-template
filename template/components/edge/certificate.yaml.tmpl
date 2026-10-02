@@ -21,12 +21,21 @@
 #
 # cert-manager renews it, at two thirds of its 90 days. Cloudflare sends no
 # expiry notice.
+#
+# Waves: the token's copy (-5), the issuer (-4), the certificate (-3), then the
+# Envoy fleet and the Gateway (gateway.yaml, -2 to 0). External Secrets' and
+# cert-manager's webhooks admit the first and the third, so each has a wave of
+# its own, before everything whose health depends on it. A refused apply then
+# fails the sync, which Argo CD retries; in one wave with the Gateway, the sync
+# waited for ever on a Gateway that had no certificate.
 # =============================================================================
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: cloudflare-api-token
   namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
 spec:
   refreshInterval: 1h0m0s
   secretStoreRef:
@@ -47,6 +56,8 @@ kind: OriginIssuer
 metadata:
   name: cloudflare-origin
   namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
 spec:
   # RSA, the key cert-manager makes by default; the private key never leaves the cluster.
   requestType: OriginRSA
@@ -60,6 +71,9 @@ kind: Certificate
 metadata:
   name: edge
   namespace: envoy-gateway-system
+  annotations:
+    # Healthy once issued: the Gateway's listeners need its Secret.
+    argocd.argoproj.io/sync-wave: "-3"
 spec:
   secretName: edge-tls
   dnsNames:
