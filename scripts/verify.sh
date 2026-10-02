@@ -39,7 +39,11 @@
 #   - nothing renders where the org's own files live (products/, product-*,
 #     products-project.yaml, values/)
 #   - with Edge "" or traefik, a platform domain, Infrared's host, a cloud and
-#     the preflight's result change nothing: the render equals the plain one
+#     the preflight's result change nothing, and neither does a backup bucket
+#     without the stores: the render equals the plain one
+#   - backups, with a backup bucket: Postgres's WAL and a daily base backup
+#     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
+#     with the platform's backup keys; without one, no backup object
 #   - a component named in Disabled renders its Application to comments only,
 #     and nothing else changes but the repo's README.md
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
@@ -105,8 +109,12 @@ cat >"$work/gateway.json" <<EOF
 EOF
 
 # The stores variant: the gateway's Data plus the platform's own stores, on
-# Linode, with Infisical left out.
-yq -p json -o json '. + {"Stores": true, "Disabled": ["infisical"]}' "$work/gateway.json" >"$work/stores.json"
+# Linode, with Infisical left out and the stores backed up outside.
+backup_bucket=acme-backups
+backup_endpoint=https://objects.example.com
+yq -p json -o json '. + {"Stores": true, "Disabled": ["infisical"],
+    "Backup": {"Bucket": "'"$backup_bucket"'", "Endpoint": "'"$backup_endpoint"'", "Region": "region-1"}}' \
+  "$work/gateway.json" >"$work/stores.json"
 
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
@@ -118,6 +126,7 @@ variants=(
   "gateway demo-gw k3s - -data $work/gateway.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
+  "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -145,13 +154,18 @@ for v in "${variants[@]}"; do
   fi
   # The variant's edge, stores and cloud, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
-  stores=false cloud=""
+  stores=false cloud="" backup="" endpoint=""
   grep -qw -- -stores <<<"${extra:-}" && stores=true
+  backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
   if [ -n "$data_file" ]; then
     edge="$(yq -p json -r '.Edge // ""' "$data_file")"
     stores="$(yq -p json -r '.Stores // false' "$data_file")"
     cloud="$(yq -p json -r '.Cloud // ""' "$data_file")"
+    backup="$(yq -p json -r '.Backup.Bucket // ""' "$data_file")"
+    endpoint="$(yq -p json -r '.Backup.Endpoint // ""' "$data_file")"
   fi
+  # Backups need the stores.
+  [ "$stores" = true ] || backup=""
 
   # Leftover template syntax, only in files that came from a .tmpl (vendored
   # upstream files are copied verbatim and are none of our business).
@@ -352,10 +366,11 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.domainFilters // [] | length')" = 0 ] \
       && ok "$variant: external-dns publishes the edge's names, proxied, as owner $cluster" || bad "$variant: external-dns is not wired to the edge"
     # The platform's tokens: one store, one Secret, two namespaces.
-    [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "external-dns envoy-gateway-system" ] \
+    want_ns="external-dns envoy-gateway-system${backup:+ stores}"
+    [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
       && [ "$(sel "$t" 'select(.kind == "ClusterSecretStore") | .spec.provider.kubernetes.remoteNamespace')" = infrared ] \
       && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "infrared-platform-tokens:get" ] \
-      && ok "$variant: ClusterSecretStore infrared-platform reads only infrared-platform-tokens, for two namespaces" || bad "$variant: ClusterSecretStore infrared-platform is wrong"
+      && ok "$variant: ClusterSecretStore infrared-platform reads only infrared-platform-tokens, for $want_ns" || bad "$variant: ClusterSecretStore infrared-platform is wrong"
     for es in "$x:external-dns" "$e:envoy-gateway-system"; do
       f="${es%%:*}" ns="${es#*:}"
       [ "$(line "$f" "select(.kind == \"ExternalSecret\" and .metadata.namespace == \"$ns\") | .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name + \" \" + .spec.data[0].remoteRef.key + \"/\" + .spec.data[0].remoteRef.property")" \
@@ -378,6 +393,15 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$app" '.spec.sources[0].helm.valuesObject.gitops.templateVersion')" = "$(yq -p json -r '.templateVersion' "$data_file")" ] \
       && ok "$variant: a commit SHA renders as a string" || bad "$variant: the template version SHA is not a YAML string"
   else
+    if [ -n "$backup" ]; then
+      # The platform's tokens, for the backups alone.
+      edge_files="$(grep -v platform-tokens <<<"$edge_files")"
+      t="$work/$variant-built/platform-tokens.yaml"
+      [ "$(sel "$reg/components/platform-tokens.yaml" '.metadata.name')" = platform-tokens ] \
+        && [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = stores ] \
+        && ok "$variant: ClusterSecretStore infrared-platform, for the backups' namespace stores alone" \
+        || bad "$variant: the platform's tokens are not there for the backups"
+    fi
     left="$(for f in $edge_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: the edge is not a Gateway, no edge objects" || bad "$variant: edge objects rendered without Edge gateway: $left"
     [ -z "$(sel "$reg/components/infrared.yaml" '.spec.sources[0].helm.valuesObject | (.image, .operator, .api, .ui, .runner, .mcp.image) | select(. != null) | key')" ] \
@@ -439,16 +463,63 @@ for v in "${variants[@]}"; do
     # The buckets, and an S3 identity for each that reaches it alone, with keys
     # the PreSync hook makes and the gateway reads from the environment.
     ids="$(sel "$sw" 'select(.kind == "Secret" and .metadata.name == "seaweedfs-s3-identities") | .stringData.seaweedfs_s3_config')"
+    want_ids="ate-snapshots:ate-snapshots registry:registry ${backup:+backup:ate-snapshots,registry }"
+    want_secrets="seaweedfs-s3-ate-snapshots ${backup:+seaweedfs-s3-backup }seaweedfs-s3-registry "
     [ "$(sel "$f" "$v | .s3.createBuckets[].name" | tr '\n' ' ')" = "ate-snapshots registry " ] \
-      && [ "$(yq -p json -r '.identities[] | .name + ":" + (.actions | map(sub(".*:", "")) | unique | join(","))' <<<"$ids" | tr '\n' ' ')" = "ate-snapshots:ate-snapshots registry:registry " ] \
+      && [ "$(yq -p json -r '.identities[] | .name + ":" + (.actions | map(sub(".*:", "")) | unique | join(","))' <<<"$ids" | tr '\n' ' ')" = "$want_ids" ] \
       && [ -z "$(yq -p json -r '.identities[].actions[] | select(test(":") | not)' <<<"$ids")" ] \
       && [ "$(yq -p json -r '.identities[].credentials[] | .accessKey + " " + .secretKey' <<<"$ids" | grep -cvE '^\$\{[A-Z0-9_]+\} \$\{[A-Z0-9_]+\}$' || true)" = 0 ] \
       && [ "$(yq -p json -r '.identities[].credentials[] | .accessKey + " " + .secretKey' <<<"$ids" | tr -d '${}' | tr ' ' '\n' | sort | tr '\n' ' ')" \
           = "$(sel "$f" "$v | .s3.extraEnvironmentVars | keys | .[]" | sort | tr '\n' ' ')" ] \
-      && [ "$(sel "$f" "$v | .s3.extraEnvironmentVars[].secretKeyRef.name" | sort -u | tr '\n' ' ')" = "seaweedfs-s3-ate-snapshots seaweedfs-s3-registry " ] \
-      && [ "$(line "$sw" 'select(.kind == "Role") | .rules[0].resourceNames[]')" = "seaweedfs-s3-ate-snapshots seaweedfs-s3-registry" ] \
+      && [ "$(sel "$f" "$v | .s3.extraEnvironmentVars[].secretKeyRef.name" | sort -u | tr '\n' ' ')" = "$want_secrets" ] \
+      && [ "$(sel "$sw" 'select(.kind == "Role") | .rules[0].resourceNames[]' | sort | tr '\n' ' ')" = "$want_secrets" ] \
       && ok "$variant: buckets ate-snapshots and registry, each with an identity that reaches it alone, no key in the repo" \
       || bad "$variant: SeaweedFS's buckets or S3 identities are wrong"
+    cn="$reg/components/cloudnative-pg.yaml"
+    if [ -n "$backup" ]; then
+      # Postgres: every WAL segment and a daily base backup to the outside
+      # bucket, kept seven days, through CloudNativePG's Barman Cloud plugin.
+      [ "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .targetRevision')" = 0.8.1 ] \
+        && [ "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .helm.valuesObject | (.image.tag, .sidecarImage.tag)' | grep -cE '^v0\.15\.1@sha256:[0-9a-f]{64}$')" = 2 ] \
+        && [ "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .helm.valuesObject.certificate | .createIssuer or .createServerCertificate or .createClientCertificate')" = false ] \
+        && [ "$(line "$work/$variant-built/cloudnative-pg.yaml" 'select(.kind == "Certificate") | .spec.secretName' | tr ' ' '\n' | sort | tr '\n' ' ')" = "barman-cloud-client-tls barman-cloud-server-tls " ] \
+        && ok "$variant: the Barman Cloud plugin 0.15.1 (chart 0.8.1) by digest, its certificates in waves of their own" \
+        || bad "$variant: the Barman Cloud plugin or its certificates are wrong"
+      os='select(.kind == "ObjectStore" and .metadata.name == "backup")'
+      sb='select(.kind == "ScheduledBackup")'
+      [ "$(sel "$p" "$os | .spec.configuration.destinationPath")" = "s3://$backup/$cluster/postgres" ] \
+        && [ "$(sel "$p" "$os | .spec.configuration.endpointURL // \"\"")" = "$endpoint" ] \
+        && [ "$(sel "$p" "$os | .spec.retentionPolicy")" = 7d ] \
+        && [ "$(sel "$p" "$os | .spec.configuration.s3Credentials | (.accessKeyId.name, .secretAccessKey.name)" | sort -u)" = postgres-backup ] \
+        && [ "$(sel "$p" "$c | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName")" = "barman-cloud.cloudnative-pg.io true backup" ] \
+        && [ "$(sel "$p" "$sb | .spec.schedule + \" \" + (.spec.immediate | tostring) + \" \" + .spec.method + \" \" + .spec.pluginConfiguration.name")" = "0 0 3 * * * true plugin barman-cloud.cloudnative-pg.io" ] \
+        && ok "$variant: Postgres's WAL continuously and a base backup daily to s3://$backup/$cluster/postgres, kept 7 days" \
+        || bad "$variant: Postgres's backups are wrong"
+      # The buckets: copied every hour, what a copy replaces kept seven days.
+      cj='select(.kind == "CronJob" and .metadata.name == "seaweedfs-backup")'
+      env() { sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == \"$1\") | (.value // .valueFrom.secretKeyRef.name)"; }
+      script="$(sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].command[2]")"
+      [ "$(sel "$sw" "$cj | .spec.schedule")" = "17 * * * *" ] \
+        && sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].image" | grep -qE '^docker\.io/rclone/rclone:1\.75\.1@sha256:[0-9a-f]{64}$' \
+        && [ "$(env DESTINATION)" = "dst:$backup/$cluster/seaweedfs" ] && [ "$(env BUCKETS)" = "ate-snapshots registry" ] \
+        && [ "$(env RCLONE_CONFIG_SRC_ACCESS_KEY_ID) $(env RCLONE_CONFIG_DST_ACCESS_KEY_ID)" = "seaweedfs-s3-backup seaweedfs-backup" ] \
+        && [ "$(env RCLONE_CONFIG_DST_ENDPOINT)" = "$endpoint" ] \
+        && grep -q -- '--backup-dir "$DESTINATION/archive/$run/$bucket"' <<<"$script" && grep -q '7 \* 24 \* 3600' <<<"$script" \
+        && [ "$(yq -p json -r '.identities[] | select(.name == "backup") | .actions | join(" ")' <<<"$ids")" \
+            = "Read:ate-snapshots List:ate-snapshots Read:registry List:registry" ] \
+        && ok "$variant: both buckets copied hourly to $backup/$cluster/seaweedfs, replaced objects kept 7 days, read as the identity backup" \
+        || bad "$variant: the buckets' hourly copy is wrong"
+      # Both copy the platform's backup keys, and nothing else, from the store.
+      [ "$(sel "$work/$variant-built/postgres.yaml" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "backup-access-key-id backup-secret-access-key " ] \
+        && [ "$(sel "$sw" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "backup-access-key-id backup-secret-access-key " ] \
+        && ok "$variant: the backup keys come from infrared-platform-tokens" || bad "$variant: the backup keys are copied wrong"
+    else
+      [ -z "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .chart')" ] \
+        && [ -z "$(sel "$p" 'select(.kind == "ObjectStore" or .kind == "ScheduledBackup" or .kind == "ExternalSecret") | .kind')" ] \
+        && [ -z "$(sel "$p" "$c | .spec.plugins // \"\"")" ] \
+        && [ -z "$(sel "$sw" 'select(.kind == "CronJob" or .kind == "ExternalSecret") | .kind')" ] \
+        && ok "$variant: no backups without a backup bucket" || bad "$variant: backup objects rendered without a backup bucket"
+    fi
   else
     left="$(for f in $store_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: no stores, no stores objects" || bad "$variant: stores objects rendered without Stores: $left"
@@ -514,7 +585,8 @@ done
 # such a cluster's gitops repo hydrates to the same files when this lands.
 for v in "traefik -edge traefik" \
     "traefik-facts -platform-domain preprod.example.com -infrared-host infrared.example.com -cloud aws -substrate-capable" \
-    "traefik-linode -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode"; do
+    "traefik-linode -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
+    "backup-alone -backup {\"bucket\":\"$backup_bucket\",\"endpoint\":\"$backup_endpoint\"}"; do
   read -r variant extra <<<"$v"
   # shellcheck disable=SC2086
   "$work/render" -out "$work/$variant" -cluster demo -flavor k3s -build-registry "" $extra >/dev/null
@@ -548,10 +620,11 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
     "eks aws-load-balancer-controller" \
     "k3s-builds builds" \
     "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge" \
-    "stores-plain cloudnative-pg postgres seaweedfs"; do
+    "stores-plain cloudnative-pg postgres seaweedfs" \
+    "stores-backup platform-tokens"; do
   read -r base names <<<"$v"
   for name in $names; do
-    out="$work/disabled-$name"
+    out="$work/disabled-$base-$name"
     cluster="$(render_again "$base" "$out" -disabled "[\"$name\"]")" || { bad "disabled $name: no variant $base"; continue; }
     app="registry/clusters/$cluster/components/$name.yaml"
     changed="$({ diff -rq "$work/$base" "$out" || true; } | sed -E "s#^Files $work/$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"

@@ -1,0 +1,13 @@
+[[- if and .Stores .Backup.Bucket -]]
+# The second source of the `cloudnative-pg` Application (wave 16) when backups
+# are on: the wait for cert-manager, and the Barman Cloud plugin's certificates.
+# Every object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - wait.yaml
+  - certificates.yaml
+[[- else -]]
+# Backups are off (INFRARED_BACKUP), so this component holds no objects and no
+# Application points at it.
+[[- end ]]

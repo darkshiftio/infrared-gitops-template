@@ -17,6 +17,11 @@
 # S3 at http://seaweedfs-s3.stores.svc:8333, with an identity per bucket
 # (components/seaweedfs/identities.yaml). The chart's bucket hook makes the
 # buckets ate-snapshots and registry after each sync.
+[[- if .Backup.Bucket ]]
+#
+# Every hour both buckets are copied to s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs
+# (components/seaweedfs/backup.yaml), what each copy replaces kept seven days.
+[[- end ]]
 #
 # No resources finalizer: removing this Application leaves SeaweedFS running,
 # and its data stays on the nodes' disks either way.
@@ -32,7 +37,7 @@ metadata:
 spec:
   project: platform
   sources:
-    # The S3 keys, the wait for Postgres and the S3 identities.
+    # The S3 keys, the wait for Postgres and the S3 identities[[ if .Backup.Bucket ]], and the hourly copy[[ end ]].
     - repoURL: [[ .GitopsRepoURL ]]
       targetRevision: [[ .DefaultBranch ]]
       path: components/seaweedfs
@@ -146,7 +151,7 @@ spec:
             # The gateway reads the identities file once, at start: a new set of
             # identities is a new value here, so the gateways roll.
             podAnnotations:
-              infrared.darkshift.io/s3-identities: ate-snapshots registry
+              infrared.darkshift.io/s3-identities: ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]]
             extraEnvironmentVars:
               S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:
                 secretKeyRef:
@@ -164,6 +169,16 @@ spec:
                 secretKeyRef:
                   name: seaweedfs-s3-registry
                   key: AWS_SECRET_ACCESS_KEY
+[[- if .Backup.Bucket ]]
+              S3_BACKUP_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-backup
+                  key: AWS_ACCESS_KEY_ID
+              S3_BACKUP_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-backup
+                  key: AWS_SECRET_ACCESS_KEY
+[[- end ]]
             createBuckets:
               - name: ate-snapshots
               - name: registry

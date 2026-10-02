@@ -1,4 +1,4 @@
-[[- if eq .Edge "gateway" -]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket)) -]]
 # =============================================================================
 # infrared-platform: the one place the platform's tokens are read from.
 # =============================================================================
@@ -9,9 +9,15 @@
 # into its own namespace with an ExternalSecret:
 #
 #   key                    copied to
+[[- if eq .Edge "gateway" ]]
 #   cloudflare-api-token   external-dns/cloudflare-api-token (DNS records)
 #                          envoy-gateway-system/cloudflare-api-token (origin
 #                          certificates)
+[[- end ]]
+[[- if and .Stores .Backup.Bucket ]]
+#   backup-access-key-id   stores/postgres-backup (Postgres's backups) and
+#   backup-secret-access-key  stores/seaweedfs-backup (the buckets' copies)
+[[- end ]]
 #
 # `conditions` limits the store to those namespaces: any other namespace,
 # a product's zone included, cannot read a token through it.
@@ -58,8 +64,13 @@ metadata:
 spec:
   conditions:
     - namespaces:
+[[- if eq .Edge "gateway" ]]
         - external-dns
         - envoy-gateway-system
+[[- end ]]
+[[- if and .Stores .Backup.Bucket ]]
+        - stores
+[[- end ]]
   provider:
     kubernetes:
       remoteNamespace: [[ .InfraredNamespace ]]
@@ -75,5 +86,6 @@ spec:
           name: platform-tokens-reader
           namespace: [[ .InfraredNamespace ]]
 [[- else -]]
-# The platform's tokens are copied only when the edge is a Gateway: no store.
+# The platform's tokens are copied only for the edge when it is a Gateway and
+# for the stores' backups: no store.
 [[- end ]]

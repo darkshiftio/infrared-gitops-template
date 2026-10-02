@@ -1,12 +1,16 @@
 [[- if .Stores -]]
 # The second source of the `seaweedfs` Application (wave 18), in the namespace
-# stores: the S3 keys and the wait for Postgres (prepare.yaml), and the S3
-# identities. Every object names its own namespace.
+# stores: the S3 keys and the wait for Postgres (prepare.yaml), the S3
+# identities, and with backups the hourly copy (backup.yaml). Every object names
+# its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - prepare.yaml
   - identities.yaml
+[[- if .Backup.Bucket ]]
+  - backup.yaml
+[[- end ]]
 [[- else -]]
 # The platform's own stores are off (INFRARED_STORES), so this component holds
 # no objects and no Application points at it.

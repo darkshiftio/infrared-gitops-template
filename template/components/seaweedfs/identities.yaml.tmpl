@@ -6,11 +6,14 @@
 # each ${...} names an environment variable of the gateway, set from the Secret
 # seaweedfs-s3-<identity> that the PreSync hook makes (prepare.yaml). SeaweedFS
 # drops a credential whose variable is unset, so a missing Secret never becomes
-# an empty key. Each identity reaches one bucket only:
+# an empty key. Each identity reaches its own bucket only:
 #
 #   identity        bucket          for
 #   ate-snapshots   ate-snapshots   Agent Substrate's actor snapshots
 #   registry        registry        the registry's images and charts
+[[- if .Backup.Bucket ]]
+#   backup          both, read      the hourly copy to the outside bucket
+[[- end ]]
 #
 # No identity is an administrator. The buckets are made by the chart's bucket
 # hook, with weed shell, which needs no S3 key.
@@ -37,7 +40,12 @@ stringData:
           "name": "registry",
           "credentials": [{"accessKey": "${S3_REGISTRY_ACCESS_KEY_ID}", "secretKey": "${S3_REGISTRY_SECRET_ACCESS_KEY}"}],
           "actions": ["Read:registry", "Write:registry", "List:registry", "Tagging:registry"]
-        }
+        }[[ if .Backup.Bucket ]],
+        {
+          "name": "backup",
+          "credentials": [{"accessKey": "${S3_BACKUP_ACCESS_KEY_ID}", "secretKey": "${S3_BACKUP_SECRET_ACCESS_KEY}"}],
+          "actions": ["Read:ate-snapshots", "List:ate-snapshots", "Read:registry", "List:registry"]
+        }[[ end ]]
       ]
     }
 [[- else -]]

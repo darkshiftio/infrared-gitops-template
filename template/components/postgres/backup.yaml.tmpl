@@ -1,0 +1,106 @@
+[[- if and .Stores .Backup.Bucket -]]
+# =============================================================================
+# Postgres's backups, to the bucket outside the cluster.
+# =============================================================================
+# CloudNativePG's Barman Cloud plugin archives every WAL segment as it is
+# written (the Cluster's plugin, cluster.yaml) and takes a base backup every
+# day at 03:00 UTC, and one when this is first applied. Both go to
+#
+#   s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/postgres/<server name>/
+#
+# and are kept for seven days: Barman deletes what a restore to any point of
+# the last seven days no longer needs.
+#
+# The keys are the platform's (Secret infrared-platform-tokens, keys
+# backup-access-key-id and backup-secret-access-key), copied here through the
+# ClusterSecretStore infrared-platform.
+#
+# Waves: the keys (-2), the object store (-1), the Cluster (0, cluster.yaml),
+# the roles and databases (1 and 2), the schedule (3).
+# =============================================================================
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-backup
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: postgres-backup
+    creationPolicy: Owner
+    deletionPolicy: Retain
+[[- if .Backup.Region ]]
+    # The region beside the keys: the object store reads it from this Secret.
+    template:
+      engineVersion: v2
+      data:
+        ACCESS_KEY_ID: "{{ .ACCESS_KEY_ID }}"
+        ACCESS_SECRET_KEY: "{{ .ACCESS_SECRET_KEY }}"
+        REGION: [[ .Backup.Region | quote ]]
+[[- end ]]
+  data:
+    - secretKey: ACCESS_KEY_ID
+      remoteRef:
+        key: infrared-platform-tokens
+        property: backup-access-key-id
+    - secretKey: ACCESS_SECRET_KEY
+      remoteRef:
+        key: infrared-platform-tokens
+        property: backup-secret-access-key
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: backup
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  retentionPolicy: "7d"
+  configuration:
+    destinationPath: [[ printf "s3://%s/%s/postgres" .Backup.Bucket .ClusterName | quote ]]
+[[- if .Backup.Endpoint ]]
+    endpointURL: [[ .Backup.Endpoint | quote ]]
+[[- end ]]
+    s3Credentials:
+      accessKeyId:
+        name: postgres-backup
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: postgres-backup
+        key: ACCESS_SECRET_KEY
+[[- if .Backup.Region ]]
+      region:
+        name: postgres-backup
+        key: REGION
+[[- end ]]
+    wal:
+      compression: gzip
+    data:
+      compression: gzip
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-daily
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  cluster:
+    name: postgres
+  # Seconds first: every day at 03:00 UTC.
+  schedule: "0 0 3 * * *"
+  immediate: true
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+[[- else -]]
+# Backups are off (INFRARED_BACKUP), or there are no stores: nothing to copy.
+[[- end ]]

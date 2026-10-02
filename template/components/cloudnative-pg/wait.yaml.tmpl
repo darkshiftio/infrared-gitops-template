@@ -1,19 +1,16 @@
-[[- if .Stores -]]
+[[- if and .Stores .Backup.Bucket -]]
 # =============================================================================
-# Before SeaweedFS: its S3 keys, and the Postgres that holds its filer metadata.
+# Before the plugin: cert-manager's webhook, which admits its certificates.
 # =============================================================================
-# This PreSync hook makes the Secret seaweedfs-s3-<identity> (AWS_ACCESS_KEY_ID,
-# AWS_SECRET_ACCESS_KEY) of each S3 identity, once, if it is absent, and never
-# replaces one. Then it waits, up to half an hour, until the platform's Postgres
-# answers, so the filers start against their store; with backups, also until
-# the store infrared-platform, which copies the backup keys, is Ready. On a fresh cluster every
-# Application syncs at once (README, "Order on a fresh cluster").
+# On a fresh cluster every Application syncs at once (README, "Order on a fresh
+# cluster"). This PreSync hook waits, up to half an hour, until cert-manager's
+# CRDs are established and its webhook has a ready endpoint.
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: seaweedfs-prepare
-  namespace: stores
+  name: cloudnative-pg-wait
+  namespace: cnpg-system
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -23,7 +20,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: infrared-wait-seaweedfs
+  name: infrared-wait-cloudnative-pg
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -42,7 +39,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: infrared-wait-seaweedfs
+  name: infrared-wait-cloudnative-pg
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -50,54 +47,17 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: infrared-wait-seaweedfs
+  name: infrared-wait-cloudnative-pg
 subjects:
   - kind: ServiceAccount
-    name: seaweedfs-prepare
-    namespace: stores
----
-# Make the Secrets below once; read them to see whether they exist. Nothing else.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: seaweedfs-prepare
-  namespace: stores
-  annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-    argocd.argoproj.io/sync-wave: "-10"
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]]]
-    verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: seaweedfs-prepare
-  namespace: stores
-  annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-    argocd.argoproj.io/sync-wave: "-10"
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: seaweedfs-prepare
-subjects:
-  - kind: ServiceAccount
-    name: seaweedfs-prepare
-    namespace: stores
+    name: cloudnative-pg-wait
+    namespace: cnpg-system
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: seaweedfs-prepare
-  namespace: stores
+  name: cloudnative-pg-wait
+  namespace: cnpg-system
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -109,7 +69,7 @@ spec:
   ttlSecondsAfterFinished: 3600
   template:
     spec:
-      serviceAccountName: seaweedfs-prepare
+      serviceAccountName: cloudnative-pg-wait
       restartPolicy: OnFailure
       securityContext:
         runAsNonRoot: true
@@ -118,51 +78,22 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: prepare
+        - name: wait
           # alpine/k8s 1.37.0: kubectl and a busybox shell.
           image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
           env:
             - name: HOME
               value: /tmp
-            - name: IDENTITIES
-              value: "ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]]"
             - name: WAIT_CRDS
-              value: "[[ if .Backup.Bucket ]]externalsecrets.external-secrets.io[[ end ]]"
+              value: "issuers.cert-manager.io certificates.cert-manager.io"
             - name: WAIT_SERVICES
-              value: "stores/postgres-rw"
+              value: "cert-manager/cert-manager-webhook"
             - name: WAIT_STORES
-              value: "[[ if .Backup.Bucket ]]infrared-platform[[ end ]]"
+              value: ""
           command:
             - /bin/sh
             - -ec
             - |
-              # Each S3 identity's keys, made once and never replaced: the S3
-              # gateway reads them as environment variables (identities.yaml), and
-              # the identity's user reads the same Secret. Nothing prints a key.
-              for identity in $IDENTITIES; do
-                secret="seaweedfs-s3-$identity"
-                if kubectl get secret "$secret" >/dev/null 2>&1; then
-                  echo "$secret exists; leaving it alone"
-                  continue
-                fi
-                key_id="$(tr -dc 'A-Z0-9' </dev/urandom | head -c 20)"
-                key="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)"
-                if [ "${#key_id}" -ne 20 ] || [ "${#key}" -ne 40 ]; then
-                  echo "a generated key has the wrong length; not writing $secret" >&2
-                  exit 1
-                fi
-                kubectl create -f - >/dev/null <<EOF
-              apiVersion: v1
-              kind: Secret
-              type: Opaque
-              metadata:
-                name: $secret
-              stringData:
-                AWS_ACCESS_KEY_ID: $key_id
-                AWS_SECRET_ACCESS_KEY: $key
-              EOF
-                echo "created $secret"
-              done
               # Each list is space-separated; an empty one waits for nothing.
               established() {
                 [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
@@ -202,5 +133,5 @@ spec:
         - name: tmp
           emptyDir: {}
 [[- else -]]
-# The platform's own stores are off (INFRARED_STORES): nothing to prepare.
+# Backups are off (INFRARED_BACKUP), so the plugin and its wait are not here.
 [[- end ]]

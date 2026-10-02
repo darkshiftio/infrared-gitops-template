@@ -1,4 +1,4 @@
-[[- if eq .Edge "gateway" -]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket)) -]]
 # The platform's tokens (the `platform-tokens` Application, wave 11). See
 # store.yaml; wait.yaml holds the sync until External Secrets answers. Every
 # object names its own namespace.
@@ -8,6 +8,7 @@ resources:
   - wait.yaml
   - store.yaml
 [[- else -]]
-# The platform's tokens are copied only when the edge is a Gateway, so this
-# component holds no objects and no Application points at it.
+# The platform's tokens are copied only for the edge when it is a Gateway and
+# for the stores' backups, so this component holds no objects and no
+# Application points at it.
 [[- end ]]

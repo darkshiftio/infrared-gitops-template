@@ -132,13 +132,13 @@ pull secret, existing Secrets, build registry) win over the file.
 | 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.2 |
 | 10 | `external-secrets` | https://charts.external-secrets.io `external-secrets` | 2.11.0 |
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
-| 11 | `platform-tokens` (gateway only) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
+| 11 | `platform-tokens` (gateway, or backups) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
 | 11 | `envoy-gateway` (gateway only) | `docker.io/envoyproxy` `gateway-crds-helm` (its own CRDs) and `gateway-helm` | v1.9.2 |
 | 11 | `origin-ca-issuer` (gateway only) | `ghcr.io/cloudflare/origin-ca-issuer-charts` `origin-ca-issuer`, CRDs from https://github.com/cloudflare/origin-ca-issuer `deploy/crds` | chart 0.6.10, v0.15.0 |
 | 12 | `external-dns` (gateway only) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
 | 13 | `edge` (gateway, with a name) | `components/edge` | — |
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
-| 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1, by digest) |
+| 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg`, with a backup bucket also `plugin-barman-cloud` + `components/cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1), chart 0.8.1 (Barman Cloud plugin 0.15.1), by digest |
 | 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
 | 18 | `seaweedfs` (Stores only) | https://seaweedfs.github.io/seaweedfs/helm `seaweedfs` + `components/seaweedfs` | chart 4.48.0 (SeaweedFS 4.48, by digest) |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
@@ -282,6 +282,36 @@ PreSync hook makes once and never replaces. A consumer reads the same Secret.
 The hook also waits for the platform's Postgres to answer before the filers
 start. A new set of identities changes the gateways' annotation
 `infrared.darkshift.io/s3-identities`, so they restart and read it.
+
+### Backups
+
+With `.Stores` and a `.Backup.Bucket`, the stores are copied to that bucket,
+outside the cluster, under `<Bucket>/<ClusterName>/`, and kept seven days.
+`.Backup.Endpoint` is the S3 endpoint (empty for AWS S3) and `.Backup.Region`
+its region. The keys are the platform's: the Secret `infrared-platform-tokens`
+keys `backup-access-key-id` and `backup-secret-access-key`, which the store
+`infrared-platform` copies into `stores` (`postgres-backup`,
+`seaweedfs-backup`); the store's `conditions` then admit `stores` as well, and
+`platform-tokens` renders even without a Gateway.
+
+| What | How | Where | Kept |
+|---|---|---|---|
+| Postgres's WAL | continuously: CloudNativePG's Barman Cloud plugin archives each segment as it is written (the Cluster's plugin, `isWALArchiver`) | `s3://<Bucket>/<ClusterName>/postgres/` | seven days of point-in-time recovery (`retentionPolicy: 7d` on the ObjectStore `backup`) |
+| Postgres's base backup | every day at 03:00 UTC, and once at the first sync (ScheduledBackup `postgres-daily`, `method: plugin`) | the same | the same |
+| SeaweedFS's buckets `ate-snapshots` and `registry` | every hour at 17 past, CronJob `seaweedfs-backup`: rclone 1.75.1 makes `current/<bucket>/` match the bucket, and keeps what that run replaced or deleted under `archive/<run>/<bucket>/`; a mark `runs/<run>.json` says the run finished | `<Bucket>/<ClusterName>/seaweedfs/` | archives and marks for seven days, by the run's name |
+
+A copy of every object at every hour would take 168 times the buckets' size,
+so the buckets are kept as one mirror and the hourly changes to it. rclone reads
+SeaweedFS as the S3 identity `backup`, which may only read and list the two
+buckets. The plugin (chart 0.8.1, `plugin-barman-cloud` 0.15.1 and its sidecar,
+by digest) is a second chart of `cloudnative-pg`; its mTLS certificates come
+from `components/cloudnative-pg`, in waves of their own ahead of the charts,
+with the chart's own turned off. Restoring is not here: the install's restore
+comes later.
+
+A Cluster built again from nothing writes its WAL to the same prefix, which
+Barman refuses while an older server's archive is there: a restore names a new
+server for the new Cluster.
 
 ### Order on a fresh cluster
 

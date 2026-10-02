@@ -57,6 +57,15 @@ spec:
       memory: 512Mi
     limits:
       memory: 2Gi
+[[- if .Backup.Bucket ]]
+  # Every WAL segment to the bucket outside the cluster, as it is written
+  # (backup.yaml).
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: backup
+[[- end ]]
 [[- else -]]
 # The platform's own stores are off (INFRARED_STORES): no Postgres.
 [[- end ]]
