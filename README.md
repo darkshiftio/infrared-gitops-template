@@ -67,12 +67,15 @@ The operator's JSON uses camelCase names for the older fields (`clusterName`,
 encoding/json matches them case-insensitively, so `hack/render -data` reads
 either, and `Backup`'s keys as `INFRARED_BACKUP` spells them (`bucket`, …).
 `hack/render` takes `-stores`, `-backup` as JSON and `-disabled` as a JSON
-array, exactly as the operator's environment carries them. The zero value of every newer field renders exactly the files the
-template rendered before the field existed. Only `.Edge` turns anything on: a
-Traefik cluster that carries `spec.previews` by hand, on any cloud, renders
-the same files as one without (`make verify` checks it). `.Cloud` and
-`.SubstrateCapable` switch nothing yet; they are for the components that need
-them (Linode's volume driver, Substrate).
+array, exactly as the operator's environment carries them.
+
+The zero value of every newer field renders exactly the files the template
+rendered before the field existed. Only `.Edge`, `.Stores` and `.Disabled` turn
+anything on or off: a Traefik cluster that carries `spec.previews` by hand, on
+any cloud, renders the same files as one without, and so does a cluster with a
+`.Backup` but no stores (`make verify` checks both). `.Cloud` only picks the
+Postgres volume's StorageClass when `.Stores` is on (Linode's Retain class on
+`linode`); `.SubstrateCapable` switches nothing yet, it is for Substrate.
 
 ### What the operator does after rendering
 
