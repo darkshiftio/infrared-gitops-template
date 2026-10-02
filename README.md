@@ -87,6 +87,23 @@ Adoption therefore never rotates them. It uses `releaseName: infrared`,
 `ServerSideApply=true`, and carries no resources finalizer, so deleting the
 Application never deletes the CRDs and with them every Infrared object.
 
+### The org's values file
+
+The `infrared` Application has two sources: the chart first, then this gitops
+repo at `.DefaultBranch` as `ref: values`. The chart takes the org's own values
+from **`registry/clusters/<cluster>/values/infrared.yaml`** (`valueFiles` with
+`ignoreMissingValueFiles: true`, so the file is optional). That path is
+reserved for the org: the template never renders anything under
+`registry/clusters/<cluster>/values/`, and hydration never deletes or
+overwrites a file it does not render, so the file survives every template
+bump. A bump re-renders `infrared.yaml` itself and keeps only its chart pin,
+which the operator reads as the first `targetRevision` that starts with a
+digit; the chart source comes first so that a branch name can never be taken
+for it. Org settings such as `ui.extensions` therefore belong in the values
+file, never in `infrared.yaml`. Argo CD gives `valuesObject` precedence over
+`valueFiles`, so the values the template sets (cluster name, template version,
+pull secret, existing Secrets, build registry) win over the file.
+
 ## Components
 
 | Wave | Application | Source | Pin |
@@ -100,7 +117,7 @@ Application never deletes the CRDs and with them every Infrared object.
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
-| 40 | `infrared` | `.InfraredChartRepo` `infrared` | `.InfraredChartVersion` |
+| 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
 
 Every component Application has a sync wave, `SkipDryRunOnMissingResource=true`
@@ -142,7 +159,8 @@ Applications in `registry/clusters/<cluster>/components/` with file names
 starting `product-<product>-`. The template never renders into `products/`
 or a `product-*` name, and hydration never deletes or overwrites a file it
 does not render, so a re-hydration leaves both alone. Keep it that way: no
-template file may be named `product-*` or live under `products/`.
+template file may be named `product-*` or live under `products/` or
+`registry/clusters/__cluster__/values/`.
 
 ### Infisical: known MVP limitations
 
@@ -172,10 +190,12 @@ make verify                             # the CI gate
 the operator uses. `scripts/verify.sh` renders both flavors, each with and without a build
 registry (plus a non-ECR one), and checks: no template syntax or
 `__cluster__` left, flavor-specific components, YAML parses, Application
-conventions, every non-empty `components/*` kustomization builds, builds is
-fully present with a registry (ECR login only for ECR) and renders no objects
-without one, and kubeconform (`-strict`, Argo CD kinds against the public
-CRDs-catalog).
+conventions, the `infrared` Application's sources (chart pin first, the org's
+values file as `$values`, nothing rendered into `values/`, the `$values` repo
+allowed by AppProject `infrared`), every non-empty `components/*`
+kustomization builds, builds is fully present with a registry (ECR login only
+for ECR) and renders no objects without one, and kubeconform (`-strict`, Argo
+CD kinds against the public CRDs-catalog).
 
 Bump upstream with `scripts/vendor-argocd.sh` / `scripts/vendor-kpack.sh`
 (edit the version at the top), or by editing a chart `targetRevision`.

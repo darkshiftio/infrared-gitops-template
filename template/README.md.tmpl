@@ -16,6 +16,7 @@ syncs it, and a change lands by pull request, not by `kubectl` or `helm`.
 registry/clusters/[[ .ClusterName ]]/
   registry.yaml            the root app-of-apps (Application registry-[[ .ClusterName ]])
   components/              one Application per component, in sync-wave order
+  values/infrared.yaml     yours, optional: values for the Infrared chart (see "Configuring Infrared")
 components/
   appprojects/             AppProjects platform and infrared
   argocd/                  Argo CD, vendored and pinned; Argo CD manages itself from here
@@ -96,13 +97,37 @@ them like any other.
 Infrared re-renders its template into this repo when it upgrades it. That
 hydration writes only the files the template renders: it never deletes or
 overwrites a file it does not render, so `product-*` Applications are safe,
-and it never touches `products/`.
+and it never touches `products/` or `registry/clusters/[[ .ClusterName ]]/values/`.
+
+## Configuring Infrared
+
+Set the Infrared chart's values in
+**`registry/clusters/[[ .ClusterName ]]/values/infrared.yaml`**, in a pull
+request. The `infrared` Application reads it from this repo (its second
+source) and works without it. Infrared never writes that file, so it survives
+template upgrades, while `components/infrared.yaml` is re-rendered by each
+upgrade: change that one only for the chart version. The values
+`components/infrared.yaml` sets itself (cluster name, template version, pull
+secret, existing Secrets, build registry) win over the file. For example, an
+extension in the Infrared UI (see the chart's README, "Extensions"):
+
+```yaml
+ui:
+  extensions:
+    - id: wiki
+      title: Wiki
+      icon: book
+      upstream: wiki.wiki.svc.cluster.local:8080
+  extensionsProxySecret:
+    existingSecret: infrared-ext-proxy
+```
 
 ## Upgrading Infrared
 
-Change `targetRevision` in `registry/clusters/[[ .ClusterName ]]/components/infrared.yaml`
-to the new chart version, in a pull request. Do not run
-`helm upgrade`: Argo CD owns the release now and would revert it.
+Change the chart's `targetRevision` (the first source) in
+`registry/clusters/[[ .ClusterName ]]/components/infrared.yaml` to the new
+chart version, in a pull request. Do not run `helm upgrade`: Argo CD owns the
+release now and would revert it.
 
 ## Secrets
 

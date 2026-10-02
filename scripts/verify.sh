@@ -12,6 +12,9 @@
 #   - every Application under registry/ is labelled
 #     app.kubernetes.io/part-of=infrared-gitops, and every component carries a
 #     sync wave, a retry block and SkipDryRunOnMissingResource
+#   - the infrared Application takes the chart first (the operator reads its
+#     pin as the first numeric targetRevision) and the org's values file from
+#     this repo as $values; nothing renders into the org's values/ directory
 #   - every kustomization under components/ that holds objects builds
 #   - builds: with a build registry the Application, builder and credential
 #     jobs are there (ECR login only for an ECR registry); without one no file
@@ -104,15 +107,41 @@ for v in "${variants[@]}"; do
   alb="$(yq -N -r '.kind // ""' "$reg/components/aws-load-balancer-controller.yaml" | grep -c Application || true)"
   if [ "$flavor" = eks ]; then
     [ "$alb" = 1 ] && ok "$variant: aws-load-balancer-controller present" || bad "$variant: aws-load-balancer-controller missing"
-    [ "$(yq -r '.spec.source.helm.valuesObject.imagePullSecrets[0].name' "$reg/components/infrared.yaml")" = infrared-pull ] \
+    [ "$(yq -r '.spec.sources[0].helm.valuesObject.imagePullSecrets[0].name' "$reg/components/infrared.yaml")" = infrared-pull ] \
       || bad "$variant: imagePullSecrets not rendered into the infrared Application"
   else
     [ "$alb" = 0 ] && ok "$variant: aws-load-balancer-controller absent" || bad "$variant: aws-load-balancer-controller rendered"
-    [ "$(yq -r '.spec.source.helm.valuesObject.imagePullSecrets | length' "$reg/components/infrared.yaml")" = 0 ] \
+    [ "$(yq -r '.spec.sources[0].helm.valuesObject.imagePullSecrets | length' "$reg/components/infrared.yaml")" = 0 ] \
       || bad "$variant: imagePullSecrets should be empty"
   fi
-  [ "$(yq -r '.spec.source.helm.valuesObject.builds.registry' "$reg/components/infrared.yaml")" = "$registry" ] \
+  [ "$(yq -r '.spec.sources[0].helm.valuesObject.builds.registry' "$reg/components/infrared.yaml")" = "$registry" ] \
     || bad "$variant: infrared Application builds.registry is not \"$registry\""
+
+  # The infrared Application: the chart first, with the org's values file from
+  # this repo ($values) under the template's own valuesObject.
+  app="$reg/components/infrared.yaml"
+  if [ "$(yq -r '.spec.sources | length' "$app")" = 2 ] && [ "$(yq -r '.spec.source' "$app")" = null ] \
+    && [ "$(yq -r '.spec.sources[0].chart' "$app")" = infrared ] \
+    && [ "$(yq -r '.spec.sources[0].helm.valueFiles | join(",")' "$app")" = "\$values/registry/clusters/$cluster/values/infrared.yaml" ] \
+    && [ "$(yq -r '.spec.sources[0].helm.ignoreMissingValueFiles' "$app")" = true ] \
+    && [ "$(yq -r '.spec.sources[1].ref' "$app")" = values ] \
+    && [ "$(yq -r '.spec.sources[1].repoURL' "$app")" = "$(yq -r '.spec.source.repoURL' "$reg/registry.yaml")" ] \
+    && [ "$(yq -r '.spec.sources[1].targetRevision' "$app")" = "$(yq -r '.spec.source.targetRevision' "$reg/registry.yaml")" ]; then
+    ok "$variant: infrared Application reads the org's values/infrared.yaml"
+  else
+    bad "$variant: infrared Application lacks the chart source or the org's \$values file"
+  fi
+  # The operator keeps the higher chart pin across a template bump by reading
+  # the first targetRevision that starts with a digit (keepHigherPin).
+  pin="$(sed -n -E 's/^[[:space:]]*targetRevision:[[:space:]]*"?([0-9][^"[:space:]]*)"?[[:space:]]*$/\1/p' "$app" | head -n 1)"
+  [ -n "$pin" ] && [ "$pin" = "$(yq -r '.spec.sources[0].targetRevision' "$app")" ] \
+    && ok "$variant: the operator reads the chart pin ($pin)" || bad "$variant: the operator would read pin '$pin', not the chart's"
+  # Hydration overlays the template and never deletes, so the org's values
+  # file survives only while the template renders nothing beside it.
+  [ ! -e "$reg/values" ] && ok "$variant: nothing rendered into the org's values/" || bad "$variant: the template renders into registry/clusters/$cluster/values/"
+  [ "$(yq -N -r 'select(.metadata.name == "infrared") | .spec.sourceRepos[]' "$out/components/appprojects/appprojects.yaml" \
+      | grep -cxF "$(yq -r '.spec.sources[1].repoURL' "$app")")" = 1 ] \
+    && ok "$variant: AppProject infrared allows the \$values repo" || bad "$variant: AppProject infrared does not allow the \$values repo"
 
   # Kustomize builds (a component that renders to comments only is skipped).
   mkdir -p "$work/$variant-built"
