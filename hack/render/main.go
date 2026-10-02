@@ -20,8 +20,10 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"text/template"
@@ -76,12 +78,88 @@ type Data struct {
 	// SubstrateCapable is the operator's preflight result; while it is false the
 	// template leaves Substrate out.
 	SubstrateCapable bool `json:"SubstrateCapable"`
+	// Stores is the operator's INFRARED_STORES: true renders the platform's own
+	// stores, CloudNativePG with one Postgres Cluster, and SeaweedFS.
+	Stores bool `json:"Stores"`
+	// Backup is the operator's INFRARED_BACKUP: the bucket outside the cluster
+	// the stores are copied to. An empty Bucket turns backups off, and with
+	// Stores false there is nothing to copy.
+	Backup BackupTarget `json:"Backup"`
+	// Disabled is the operator's INFRARED_DISABLED_COMPONENTS: the components,
+	// by Application name, that the template leaves out.
+	Disabled []string `json:"Disabled"`
 }
 
 // ImageRef is one component's image pin: Images["api"].Tag and .Digest.
 type ImageRef struct {
 	Tag    string `json:"Tag"`
 	Digest string `json:"Digest"`
+}
+
+// BackupTarget is an S3-compatible bucket outside the cluster:
+// Backup.Bucket, .Endpoint (empty for AWS S3) and .Region (may be empty).
+type BackupTarget struct {
+	Bucket   string `json:"Bucket"`
+	Endpoint string `json:"Endpoint"`
+	Region   string `json:"Region"`
+}
+
+// Required are the components the template always renders: Disabled may not
+// name them.
+var Required = []string{"appprojects", "argocd", "infrared"}
+
+var (
+	dnsLabel   = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	regionName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+)
+
+// backupFlag reads -backup: a JSON object {"bucket", "endpoint", "region"}, as
+// the operator's INFRARED_BACKUP carries it.
+type backupFlag struct{ b *BackupTarget }
+
+func (f backupFlag) String() string {
+	if f.b == nil || *f.b == (BackupTarget{}) {
+		return ""
+	}
+	b, _ := json.Marshal(*f.b)
+	return string(b)
+}
+
+func (f backupFlag) Set(s string) error {
+	var b BackupTarget
+	if strings.TrimSpace(s) != "" {
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&b); err != nil {
+			return fmt.Errorf("-backup: %w", err)
+		}
+	}
+	*f.b = b
+	return nil
+}
+
+// disabledFlag reads -disabled: a JSON array of component names, as the
+// operator's INFRARED_DISABLED_COMPONENTS carries it.
+type disabledFlag struct{ d *[]string }
+
+func (f disabledFlag) String() string {
+	if f.d == nil || len(*f.d) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(*f.d)
+	return string(b)
+}
+
+func (f disabledFlag) Set(s string) error {
+	var d []string
+	if strings.TrimSpace(s) != "" {
+		if err := json.Unmarshal([]byte(s), &d); err != nil {
+			return fmt.Errorf("-disabled: %w", err)
+		}
+	}
+	*f.d = d
+	return nil
 }
 
 // Edges and Clouds are the values Edge and Cloud may take.
@@ -175,6 +253,9 @@ func main() {
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws" or "linode"`)
 	flag.BoolVar(&d.SubstrateCapable, "substrate-capable", false, "SubstrateCapable: the preflight's result")
+	flag.BoolVar(&d.Stores, "stores", false, "Stores: the platform's own Postgres and SeaweedFS")
+	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "..."} (empty: no backups)`)
+	flag.Var(disabledFlag{&d.Disabled}, "disabled", `Disabled, as a JSON array of component names: ["infisical"] (empty: none)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -192,7 +273,8 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q)\n", n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge)
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, stores %t, backup bucket %q, disabled %q)\n",
+		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.Stores, d.Backup.Bucket, d.Disabled)
 }
 
 // mergeDataFile loads a JSON Data file, then re-applies every flag the user set
@@ -235,6 +317,9 @@ func mergeDataFile(d *Data, path string) error {
 		"images":            func() { d.Images = explicit.Images },
 		"cloud":             func() { d.Cloud = explicit.Cloud },
 		"substrate-capable": func() { d.SubstrateCapable = explicit.SubstrateCapable },
+		"stores":            func() { d.Stores = explicit.Stores },
+		"backup":            func() { d.Backup = explicit.Backup },
+		"disabled":          func() { d.Disabled = explicit.Disabled },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -272,7 +357,42 @@ func validate(d Data) error {
 			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
 		}
 	}
+	for _, name := range d.Disabled {
+		switch {
+		case !dnsLabel.MatchString(name):
+			errs = append(errs, fmt.Errorf("Disabled names components by their Application name, got %q", name))
+		case slices.Contains(Required, name):
+			errs = append(errs, fmt.Errorf("Disabled cannot name %q: the template always renders %q", name, Required))
+		}
+	}
+	errs = append(errs, validateBackup(d.Backup)...)
 	return errors.Join(errs...)
+}
+
+// validateBackup checks the shape of each Backup field that is set; an empty
+// Bucket turns backups off, so the other two need one.
+func validateBackup(b BackupTarget) []error {
+	var errs []error
+	if b.Bucket == "" {
+		if b.Endpoint != "" || b.Region != "" {
+			errs = append(errs, errors.New("Backup.Endpoint and Backup.Region need a Backup.Bucket"))
+		}
+		return errs
+	}
+	if !bucketName.MatchString(b.Bucket) || strings.Contains(b.Bucket, "..") {
+		errs = append(errs, fmt.Errorf("Backup.Bucket must be an S3 bucket name, got %q", b.Bucket))
+	}
+	if b.Endpoint != "" {
+		u, err := url.Parse(b.Endpoint)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+			strings.TrimSuffix(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			errs = append(errs, fmt.Errorf("Backup.Endpoint must be an http(s) URL with a host and nothing after it, got %q", b.Endpoint))
+		}
+	}
+	if b.Region != "" && !regionName.MatchString(b.Region) {
+		errs = append(errs, fmt.Errorf("Backup.Region must be a region name such as us-east-1, got %q", b.Region))
+	}
+	return errs
 }
 
 // OutputPath maps a slash-separated path relative to template/ to its output

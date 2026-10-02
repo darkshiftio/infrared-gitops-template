@@ -185,3 +185,120 @@ func TestBuildRegistryHelpers(t *testing.T) {
 		}
 	}
 }
+
+// The one install's stores fields load from the operator's JSON by their Go
+// names, Backup's keys as the operator's INFRARED_BACKUP spells them included.
+func TestDataFileStoresFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Stores": true,
+		"Backup": {"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"},
+		"Disabled": ["infisical"]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	want := BackupTarget{Bucket: "acme-backups", Endpoint: "https://us-east-1.linodeobjects.com", Region: "us-east-1"}
+	if !d.Stores || d.Backup != want || len(d.Disabled) != 1 || d.Disabled[0] != "infisical" {
+		t.Errorf("loaded Stores %t, Backup %+v, Disabled %q", d.Stores, d.Backup, d.Disabled)
+	}
+}
+
+func TestBackupAndDisabledFlags(t *testing.T) {
+	var b BackupTarget
+	bf := backupFlag{&b}
+	if err := bf.Set(`{"bucket": "acme-backups", "region": "us-east-1"}`); err != nil {
+		t.Fatal(err)
+	}
+	if b != (BackupTarget{Bucket: "acme-backups", Region: "us-east-1"}) {
+		t.Errorf("-backup loaded %+v", b)
+	}
+	if err := bf.Set(`{"buckets": "x"}`); err == nil {
+		t.Error("-backup took an unknown field")
+	}
+	if err := bf.Set(""); err != nil || b != (BackupTarget{}) {
+		t.Errorf("-backup '' = %+v, %v; want the zero value", b, err)
+	}
+	var d []string
+	df := disabledFlag{&d}
+	if err := df.Set(`["infisical", "victoria-metrics-k8s-stack"]`); err != nil || len(d) != 2 {
+		t.Errorf("-disabled loaded %q, %v", d, err)
+	}
+	if err := df.Set(`infisical`); err == nil {
+		t.Error("-disabled took a bare name, not a JSON array")
+	}
+	if err := df.Set(""); err != nil || d != nil {
+		t.Errorf("-disabled '' = %q, %v; want none", d, err)
+	}
+}
+
+func TestValidateStoresFields(t *testing.T) {
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for name, mutate := range map[string]func(*Data){
+		"nothing": func(d *Data) {},
+		"stores":  func(d *Data) { d.Stores = true },
+		"backup on Linode": func(d *Data) {
+			d.Backup = BackupTarget{Bucket: "acme-backups", Endpoint: "https://us-east-1.linodeobjects.com", Region: "us-east-1"}
+		},
+		"backup on AWS":     func(d *Data) { d.Backup = BackupTarget{Bucket: "acme.backups", Region: "us-east-1"} },
+		"disabled":          func(d *Data) { d.Disabled = []string{"infisical", "victoria-metrics-k8s-stack"} },
+		"endpoint, a slash": func(d *Data) { d.Backup = BackupTarget{Bucket: "b-1", Endpoint: "http://seaweedfs.example:8333/"} },
+	} {
+		d := base
+		mutate(&d)
+		if err := validate(d); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, mutate := range map[string]func(*Data){
+		"required component": func(d *Data) { d.Disabled = []string{"infrared"} },
+		"not a name":         func(d *Data) { d.Disabled = []string{"Infisical"} },
+		"empty name":         func(d *Data) { d.Disabled = []string{""} },
+		"bucket too short":   func(d *Data) { d.Backup = BackupTarget{Bucket: "ab"} },
+		"bucket uppercase":   func(d *Data) { d.Backup = BackupTarget{Bucket: "Backups"} },
+		"bucket with a path": func(d *Data) { d.Backup = BackupTarget{Bucket: "backups/linode"} },
+		"endpoint no scheme": func(d *Data) { d.Backup = BackupTarget{Bucket: "backups", Endpoint: "us-east-1.linodeobjects.com"} },
+		"endpoint path":      func(d *Data) { d.Backup = BackupTarget{Bucket: "backups", Endpoint: "https://x.example/bucket"} },
+		"region a URL":       func(d *Data) { d.Backup = BackupTarget{Bucket: "backups", Region: "https://x"} },
+		"no bucket":          func(d *Data) { d.Backup = BackupTarget{Endpoint: "https://x.example"} },
+	} {
+		d := base
+		mutate(&d)
+		if err := validate(d); err == nil {
+			t.Errorf("%s: validated", name)
+		}
+	}
+}
+
+// Templates test Disabled with builtins only, as the components do: a range
+// that sets a variable declared outside it. missingkey=error does not apply to
+// a nil slice, so the zero value renders.
+func TestDisabledIdiom(t *testing.T) {
+	src := t.TempDir()
+	tpl := `[[- $on := true ]][[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` +
+		`[[ if $on ]]on[[ else ]]off[[ end ]]`
+	if err := os.WriteFile(filepath.Join(src, "a.tmpl"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		disabled []string
+		want     string
+	}{
+		{nil, "on"},
+		{[]string{"kpack"}, "on"},
+		{[]string{"kpack", "infisical"}, "off"},
+	} {
+		out := filepath.Join(t.TempDir(), "out")
+		if _, err := Render(src, out, Data{ClusterName: "c1", Disabled: c.disabled}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(filepath.Join(out, "a"))
+		if string(got) != c.want {
+			t.Errorf("Disabled %q rendered %q, want %q", c.disabled, got, c.want)
+		}
+	}
+}

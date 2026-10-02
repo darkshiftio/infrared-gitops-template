@@ -12,6 +12,16 @@ BUILD_REGISTRY ?= $(INFRARED_BUILD_REGISTRY)
 EDGE            ?=
 PLATFORM_DOMAIN ?=
 INFRARED_HOST   ?=
+# STORES: true renders CloudNativePG, one Postgres Cluster and SeaweedFS; BACKUP
+# (JSON, as INFRARED_BACKUP) copies them to a bucket outside the cluster;
+# DISABLED (a JSON array, as INFRARED_DISABLED_COMPONENTS) leaves components out.
+# CLOUD is "", aws or linode. E.g.
+# make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
+#   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
+STORES   ?= false
+BACKUP   ?=
+DISABLED ?=
+CLOUD    ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -19,7 +29,8 @@ INFRARED_HOST   ?=
 render:
 	rm -rf $(OUT)
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
-		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)"
+		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" \
+		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)"
 
 ## verify: the gate CI runs
 verify:

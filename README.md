@@ -58,11 +58,16 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`; empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. While it is false the template leaves Substrate out |
+| `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores") |
+| `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1"}` | the operator's `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty |
+| `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
 encoding/json matches them case-insensitively, so `hack/render -data` reads
-either. The zero value of every newer field renders exactly the files the
+either, and `Backup`'s keys as `INFRARED_BACKUP` spells them (`bucket`, …).
+`hack/render` takes `-stores`, `-backup` as JSON and `-disabled` as a JSON
+array, exactly as the operator's environment carries them. The zero value of every newer field renders exactly the files the
 template rendered before the field existed. Only `.Edge` turns anything on: a
 Traefik cluster that carries `spec.previews` by hand, on any cloud, renders
 the same files as one without (`make verify` checks it). `.Cloud` and
@@ -247,6 +252,8 @@ make render CLUSTER=demo FLAVOR=k3s     # renders into out/
 make render CLUSTER=demo FLAVOR=eks REGION=us-west-2
 make render BUILD_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 make render EDGE=gateway PLATFORM_DOMAIN=preprod.example.com INFRARED_HOST=infrared.preprod.example.com
+make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
+  BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
 make verify                             # the CI gate
 scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
 ```
