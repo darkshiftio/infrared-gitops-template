@@ -1,0 +1,201 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "seaweedfs" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# seaweedfs is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if .Stores -]]
+# SeaweedFS 4.48 (chart 4.48.0), the platform's object store, in the namespace
+# stores. Wave 18, after the Postgres (17) that holds its filer metadata.
+#
+# Across the nodes: three masters (Raft), a volume server and its data on each
+# node's own disk, two filers and two S3 gateways, each on a node of its own.
+# Every file is written to two volume servers (replication 001), so with
+# SeaweedFS stopped on any one node every object still reads; the masters copy
+# what a lost node held back to two nodes (volume.fix.replication). The data is
+# under /var/lib/seaweedfs on each node, never on a cloud volume. The filers
+# keep every entry in the platform's Postgres (database seaweedfs).
+#
+# S3 at http://seaweedfs-s3.stores.svc:8333, with an identity per bucket
+# (components/seaweedfs/identities.yaml). The chart's bucket hook makes the
+# buckets ate-snapshots and registry after each sync.
+#
+# No resources finalizer: removing this Application leaves SeaweedFS running,
+# and its data stays on the nodes' disks either way.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: seaweedfs
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "18"
+spec:
+  project: platform
+  sources:
+    # The S3 keys, the wait for Postgres and the S3 identities.
+    - repoURL: [[ .GitopsRepoURL ]]
+      targetRevision: [[ .DefaultBranch ]]
+      path: components/seaweedfs
+    - repoURL: https://seaweedfs.github.io/seaweedfs/helm
+      chart: seaweedfs
+      targetRevision: 4.48.0
+      helm:
+        releaseName: seaweedfs
+        valuesObject:
+          global:
+            seaweedfs:
+              # The chart's ClusterRole may edit any pod in the cluster; nothing
+              # here needs it.
+              createClusterRole: false
+              # Every file on two volume servers: another server in the same
+              # rack, and each server is on a node of its own.
+              enableReplication: true
+              replicationPlacement: "001"
+          image:
+            registry: docker.io
+            tag: "4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d"
+          master:
+            replicas: 3
+            data:
+              type: hostPath
+              hostPathPrefix: /var/lib/seaweedfs
+            logs:
+              type: ""
+            # The leader copies under-replicated volumes back to two servers,
+            # e.g. after a node is replaced, every 17 minutes. No erasure
+            # coding: it needs more servers than three nodes give.
+            config: |-
+              [master.maintenance]
+              scripts = """
+                lock
+                volume.deleteEmpty -quietFor=24h -apply
+                volume.fix.replication -apply
+                s3.clean.uploads -timeAgo=24h
+                unlock
+              """
+              sleep_minutes = 17
+            resources:
+              requests:
+                cpu: 20m
+                memory: 64Mi
+              limits:
+                memory: 512Mi
+          volume:
+            replicas: 3
+            dataDirs:
+              - name: data
+                type: hostPath
+                hostPathPrefix: /var/lib/seaweedfs
+                maxVolumes: 0
+            # Read-only below 10% free, well before the kubelet evicts pods.
+            minFreeSpacePercent: 10
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                memory: 1Gi
+          filer:
+            replicas: 2
+            data:
+              type: emptyDir
+            logs:
+              type: ""
+            extraEnvironmentVars:
+              # The filer store is the platform's Postgres, not a local LevelDB.
+              WEED_LEVELDB2_ENABLED: "false"
+              WEED_POSTGRES2_ENABLED: "true"
+              WEED_POSTGRES2_HOSTNAME: postgres-rw.stores.svc
+              WEED_POSTGRES2_PORT: "5432"
+              WEED_POSTGRES2_DATABASE: seaweedfs
+              WEED_POSTGRES2_SSLMODE: require
+              WEED_POSTGRES2_CONNECTION_MAX_IDLE: "20"
+            secretExtraEnvironmentVars:
+              WEED_POSTGRES2_USERNAME:
+                secretKeyRef:
+                  name: postgres-seaweedfs
+                  key: username
+              WEED_POSTGRES2_PASSWORD:
+                secretKeyRef:
+                  name: postgres-seaweedfs
+                  key: password
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                memory: 1Gi
+          s3:
+            enabled: true
+            replicas: 2
+            enableAuth: true
+            existingConfigSecret: seaweedfs-s3-identities
+            # Lance's namespace server is not used.
+            lancePort: 0
+            logs:
+              type: ""
+            affinity: |
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: seaweedfs
+                        app.kubernetes.io/instance: seaweedfs
+                        app.kubernetes.io/component: s3
+                    topologyKey: kubernetes.io/hostname
+            # The gateway reads the identities file once, at start: a new set of
+            # identities is a new value here, so the gateways roll.
+            podAnnotations:
+              infrared.darkshift.io/s3-identities: ate-snapshots registry
+            extraEnvironmentVars:
+              S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-ate-snapshots
+                  key: AWS_ACCESS_KEY_ID
+              S3_ATE_SNAPSHOTS_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-ate-snapshots
+                  key: AWS_SECRET_ACCESS_KEY
+              S3_REGISTRY_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-registry
+                  key: AWS_ACCESS_KEY_ID
+              S3_REGISTRY_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-registry
+                  key: AWS_SECRET_ACCESS_KEY
+            createBuckets:
+              - name: ate-snapshots
+              - name: registry
+            resources:
+              requests:
+                cpu: 20m
+                memory: 64Mi
+              limits:
+                memory: 512Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: stores
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # The masters and volume servers keep their data on the node (hostPath),
+    # which Pod Security baseline forbids.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: privileged
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# SeaweedFS runs only with the platform's own stores (the operator's
+# INFRARED_STORES), so this file holds no objects.
+[[- end ]]

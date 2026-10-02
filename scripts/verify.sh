@@ -26,7 +26,10 @@
 #   - the stores: with Stores, CloudNativePG and one Postgres instance on one
 #     20Gi volume (Linode's Retain class on Linode, the only object that names a
 #     Linode class), with a role and a database each for seaweedfs and
-#     substrate; without Stores, no object of them
+#     substrate; SeaweedFS across the nodes with every file on two of them,
+#     its filer metadata in that Postgres, the buckets ate-snapshots and
+#     registry with an identity each and no key in the repo; without Stores,
+#     no object of them
 #   - the infrared Application carries the operator's image registry and pins
 #   - order: a component that needs another one's webhook or store waits for it
 #     in a PreSync hook, and an object a webhook admits has a sync wave of its
@@ -382,10 +385,10 @@ for v in "${variants[@]}"; do
   fi
 
   # The stores: all of them with Stores, none of them without.
-  store_files="$(printf '%s\n' "$reg/components/cloudnative-pg.yaml" "$reg/components/postgres.yaml"
-    find "$out/components/postgres" -name '*.yaml')"
+  store_files="$(printf '%s\n' "$reg/components/cloudnative-pg.yaml" "$reg/components/postgres.yaml" "$reg/components/seaweedfs.yaml"
+    find "$out/components/postgres" "$out/components/seaweedfs" -name '*.yaml')"
   if [ "$stores" = true ]; then
-    for a in cloudnative-pg:16:cnpg-system postgres:17:stores; do
+    for a in cloudnative-pg:16:cnpg-system postgres:17:stores seaweedfs:18:stores; do
       IFS=: read -r name wave ns <<<"$a"
       f="$reg/components/$name.yaml"
       [ "$(sel "$f" '.metadata.name')" = "$name" ] && [ "$(sel "$f" '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "$wave" ] \
@@ -413,6 +416,39 @@ for v in "${variants[@]}"; do
       && [ "$(line "$p" 'select(.kind == "Role") | .rules[0].resourceNames[]')" = "postgres-seaweedfs postgres-substrate" ] \
       && ok "$variant: a role and a database each for seaweedfs and substrate, their Secrets made once" \
       || bad "$variant: the consumers' roles, databases or Secrets are wrong"
+    # SeaweedFS across the nodes, every file on two of them, on the nodes' own
+    # disks, its filer metadata in the platform's Postgres.
+    f="$reg/components/seaweedfs.yaml"
+    v='.spec.sources[] | select(.chart == "seaweedfs") | .helm.valuesObject'
+    sw="$work/$variant-built/seaweedfs.yaml"
+    [ "$(sel "$f" '.spec.sources[] | select(.chart == "seaweedfs") | .targetRevision')" = 4.48.0 ] \
+      && sel "$f" "$v | .image.tag" | grep -qE '^4\.48@sha256:[0-9a-f]{64}$' \
+      && [ "$(sel "$f" "$v | .global.seaweedfs.enableReplication")/$(sel "$f" "$v | .global.seaweedfs.replicationPlacement")" = true/001 ] \
+      && [ "$(sel "$f" "$v | (.master.replicas, .volume.replicas, .filer.replicas, .s3.replicas) | tostring" | tr '\n' ' ')" = "3 3 2 2 " ] \
+      && [ "$(sel "$f" "$v | (.master.data.type, .volume.dataDirs[].type, .filer.data.type) " | tr '\n' ' ')" = "hostPath hostPath emptyDir " ] \
+      && grep -q 'volume.fix.replication -apply' <<<"$(sel "$f" "$v | .master.config")" \
+      && [ "$(sel "$f" "$v | .s3.affinity" | yq -r '.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey')" = kubernetes.io/hostname ] \
+      && ok "$variant: SeaweedFS 4.48: 3 masters, 3 volume servers on the nodes' disks, 2 filers, 2 S3 gateways, every file on two servers" \
+      || bad "$variant: SeaweedFS is not spread over the nodes with every file on two of them"
+    [ "$(sel "$f" "$v | .filer.extraEnvironmentVars | .WEED_LEVELDB2_ENABLED + \" \" + .WEED_POSTGRES2_ENABLED + \" \" + .WEED_POSTGRES2_HOSTNAME + \" \" + .WEED_POSTGRES2_DATABASE")" \
+        = "false true postgres-rw.stores.svc seaweedfs" ] \
+      && [ "$(sel "$f" "$v | .filer.secretExtraEnvironmentVars[].secretKeyRef.name" | sort -u)" = postgres-seaweedfs ] \
+      && [ -z "$(sel "$f" "$v | .filer.extraEnvironmentVars.WEED_POSTGRES2_CONNECTION_MAX_OPEN // \"\"")" ] \
+      && ok "$variant: the filers keep their metadata in the platform's Postgres, as seaweedfs" \
+      || bad "$variant: the filers' store is not the platform's Postgres"
+    # The buckets, and an S3 identity for each that reaches it alone, with keys
+    # the PreSync hook makes and the gateway reads from the environment.
+    ids="$(sel "$sw" 'select(.kind == "Secret" and .metadata.name == "seaweedfs-s3-identities") | .stringData.seaweedfs_s3_config')"
+    [ "$(sel "$f" "$v | .s3.createBuckets[].name" | tr '\n' ' ')" = "ate-snapshots registry " ] \
+      && [ "$(yq -p json -r '.identities[] | .name + ":" + (.actions | map(sub(".*:", "")) | unique | join(","))' <<<"$ids" | tr '\n' ' ')" = "ate-snapshots:ate-snapshots registry:registry " ] \
+      && [ -z "$(yq -p json -r '.identities[].actions[] | select(test(":") | not)' <<<"$ids")" ] \
+      && [ "$(yq -p json -r '.identities[].credentials[] | .accessKey + " " + .secretKey' <<<"$ids" | grep -cvE '^\$\{[A-Z0-9_]+\} \$\{[A-Z0-9_]+\}$' || true)" = 0 ] \
+      && [ "$(yq -p json -r '.identities[].credentials[] | .accessKey + " " + .secretKey' <<<"$ids" | tr -d '${}' | tr ' ' '\n' | sort | tr '\n' ' ')" \
+          = "$(sel "$f" "$v | .s3.extraEnvironmentVars | keys | .[]" | sort | tr '\n' ' ')" ] \
+      && [ "$(sel "$f" "$v | .s3.extraEnvironmentVars[].secretKeyRef.name" | sort -u | tr '\n' ' ')" = "seaweedfs-s3-ate-snapshots seaweedfs-s3-registry " ] \
+      && [ "$(line "$sw" 'select(.kind == "Role") | .rules[0].resourceNames[]')" = "seaweedfs-s3-ate-snapshots seaweedfs-s3-registry" ] \
+      && ok "$variant: buckets ate-snapshots and registry, each with an identity that reaches it alone, no key in the repo" \
+      || bad "$variant: SeaweedFS's buckets or S3 identities are wrong"
   else
     left="$(for f in $store_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: no stores, no stores objects" || bad "$variant: stores objects rendered without Stores: $left"
@@ -512,7 +548,7 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
     "eks aws-load-balancer-controller" \
     "k3s-builds builds" \
     "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge" \
-    "stores-plain cloudnative-pg postgres"; do
+    "stores-plain cloudnative-pg postgres seaweedfs"; do
   read -r base names <<<"$v"
   for name in $names; do
     out="$work/disabled-$name"

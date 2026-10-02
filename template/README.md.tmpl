@@ -33,6 +33,7 @@ components/
 [[- end ]]
 [[- if .Stores ]]
   postgres/                the platform's one Postgres: a CloudNativePG Cluster, a role and a database per consumer
+  seaweedfs/               SeaweedFS's S3 identities and the hook that makes their keys
 [[- end ]]
 products/                  yours: one directory per product (see "Products")
 ```
@@ -77,6 +78,9 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 [[- if not (contains " postgres " $disabled) ]]
 | 17 | `postgres` | the platform's one Postgres (namespace `stores`), with a role and a database for each consumer |
+[[- end ]]
+[[- if not (contains " seaweedfs " $disabled) ]]
+| 18 | `seaweedfs` | SeaweedFS, the platform's object store (namespace `stores`): S3, buckets `ate-snapshots` and `registry` |
 [[- end ]]
 [[- end ]]
 [[- if not (contains " kpack " $disabled) ]]

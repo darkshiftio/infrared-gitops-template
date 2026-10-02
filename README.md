@@ -140,6 +140,7 @@ pull secret, existing Secrets, build registry) win over the file.
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
 | 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1, by digest) |
 | 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
+| 18 | `seaweedfs` (Stores only) | https://seaweedfs.github.io/seaweedfs/helm `seaweedfs` + `components/seaweedfs` | chart 4.48.0 (SeaweedFS 4.48, by digest) |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
@@ -230,7 +231,8 @@ ports to anyone.
 ### The stores
 
 With `.Stores` the template runs the platform's own stores, owned once: one
-Postgres for every consumer that needs a database, in the namespace `stores`.
+Postgres for every consumer that needs a database and one object store for
+every consumer that needs a bucket, both in the namespace `stores`.
 
 | Application | What |
 |---|---|
@@ -248,14 +250,38 @@ cluster's default StorageClass. A deleted node takes no data with it: the
 instance starts again on another node, on the same volume. There is no
 disruption budget, which would keep one instance from moving on a drain.
 
-Neither Application carries a resources finalizer. Leaving one out, or
-turning `.Stores` off, stops managing the Cluster but deletes nothing: deleting
-the operator's CRDs or the Cluster would delete the data. A person removes
-them on purpose.
+None of the three carries a resources finalizer. Leaving one out, or
+turning `.Stores` off, stops managing it but deletes nothing: deleting the
+operator's CRDs or the Cluster would delete the data. A person removes them on
+purpose. SeaweedFS's data stays on the nodes' disks either way.
 
 To add a consumer: a file in `components/postgres/` with its `DatabaseRole`
 (wave 1) and `Database` (wave 2), its role in the PreSync hook's list and in
 its Role's `resourceNames`. The consumer reads `postgres-<role>`.
+
+`seaweedfs` (wave 18) is SeaweedFS 4.48 across the nodes: three masters (Raft),
+a volume server on each node with its data under `/var/lib/seaweedfs` on the
+node's own disk, two filers and two S3 gateways, each pod on a node of its own.
+Every file is written to two volume servers (replication `001`), so with
+SeaweedFS stopped on any one node every object still reads. Every 17 minutes the
+masters' leader copies under-replicated volumes back to two servers
+(`volume.fix.replication`), e.g. onto a node that replaced a lost one; there is
+no erasure coding, which needs more servers than three nodes give. The filers
+keep every entry in the platform's Postgres (database `seaweedfs`), so they are
+stateless. No SeaweedFS object claims a volume, so none is a Linode volume.
+
+S3 answers at `http://seaweedfs-s3.stores.svc:8333`. The chart's bucket hook
+makes the buckets `ate-snapshots` (Agent Substrate's snapshots) and `registry`
+(the registry's images and charts) after each sync, with `weed shell`. Each
+bucket has an S3 identity that reaches it alone (Read, Write, List and Tagging
+on that bucket; no identity is an administrator), in
+`components/seaweedfs/identities.yaml`, which holds no key: each key is an
+environment variable of the gateway, from the Secret
+`seaweedfs-s3-<identity>` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) that a
+PreSync hook makes once and never replaces. A consumer reads the same Secret.
+The hook also waits for the platform's Postgres to answer before the filers
+start. A new set of identities changes the gateways' annotation
+`infrared.darkshift.io/s3-identities`, so they restart and read it.
 
 ### Order on a fresh cluster
 
@@ -321,7 +347,8 @@ in turn and checks that nothing else changes.
 
 The template does not follow dependencies, so leave out only what nothing
 else needs: without `external-secrets` the edge gets no tokens, without
-`cert-manager` no certificates, and without `kpack` there are no builds.
+`cert-manager` no certificates, without `kpack` there are no builds, and without
+`postgres` SeaweedFS has no filer store.
 
 Data that the component's chart never tracked outlives it, Infisical's
 PersistentVolumeClaims and the Secret `infisical-secrets` for one. Deleting

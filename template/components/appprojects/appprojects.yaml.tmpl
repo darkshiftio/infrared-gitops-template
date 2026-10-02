@@ -32,8 +32,9 @@ spec:
     - https://kubernetes-sigs.github.io/external-dns/
 [[- end ]]
 [[- if .Stores ]]
-    # The platform's own stores (Stores): CloudNativePG's charts.
+    # The platform's own stores (Stores): CloudNativePG's and SeaweedFS's charts.
     - https://cloudnative-pg.github.io/charts
+    - https://seaweedfs.github.io/seaweedfs/helm
 [[- end ]]
   # Every namespace and every cluster-scoped kind. This covers, among the
   # rest, builds (namespaces builds and build-credentials, the Role it adds in
