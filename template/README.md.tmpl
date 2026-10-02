@@ -31,6 +31,9 @@ components/
 [[- if eq .Edge "gateway" ]]
   platform-tokens/         ClusterSecretStore infrared-platform, over the Secret infrared-platform-tokens
 [[- end ]]
+[[- if .Stores ]]
+  postgres/                the platform's one Postgres: a CloudNativePG Cluster, a role and a database per consumer
+[[- end ]]
 products/                  yours: one directory per product (see "Products")
 ```
 
@@ -67,6 +70,14 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 [[- if not (contains " infisical " $disabled) ]]
 | 15 | `infisical` | Infisical, self-hosted, with bundled postgres and redis |
+[[- end ]]
+[[- if .Stores ]]
+[[- if not (contains " cloudnative-pg " $disabled) ]]
+| 16 | `cloudnative-pg` | CloudNativePG, the operator behind the platform's one Postgres |
+[[- end ]]
+[[- if not (contains " postgres " $disabled) ]]
+| 17 | `postgres` | the platform's one Postgres (namespace `stores`), with a role and a database for each consumer |
+[[- end ]]
 [[- end ]]
 [[- if not (contains " kpack " $disabled) ]]
 | 25 | `kpack` | kpack, the in-cluster image builder |

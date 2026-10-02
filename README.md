@@ -138,6 +138,8 @@ pull secret, existing Secrets, build registry) win over the file.
 | 12 | `external-dns` (gateway only) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
 | 13 | `edge` (gateway, with a name) | `components/edge` | — |
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
+| 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1, by digest) |
+| 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
@@ -225,6 +227,36 @@ for `.InfraredHost`. The certificate is `*.<PlatformDomain>`, plus
 must admit only Cloudflare to ports 80 and 443; nothing here opens the node
 ports to anyone.
 
+### The stores
+
+With `.Stores` the template runs the platform's own stores, owned once: one
+Postgres for every consumer that needs a database, in the namespace `stores`.
+
+| Application | What |
+|---|---|
+| `cloudnative-pg` | The CloudNativePG operator and its CRDs, in `cnpg-system`. Its webhook CA is its own, so the webhook configurations' `caBundle` is ignored. |
+| `postgres` | `components/postgres`: the Cluster `postgres`, one instance (PostgreSQL 18.6 with the standard extensions, pgvector among them, by digest), and a `DatabaseRole` and a `Database` for each consumer: `seaweedfs`, SeaweedFS's filer metadata, and `substrate`, Agent Substrate's records, ready before Substrate is installed. A PreSync hook makes each role's Secret `postgres-<role>` (`kubernetes.io/basic-auth`, label `cnpg.io/reload`) once and never replaces it; CloudNativePG sets the role's password from it, and the consumer reads the same Secret. |
+
+The Cluster has one volume of 20 GiB, for its data and its WAL together. On
+`.Cloud` `linode` its StorageClass is `linode-block-storage-retain`, the Retain
+class of Linode's volume driver (CSI 1.1.4), which the cluster brings: the
+driver is installed with the nodes, so the template never installs it. Every
+Linode volume is a service on the Linode account, which holds a limited
+number, so the Cluster is the only object that names a Linode class, and
+`make verify` checks it. On any other cloud the volume comes from the
+cluster's default StorageClass. A deleted node takes no data with it: the
+instance starts again on another node, on the same volume. There is no
+disruption budget, which would keep one instance from moving on a drain.
+
+Neither Application carries a resources finalizer. Leaving one out, or
+turning `.Stores` off, stops managing the Cluster but deletes nothing: deleting
+the operator's CRDs or the Cluster would delete the data. A person removes
+them on purpose.
+
+To add a consumer: a file in `components/postgres/` with its `DatabaseRole`
+(wave 1) and `Database` (wave 2), its role in the PreSync hook's list and in
+its Role's `resourceNames`. The consumer reads `postgres-<role>`.
+
 ### Order on a fresh cluster
 
 On a fresh cluster the root app-of-apps creates every Application within
@@ -281,7 +313,8 @@ template file may be named `product-*` or live under `products/` or
 name: any Application in the table above but `appprojects`, `infrared` and
 `argocd`, which `hack/render` refuses. The component's Application renders to
 comments only, the root app-of-apps prunes it, and its resources finalizer
-deletes what it deployed. Only the Application is left out: the files under
+deletes what it deployed; the stores carry none, so they are only no longer
+managed (see "The stores"). Only the Application is left out: the files under
 `components/<name>/` still render, and nothing points at them. The repo's
 README lists what was left out. `make verify` disables each optional component
 in turn and checks that nothing else changes.

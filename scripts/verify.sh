@@ -23,6 +23,10 @@
 #     operator passes it) Envoy Gateway, the origin issuer, external-dns, the
 #     platform's tokens and the edge's Gateway, certificate and routes are
 #     there and wired to each other; without it no file of them holds an object
+#   - the stores: with Stores, CloudNativePG and one Postgres instance on one
+#     20Gi volume (Linode's Retain class on Linode, the only object that names a
+#     Linode class), with a role and a database each for seaweedfs and
+#     substrate; without Stores, no object of them
 #   - the infrared Application carries the operator's image registry and pins
 #   - order: a component that needs another one's webhook or store waits for it
 #     in a PreSync hook, and an object a webhook admits has a sync wave of its
@@ -97,6 +101,10 @@ cat >"$work/gateway.json" <<EOF
 }
 EOF
 
+# The stores variant: the gateway's Data plus the platform's own stores, on
+# Linode, with Infisical left out.
+yq -p json -o json '. + {"Stores": true, "Disabled": ["infisical"]}' "$work/gateway.json" >"$work/stores.json"
+
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 variants=(
@@ -105,6 +113,8 @@ variants=(
   "k3s-builds demo-b k3s $ecr_registry"
   "eks-builds demo-eks-b eks $ecr_registry -region us-west-2 -pull-secret infrared-pull"
   "gateway demo-gw k3s - -data $work/gateway.json"
+  "stores demo-st k3s - -data $work/stores.json"
+  "stores-plain demo-sp k3s - -stores"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -129,6 +139,15 @@ for v in "${variants[@]}"; do
   data_file="$(sed -n -E 's/.*-data ([^ ]+).*/\1/p' <<<"${extra:-}")"
   if [ -z "$pull_secret" ] && [ -n "$data_file" ]; then
     pull_secret="$(yq -p json -r '.imagePullSecret // .ImagePullSecret // ""' "$data_file")"
+  fi
+  # The variant's edge, stores and cloud, by flag or in its -data file.
+  edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
+  stores=false cloud=""
+  grep -qw -- -stores <<<"${extra:-}" && stores=true
+  if [ -n "$data_file" ]; then
+    edge="$(yq -p json -r '.Edge // ""' "$data_file")"
+    stores="$(yq -p json -r '.Stores // false' "$data_file")"
+    cloud="$(yq -p json -r '.Cloud // ""' "$data_file")"
   fi
 
   # Leftover template syntax, only in files that came from a .tmpl (vendored
@@ -280,7 +299,7 @@ for v in "${variants[@]}"; do
   edge_files="$(printf '%s\n' "$reg/components/envoy-gateway.yaml" "$reg/components/origin-ca-issuer.yaml" \
     "$reg/components/platform-tokens.yaml" "$reg/components/external-dns.yaml" "$reg/components/edge.yaml"
     find "$out/components/edge" "$out/components/external-dns" "$out/components/platform-tokens" -name '*.yaml')"
-  if [ "$variant" = gateway ]; then
+  if [ "$edge" = gateway ]; then
     for a in envoy-gateway:11 origin-ca-issuer:11 platform-tokens:11 external-dns:12 edge:13; do
       name="${a%%:*}" f="$reg/components/${a%%:*}.yaml"
       [ "$(sel "$f" '.metadata.name')" = "$name" ] && [ "$(sel "$f" '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "${a#*:}" ] \
@@ -360,6 +379,53 @@ for v in "${variants[@]}"; do
     [ -z "$left" ] && ok "$variant: the edge is not a Gateway, no edge objects" || bad "$variant: edge objects rendered without Edge gateway: $left"
     [ -z "$(sel "$reg/components/infrared.yaml" '.spec.sources[0].helm.valuesObject | (.image, .operator, .api, .ui, .runner, .mcp.image) | select(. != null) | key')" ] \
       || bad "$variant: image values rendered without the operator's image registry"
+  fi
+
+  # The stores: all of them with Stores, none of them without.
+  store_files="$(printf '%s\n' "$reg/components/cloudnative-pg.yaml" "$reg/components/postgres.yaml"
+    find "$out/components/postgres" -name '*.yaml')"
+  if [ "$stores" = true ]; then
+    for a in cloudnative-pg:16:cnpg-system postgres:17:stores; do
+      IFS=: read -r name wave ns <<<"$a"
+      f="$reg/components/$name.yaml"
+      [ "$(sel "$f" '.metadata.name')" = "$name" ] && [ "$(sel "$f" '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "$wave" ] \
+        && [ "$(sel "$f" '.spec.project')" = platform ] && [ "$(sel "$f" '.spec.destination.namespace')" = "$ns" ] \
+        && [ -z "$(sel "$f" '.metadata.finalizers[]?')" ] \
+        && ok "$variant: $name Application (wave $wave, no finalizer: removing it leaves the data)" || bad "$variant: $name Application missing or wrong"
+    done
+    [ "$(sel "$reg/components/cloudnative-pg.yaml" '.spec.sources[0].chart + " " + .spec.sources[0].targetRevision')" = "cloudnative-pg 0.29.1" ] \
+      && sel "$reg/components/cloudnative-pg.yaml" '.spec.sources[0].helm.valuesObject.image.tag' | grep -qE '^1\.30\.1@sha256:[0-9a-f]{64}$' \
+      && ok "$variant: CloudNativePG 1.30.1 (chart 0.29.1), by digest" || bad "$variant: CloudNativePG is not chart 0.29.1 with 1.30.1 by digest"
+    p="$work/$variant-built/postgres.yaml"
+    c='select(.kind == "Cluster" and .metadata.name == "postgres")'
+    class="$(sel "$p" "$c | .spec.storage.storageClass // \"\"")"
+    want_class=""
+    [ "$cloud" = linode ] && want_class=linode-block-storage-retain
+    [ "$(sel "$p" "$c | .spec.instances")" = 1 ] && [ "$(sel "$p" "$c | .spec.storage.size")" = 20Gi ] \
+      && [ -z "$(sel "$p" "$c | .spec.walStorage // \"\"")" ] && [ "$class" = "$want_class" ] \
+      && sel "$p" "$c | .spec.imageName" | grep -qE '@sha256:[0-9a-f]{64}$' \
+      && ok "$variant: one Postgres instance on one 20Gi volume of class '${class:-the default}', image by digest" \
+      || bad "$variant: the Postgres Cluster is not one instance on one 20Gi volume of class '${want_class:-the default}' (got '$class')"
+    # A role and a database for each consumer, and only these consumers.
+    [ "$(line "$p" 'select(.kind == "DatabaseRole") | .spec.name + ":" + (.spec.login | tostring) + ":" + .spec.passwordSecret.name')" \
+        = "seaweedfs:true:postgres-seaweedfs substrate:true:postgres-substrate" ] \
+      && [ "$(line "$p" 'select(.kind == "Database") | .spec.name + ":" + .spec.owner')" = "seaweedfs:seaweedfs substrate:substrate" ] \
+      && [ "$(line "$p" 'select(.kind == "Role") | .rules[0].resourceNames[]')" = "postgres-seaweedfs postgres-substrate" ] \
+      && ok "$variant: a role and a database each for seaweedfs and substrate, their Secrets made once" \
+      || bad "$variant: the consumers' roles, databases or Secrets are wrong"
+  else
+    left="$(for f in $store_files; do holds_objects "$f" && echo "$f"; done || true)"
+    [ -z "$left" ] && ok "$variant: no stores, no stores objects" || bad "$variant: stores objects rendered without Stores: $left"
+  fi
+  # Each Linode volume is a service on a limited Linode account: only the
+  # Postgres Cluster names Linode's volume class, so it makes the one volume.
+  linode_refs="$(grep -rhE '^[^#]*linode-block-storage' "$out" "$work/$variant-built" | sed 's/^ *//' | sort | uniq -c | sed 's/^ *//' || true)"
+  if [ "$stores" = true ] && [ "$cloud" = linode ]; then
+    [ "$linode_refs" = "2 storageClass: linode-block-storage-retain" ] \
+      && [ "$(grep -rlE '^[^#]*linode-block-storage' "$out" | sed "s#^$out/##")" = components/postgres/cluster.yaml ] \
+      && ok "$variant: only the Postgres Cluster names a Linode volume class" || bad "$variant: a Linode volume class is named elsewhere: $linode_refs"
+  else
+    [ -z "$linode_refs" ] && ok "$variant: no Linode volume class named" || bad "$variant: a Linode volume class is named: $linode_refs"
   fi
 
   # Every repository a platform Application pulls from is a source of the
@@ -445,7 +511,8 @@ render_again() {
 for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s-stack" \
     "eks aws-load-balancer-controller" \
     "k3s-builds builds" \
-    "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge"; do
+    "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge" \
+    "stores-plain cloudnative-pg postgres"; do
   read -r base names <<<"$v"
   for name in $names; do
     out="$work/disabled-$name"

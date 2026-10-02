@@ -31,6 +31,10 @@ spec:
     - https://github.com/cloudflare/origin-ca-issuer
     - https://kubernetes-sigs.github.io/external-dns/
 [[- end ]]
+[[- if .Stores ]]
+    # The platform's own stores (Stores): CloudNativePG's charts.
+    - https://cloudnative-pg.github.io/charts
+[[- end ]]
   # Every namespace and every cluster-scoped kind. This covers, among the
   # rest, builds (namespaces builds and build-credentials, the Role it adds in
   # ir-org-[[ .OrgName ]], Namespaces, and kpack's ClusterStore, ClusterStack

@@ -1,0 +1,71 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "cloudnative-pg" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# cloudnative-pg is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if .Stores -]]
+# CloudNativePG 1.30.1 (chart 0.29.1), the operator behind the platform's one
+# Postgres (the `postgres` Application, wave 17), with its CRDs. Wave 16.
+#
+# No resources finalizer: removing this Application leaves the operator and its
+# CRDs running. Deleting the CRDs would delete every Cluster, and with it the
+# platform's data.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloudnative-pg
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "16"
+spec:
+  project: platform
+  sources:
+    - repoURL: https://cloudnative-pg.github.io/charts
+      chart: cloudnative-pg
+      targetRevision: 0.29.1
+      helm:
+        releaseName: cloudnative-pg
+        valuesObject:
+          image:
+            # The operator, by digest; the chart's tag is its appVersion.
+            tag: "1.30.1@sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  # The operator writes its own webhook CA into these; that is not drift.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      # CloudNativePG's CRDs outgrow the last-applied annotation.
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# CloudNativePG runs only with the platform's own stores (the operator's
+# INFRARED_STORES), so this file holds no objects.
+[[- end ]]
