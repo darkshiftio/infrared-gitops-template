@@ -30,6 +30,8 @@
 #     products-project.yaml, values/)
 #   - with Edge "" or traefik, a platform domain, Infrared's host, a cloud and
 #     the preflight's result change nothing: the render equals the plain one
+#   - a component named in Disabled renders its Application to comments only,
+#     and nothing else changes but the repo's README.md
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, and kinds it lacks are skipped)
 #
@@ -379,6 +381,43 @@ for v in "traefik -edge traefik" \
   else
     bad "$variant: differs from the plain k3s render: $(diff -rq "$work/k3s" "$work/$variant" | head -n 5 | tr '\n' ' ')"
   fi
+done
+
+# --- Disabled leaves a component out, and changes nothing else ----------------------
+# Each optional component, named in Disabled on a variant that renders it: its
+# Application holds no objects, and only it and the repo's README.md change.
+# appprojects, argocd and infrared cannot be disabled (hack/render refuses them).
+# render_again <variant> <out> [flags]: renders a variant of the list above again.
+render_again() {
+  local name="$1" dir="$2" v variant cluster flavor registry extra
+  shift 2
+  for v in "${variants[@]}"; do
+    read -r variant cluster flavor registry extra <<<"$v"
+    [ "$variant" = "$name" ] || continue
+    [ "$registry" = - ] && registry=""
+    # shellcheck disable=SC2086
+    "$work/render" -out "$dir" -cluster "$cluster" -flavor "$flavor" -build-registry "$registry" $extra "$@" >/dev/null
+    echo "$cluster"
+    return 0
+  done
+  return 1
+}
+for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s-stack" \
+    "eks aws-load-balancer-controller" \
+    "k3s-builds builds" \
+    "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge"; do
+  read -r base names <<<"$v"
+  for name in $names; do
+    out="$work/disabled-$name"
+    cluster="$(render_again "$base" "$out" -disabled "[\"$name\"]")" || { bad "disabled $name: no variant $base"; continue; }
+    app="registry/clusters/$cluster/components/$name.yaml"
+    changed="$({ diff -rq "$work/$base" "$out" || true; } | sed -E "s#^Files $work/$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+    if holds_objects "$work/$base/$app" && ! holds_objects "$out/$app" && [ "$changed" = "README.md $app" ]; then
+      ok "disabled $name: its Application is left out, nothing else changes"
+    else
+      bad "disabled $name: changed '$changed'; want README.md and an empty $app"
+    fi
+  done
 done
 
 # --- a build registry that is not ECR ---------------------------------------------

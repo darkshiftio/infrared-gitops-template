@@ -1,3 +1,5 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "victoria-metrics-k8s-stack" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if $on -]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -103,3 +105,7 @@ spec:
         duration: 10s
         factor: 2
         maxDuration: 3m
+[[- else -]]
+# victoria-metrics-k8s-stack is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- end ]]

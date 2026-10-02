@@ -231,6 +231,26 @@ does not render, so a re-hydration leaves both alone. Keep it that way: no
 template file may be named `product-*` or live under `products/` or
 `registry/clusters/__cluster__/values/`.
 
+### Disabled components
+
+`.Disabled` names components the template leaves out, by their Application
+name: any Application in the table above but `appprojects`, `infrared` and
+`argocd`, which `hack/render` refuses. The component's Application renders to
+comments only, the root app-of-apps prunes it, and its resources finalizer
+deletes what it deployed. Only the Application is left out: the files under
+`components/<name>/` still render, and nothing points at them. The repo's
+README lists what was left out. `make verify` disables each optional component
+in turn and checks that nothing else changes.
+
+The template does not follow dependencies, so leave out only what nothing
+else needs: without `external-secrets` the edge gets no tokens, without
+`cert-manager` no certificates, and without `kpack` there are no builds.
+
+Data that the component's chart never tracked outlives it, Infisical's
+PersistentVolumeClaims and the Secret `infisical-secrets` for one. Deleting
+the namespace removes them. A cluster that leaves out `infisical` runs
+neither Infisical nor its bundled Postgres and Redis.
+
 ### Infisical: known MVP limitations
 
 - `infisical-secrets` (`ENCRYPTION_KEY`, `AUTH_SECRET`, `SITE_URL`) is created

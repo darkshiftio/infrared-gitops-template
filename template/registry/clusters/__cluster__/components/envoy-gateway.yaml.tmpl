@@ -1,4 +1,8 @@
-[[- if eq .Edge "gateway" -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "envoy-gateway" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# envoy-gateway is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if eq .Edge "gateway" -]]
 # Envoy Gateway, the edge's controller: its own CRDs (gateway-crds-helm) and the
 # controller (gateway-helm), both v1.9.2 from one OCI repository. Wave 11.
 #

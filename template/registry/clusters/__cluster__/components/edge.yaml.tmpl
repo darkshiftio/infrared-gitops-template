@@ -1,4 +1,8 @@
-[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "edge" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# edge is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 # The edge (components/edge): one Gateway behind Cloudflare's proxy, its origin
 # certificate, the redirect from port 80, and Infrared's own route. Wave 13,
 # after Envoy Gateway and the origin issuer (11) and external-dns (12).

@@ -1,4 +1,8 @@
-[[- if eq .Edge "gateway" -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "origin-ca-issuer" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# origin-ca-issuer is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if eq .Edge "gateway" -]]
 # Cloudflare's origin issuer (origin-ca-issuer v0.15.0): a cert-manager issuer
 # that has Cloudflare's Origin CA sign the edge's certificate. Cloudflare trusts
 # those certificates and nothing else does, so every name served with one is

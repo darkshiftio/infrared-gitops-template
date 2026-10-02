@@ -1,4 +1,8 @@
-[[- if eq .ClusterFlavor "eks" -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "aws-load-balancer-controller" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# aws-load-balancer-controller is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if eq .ClusterFlavor "eks" -]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

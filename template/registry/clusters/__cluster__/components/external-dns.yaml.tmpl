@@ -1,4 +1,8 @@
-[[- if eq .Edge "gateway" -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "external-dns" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# external-dns is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if eq .Edge "gateway" -]]
 # external-dns, on Cloudflare: the edge's DNS records, proxied. Wave 12.
 #
 # What it publishes. Only HTTPRoutes labelled infrared.darkshift.io/dns=edge,

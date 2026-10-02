@@ -1,4 +1,8 @@
-[[- if eq .Edge "gateway" -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "platform-tokens" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# platform-tokens is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if eq .Edge "gateway" -]]
 # The platform's tokens (components/platform-tokens): the ClusterSecretStore
 # `infrared-platform`, which reads the Secret `infrared-platform-tokens` that
 # the Infrared chart keeps in [[ .InfraredNamespace ]], and the account it reads

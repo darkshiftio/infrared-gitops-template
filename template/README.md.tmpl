@@ -1,3 +1,4 @@
+[[- $disabled := " " ]][[ range .Disabled ]][[ $disabled = printf "%s%s " $disabled . ]][[ end -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -38,28 +39,51 @@ products/                  yours: one directory per product (see "Products")
 | Wave | Application | What |
 |---|---|---|
 | 0 | `appprojects` | AppProjects `platform` and `infrared` |
+[[- if not (contains " cert-manager " $disabled) ]]
 | 10 | `cert-manager` | cert-manager, CRDs included |
+[[- end ]]
+[[- if not (contains " external-secrets " $disabled) ]]
 | 10 | `external-secrets` | External Secrets Operator |
-[[- if eq .ClusterFlavor "eks" ]]
+[[- end ]]
+[[- if and (eq .ClusterFlavor "eks") (not (contains " aws-load-balancer-controller " $disabled)) ]]
 | 10 | `aws-load-balancer-controller` | AWS Load Balancer Controller (EKS Pod Identity) |
 [[- end ]]
 [[- if eq .Edge "gateway" ]]
+[[- if not (contains " platform-tokens " $disabled) ]]
 | 11 | `platform-tokens` | ClusterSecretStore `infrared-platform`: the platform's tokens, from the Secret `infrared-platform-tokens` |
+[[- end ]]
+[[- if not (contains " envoy-gateway " $disabled) ]]
 | 11 | `envoy-gateway` | Envoy Gateway, the edge's controller, and its CRDs |
+[[- end ]]
+[[- if not (contains " origin-ca-issuer " $disabled) ]]
 | 11 | `origin-ca-issuer` | Cloudflare's origin issuer, for the edge's certificate |
+[[- end ]]
+[[- if not (contains " external-dns " $disabled) ]]
 | 12 | `external-dns` | the edge's DNS records in Cloudflare, proxied, owned by `[[ .ClusterName ]]` |
-[[- if or .PlatformDomain .InfraredHost ]]
+[[- end ]]
+[[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
 | 13 | `edge` | Gateway `edge`, its origin certificate, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
 [[- end ]]
 [[- end ]]
+[[- if not (contains " infisical " $disabled) ]]
 | 15 | `infisical` | Infisical, self-hosted, with bundled postgres and redis |
+[[- end ]]
+[[- if not (contains " kpack " $disabled) ]]
 | 25 | `kpack` | kpack, the in-cluster image builder |
-[[- if .BuildRegistry ]]
+[[- end ]]
+[[- if and .BuildRegistry (not (contains " builds " $disabled)) ]]
 | 26 | `builds` | ClusterBuilder `infrared-builder` and build credentials; pushes to `[[ .BuildRegistry ]]` |
 [[- end ]]
+[[- if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
 | 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana |
+[[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
 | 100 | `argocd` | Argo CD, managing itself |
+[[- if .Disabled ]]
+
+Left out on purpose, as the Installation's disabled components:
+[[- range $i, $c := .Disabled ]][[ if $i ]],[[ end ]] `[[ $c ]]`[[ end ]].
+[[- end ]]
 
 Every Application here carries the label
 `app.kubernetes.io/part-of: infrared-gitops`; Infrared finds them by it.
@@ -80,14 +104,14 @@ kubectl -n [[ .InfraredNamespace ]] port-forward svc/infrared 8080:80        # h
 # Argo CD (user admin)
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 kubectl -n argocd port-forward svc/argocd-server 8081:80                     # http://localhost:8081
-
+[[ if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
 # Grafana (user admin)
 kubectl -n monitoring get secret victoria-metrics-k8s-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 kubectl -n monitoring port-forward svc/victoria-metrics-k8s-stack-grafana 3000:80
-
+[[ end ]][[ if not (contains " infisical " $disabled) ]]
 # Infisical
 kubectl -n infisical port-forward svc/infisical-infisical-standalone-infisical 8082:8080
-```
+[[ end ]]```
 
 ## Products
 
@@ -156,4 +180,6 @@ Nothing secret is in this repo. The Secrets Infrared needs
 (`infrared-setup`, `infrared-session`, `infrared-mcp-token`, `infrared-mcp-access`,
 `infrared-api-tokens` in `[[ .InfraredNamespace ]]`) were created by the first
 `helm install`, and the `infrared` Application tells the chart they exist.
+[[- if not (contains " infisical " $disabled) ]]
 `infisical-secrets` is generated once, on the first sync, and never rotated.
+[[- end ]]
