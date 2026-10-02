@@ -1,0 +1,11 @@
+[[- if eq .Edge "gateway" -]]
+# The second source of the `external-dns` Application (wave 12): its Cloudflare
+# token, copied from the platform's tokens.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cloudflare-api-token.yaml
+[[- else -]]
+# external-dns runs only when the edge is a Gateway, so this component holds no
+# objects and no Application points at it.
+[[- end ]]

@@ -1,0 +1,28 @@
+[[- if eq .Edge "gateway" -]]
+# external-dns's Cloudflare token: the key cloudflare-api-token of the Secret
+# infrared-platform-tokens ([[ .InfraredNamespace ]]), copied through the
+# ClusterSecretStore infrared-platform (components/platform-tokens) into
+# external-dns/cloudflare-api-token, key api-token. The values the API server
+# would fill in are written out, so Argo CD compares like with like.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cloudflare-api-token
+  namespace: external-dns
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: cloudflare-api-token
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: api-token
+      remoteRef:
+        key: infrared-platform-tokens
+        property: cloudflare-api-token
+[[- else -]]
+# external-dns runs only when the edge is a Gateway: no token to copy.
+[[- end ]]

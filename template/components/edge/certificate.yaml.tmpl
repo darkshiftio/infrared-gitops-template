@@ -1,0 +1,81 @@
+[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+[[- /* Infrared's name needs a name of its own on the certificate only when the wildcard does not cover it: one label under the platform domain. */ -]]
+[[- $covered := false ]]
+[[- if and .PlatformDomain .InfraredHost ]]
+[[- $label := trimSuffix (printf ".%s" .PlatformDomain) .InfraredHost ]]
+[[- if and (hasSuffix (printf ".%s" .PlatformDomain) .InfraredHost) (not (contains "." $label)) ]][[ $covered = true ]][[ end ]]
+[[- end -]]
+# =============================================================================
+# The edge's certificate, from Cloudflare's Origin CA.
+# =============================================================================
+# Cloudflare's proxy is the only client of this Gateway (external-dns proxies
+# every record), and it checks the origin's certificate against Cloudflare's
+# Origin CA (SSL/TLS mode Full (strict)). The browser sees Cloudflare's own edge
+# certificate, never this one: a name served with it must stay proxied.
+#
+# An OriginIssuer next to the Gateway, not a ClusterOriginIssuer: only
+# certificates in this namespace can use it, and its token stays here too. The
+# token is the platform's cloudflare-api-token, which needs the permission
+# Zone / SSL and Certificates / Edit; reading /certificates succeeds without it,
+# and issuing does not.
+#
+# cert-manager renews it, at two thirds of its 90 days. Cloudflare sends no
+# expiry notice.
+# =============================================================================
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cloudflare-api-token
+  namespace: envoy-gateway-system
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: cloudflare-api-token
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: api-token
+      remoteRef:
+        key: infrared-platform-tokens
+        property: cloudflare-api-token
+---
+apiVersion: cert-manager.k8s.cloudflare.com/v1
+kind: OriginIssuer
+metadata:
+  name: cloudflare-origin
+  namespace: envoy-gateway-system
+spec:
+  # RSA, the key cert-manager makes by default; the private key never leaves the cluster.
+  requestType: OriginRSA
+  auth:
+    tokenRef:
+      name: cloudflare-api-token
+      key: api-token
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge
+  namespace: envoy-gateway-system
+spec:
+  secretName: edge-tls
+  dnsNames:
+[[- if .PlatformDomain ]]
+    - [[ printf "*.%s" .PlatformDomain | quote ]]
+[[- end ]]
+[[- if and .InfraredHost (not $covered) ]]
+    - [[ .InfraredHost | quote ]]
+[[- end ]]
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    group: cert-manager.k8s.cloudflare.com
+    kind: OriginIssuer
+    name: cloudflare-origin
+[[- else -]]
+# The edge is not a Gateway with a name to serve: no certificate.
+[[- end ]]

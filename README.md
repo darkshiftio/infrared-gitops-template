@@ -51,9 +51,23 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.InfraredNamespace` | `infrared` | where the release lives |
 | `.ImagePullSecret` | `` or `infrared-pull` | name of a pull Secret in `.InfraredNamespace`, empty for none |
 | `.BuildRegistry` (JSON `buildRegistry`) | `` or `123456789012.dkr.ecr.us-east-1.amazonaws.com/acme` | registry prefix kpack pushes product images to (the operator's `INFRARED_BUILD_REGISTRY`, chart value `builds.registry`); empty turns builds off |
+| `.Edge` | `` \| `traefik` \| `gateway` | the Installation's `spec.edge`. `` and `traefik` both mean Traefik, as before; `gateway` turns on the edge (see "The edge"). Test it with `eq .Edge "gateway"`, never `if .Edge` |
+| `.PlatformDomain` | `` or `preprod.example.com` | the Installation's `spec.previews.domain`; in gateway mode zones answer at `<zone>.<PlatformDomain>` |
+| `.InfraredHost` | `` or `infrared.preprod.example.com` | the host of the Installation's `spec.previews.signInURL`, lowercase, no port; in gateway mode Infrared's own name |
+| `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
+| `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`; empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
+| `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
+| `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. While it is false the template leaves Substrate out |
 
-The operator's JSON uses camelCase names (`clusterName`, …); encoding/json
-matches them case-insensitively, so `hack/render -data` reads either.
+The operator's JSON uses camelCase names for the older fields (`clusterName`,
+…) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
+encoding/json matches them case-insensitively, so `hack/render -data` reads
+either. The zero value of every newer field renders exactly the files the
+template rendered before the field existed. Only `.Edge` turns anything on: a
+Traefik cluster that carries `spec.previews` by hand, on any cloud, renders
+the same files as one without (`make verify` checks it). `.Cloud` and
+`.SubstrateCapable` switch nothing yet; they are for the components that need
+them (Linode's volume driver, Substrate).
 
 ### What the operator does after rendering
 
@@ -113,6 +127,11 @@ pull secret, existing Secrets, build registry) win over the file.
 | 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.2 |
 | 10 | `external-secrets` | https://charts.external-secrets.io `external-secrets` | 2.11.0 |
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
+| 11 | `platform-tokens` (gateway only) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
+| 11 | `envoy-gateway` (gateway only) | `docker.io/envoyproxy` `gateway-crds-helm` (its own CRDs) and `gateway-helm` | v1.9.2 |
+| 11 | `origin-ca-issuer` (gateway only) | `ghcr.io/cloudflare/origin-ca-issuer-charts` `origin-ca-issuer`, CRDs from https://github.com/cloudflare/origin-ca-issuer `deploy/crds` | chart 0.6.10, v0.15.0 |
+| 12 | `external-dns` (gateway only) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
+| 13 | `edge` (gateway, with a name) | `components/edge` | — |
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
@@ -151,6 +170,51 @@ file of the component and `builds.yaml` render to a comment only.
 The `infrared` Application passes `builds.registry: .BuildRegistry` to the
 chart, so Argo CD's render keeps the operator's `INFRARED_BUILD_REGISTRY`.
 
+### Images
+
+With `.ImageRegistry` set the `infrared` Application also passes
+`image.registry`, and for each entry of `.Images` that component's
+`<component>.image.tag` and `.digest` (`operator`, `api`, `ui`, `runner`, and
+`mcp.image` beside the MCP Secrets), so Argo CD's adoption keeps every image
+where the install pinned it. A template version that is not a `v` tag (a
+commit SHA) renders quoted, so a SHA of digits stays a string.
+
+### The edge
+
+With `.Edge` `gateway` the cluster is served by one Envoy Gateway behind
+Cloudflare's proxy, with an origin certificate from Cloudflare. Each file of
+it renders to a comment only otherwise.
+
+| Application | What |
+|---|---|
+| `platform-tokens` | ClusterSecretStore `infrared-platform` (Kubernetes provider) reading the Secret `infrared-platform-tokens` in `.InfraredNamespace`, which the Infrared chart keeps, as ServiceAccount `platform-tokens-reader` (get on that one Secret). `conditions` limit it to the namespaces below. |
+| `envoy-gateway` | Envoy Gateway's CRDs and controller. The Gateway API CRDs are the cluster's (k3s ships them) and are never installed here. |
+| `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. |
+| `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. |
+| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect` and HTTPRoute `.InfraredNamespace`/`infrared`. |
+
+The Gateway's listeners:
+
+| Listener | Hostname | Who attaches |
+|---|---|---|
+| `http` | `*.<PlatformDomain>` | the redirect only (same namespace) |
+| `https` | `*.<PlatformDomain>` | zones: namespaces labelled `infrared.darkshift.io/zone` |
+| `infrared-http` | `.InfraredHost` | the redirect only |
+| `infrared-https` | `.InfraredHost` | `.InfraredNamespace` only; an exact name beats the wildcard, so nothing else can answer for Infrared |
+
+No load balancer is ever made: on Linode a LoadBalancer Service is a
+NodeBalancer. Envoy runs as a DaemonSet that binds each node's ports 80 and
+443 (hostPort onto its 10080 and 10443), and its Service is NodePort with
+`externalTrafficPolicy: Local`, which makes Envoy Gateway report the
+ExternalIP of every node with a ready Envoy as the Gateway's addresses.
+external-dns publishes those, so a rebuilt node's address reaches DNS by
+itself. The redirect route names no host, so it takes each listener's: one
+proxied wildcard record `*.<PlatformDomain>`, which covers every zone, and one
+for `.InfraredHost`. The certificate is `*.<PlatformDomain>`, plus
+`.InfraredHost` when the wildcard does not cover it. The cluster's firewall
+must admit only Cloudflare to ports 80 and 443; nothing here opens the node
+ports to anyone.
+
 ### Products
 
 A product's gitops lives in `products/<product>/` of the gitops repo
@@ -182,8 +246,15 @@ template file may be named `product-*` or live under `products/` or
 make render CLUSTER=demo FLAVOR=k3s     # renders into out/
 make render CLUSTER=demo FLAVOR=eks REGION=us-west-2
 make render BUILD_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
+make render EDGE=gateway PLATFORM_DOMAIN=preprod.example.com INFRARED_HOST=infrared.preprod.example.com
 make verify                             # the CI gate
+scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
 ```
+
+`scripts/compare-render.sh <ref>` renders `<ref>` and this tree with the same
+flags and fails unless every file `<ref>` renders is the same byte for byte
+and every file only this tree renders holds no objects. Extra flags after the
+ref are passed to both renders (e.g. `-flavor eks`).
 
 `hack/render` (Go, stdlib only) implements the contract exactly; run it with
 `-h` for every Data flag, or `-data file.json` to render from the same JSON

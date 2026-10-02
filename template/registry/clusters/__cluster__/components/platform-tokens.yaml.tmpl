@@ -1,0 +1,45 @@
+[[- if eq .Edge "gateway" -]]
+# The platform's tokens (components/platform-tokens): the ClusterSecretStore
+# `infrared-platform`, which reads the Secret `infrared-platform-tokens` that
+# the Infrared chart keeps in [[ .InfraredNamespace ]], and the account it reads
+# it with. Each component that needs a token copies it into its own namespace
+# with an ExternalSecret. Wave 11: right after External Secrets (10), whose CRDs
+# it uses.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-tokens
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "11"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/platform-tokens
+  destination:
+    server: https://kubernetes.default.svc
+    # The chart's release namespace: it exists before this repo does.
+    namespace: [[ .InfraredNamespace ]]
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# The platform's tokens are copied by External Secrets only when the edge is a
+# Gateway (the Installation's spec.edge: gateway), whose components use them.
+# This cluster's edge is Traefik, so this file holds no objects.
+[[- end ]]

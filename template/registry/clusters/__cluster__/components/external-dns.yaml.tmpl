@@ -1,0 +1,97 @@
+[[- if eq .Edge "gateway" -]]
+# external-dns, on Cloudflare: the edge's DNS records, proxied. Wave 12.
+#
+# What it publishes. Only HTTPRoutes labelled infrared.darkshift.io/dns=edge,
+# attached to the Gateway `edge` (envoy-gateway-system): the edge's own redirect
+# route, which gives one proxied wildcard record, *.<platform domain>, and one
+# for Infrared's own name. A zone needs no record of its own, because the
+# wildcard covers it. The targets are the Gateway's addresses: the ExternalIP of
+# each node that runs Envoy (see components/edge/gateway.yaml), so a rebuilt
+# node's new address reaches DNS by itself.
+#
+# What it leaves alone. Every record it writes carries a TXT ownership record
+# (prefix _edns., owner [[ .ClusterName ]]), and it changes or deletes only
+# records with that owner. Records another cluster or a person made in the same
+# zone stay as they are; where one already holds a name it would publish, it
+# skips that name. No domain filter: Cloudflare matches it against zone names,
+# so a filter below the zone would hide the zone itself, and the label and the
+# Gateway's listener hostnames already decide every name it writes. It reaches
+# only the zones its token may edit.
+#
+# The token is the platform's (components/external-dns copies it here).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-dns
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "12"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/external-dns/
+      chart: external-dns
+      targetRevision: 1.22.0
+      helm:
+        releaseName: external-dns
+        valuesObject:
+          provider:
+            name: cloudflare
+          env:
+            - name: CF_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-api-token
+                  key: api-token
+          sources:
+            - gateway-httproute
+          gatewayNamespace: envoy-gateway-system
+          labelFilter: infrared.darkshift.io/dns=edge
+          # sync deletes records, but only those it owns (txtOwnerId).
+          policy: sync
+          registry: txt
+          txtOwnerId: [[ .ClusterName ]]
+          txtPrefix: _edns.
+          interval: 1m
+          extraArgs:
+            - --gateway-name=edge
+            # Every record behind Cloudflare: the origin certificate is trusted
+            # by Cloudflare alone.
+            - --cloudflare-proxied
+            # A TXT name may not hold the wildcard's asterisk.
+            - --txt-wildcard-replacement=wildcard
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+    - repoURL: [[ .GitopsRepoURL ]]
+      targetRevision: [[ .DefaultBranch ]]
+      path: components/external-dns
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-dns
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# external-dns is installed only when the edge is a Gateway (the Installation's
+# spec.edge: gateway). This cluster's edge is Traefik, so this file holds no
+# objects.
+[[- end ]]

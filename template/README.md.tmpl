@@ -21,8 +21,15 @@ components/
   appprojects/             AppProjects platform and infrared
   argocd/                  Argo CD, vendored and pinned; Argo CD manages itself from here
   builds/                  kpack builder and build credentials[[ if not .BuildRegistry ]] (off: no build registry)[[ end ]]
+[[- if eq .Edge "gateway" ]]
+  edge/                    the Gateway, its origin certificate and the edge's routes
+  external-dns/            external-dns's Cloudflare token, copied from the platform's tokens
+[[- end ]]
   infisical/               creates the Secret infisical/infisical-secrets on first sync
   kpack/                   kpack, vendored and pinned
+[[- if eq .Edge "gateway" ]]
+  platform-tokens/         ClusterSecretStore infrared-platform, over the Secret infrared-platform-tokens
+[[- end ]]
 products/                  yours: one directory per product (see "Products")
 ```
 
@@ -35,6 +42,15 @@ products/                  yours: one directory per product (see "Products")
 | 10 | `external-secrets` | External Secrets Operator |
 [[- if eq .ClusterFlavor "eks" ]]
 | 10 | `aws-load-balancer-controller` | AWS Load Balancer Controller (EKS Pod Identity) |
+[[- end ]]
+[[- if eq .Edge "gateway" ]]
+| 11 | `platform-tokens` | ClusterSecretStore `infrared-platform`: the platform's tokens, from the Secret `infrared-platform-tokens` |
+| 11 | `envoy-gateway` | Envoy Gateway, the edge's controller, and its CRDs |
+| 11 | `origin-ca-issuer` | Cloudflare's origin issuer, for the edge's certificate |
+| 12 | `external-dns` | the edge's DNS records in Cloudflare, proxied, owned by `[[ .ClusterName ]]` |
+[[- if or .PlatformDomain .InfraredHost ]]
+| 13 | `edge` | Gateway `edge`, its origin certificate, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+[[- end ]]
 [[- end ]]
 | 15 | `infisical` | Infisical, self-hosted, with bundled postgres and redis |
 | 25 | `kpack` | kpack, the in-cluster image builder |
@@ -49,8 +65,13 @@ Every Application here carries the label
 `app.kubernetes.io/part-of: infrared-gitops`; Infrared finds them by it.
 
 ## Getting in
-
+[[ if and (eq .Edge "gateway") .InfraredHost ]]
+Infrared answers at **https://[[ .InfraredHost ]]**, through Cloudflare's
+proxy.[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
+Everything else is reached by port-forward.
+[[- else ]]
 Everything is reached by port-forward; nothing is exposed.
+[[- end ]]
 
 ```bash
 # Infrared

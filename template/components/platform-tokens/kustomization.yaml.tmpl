@@ -1,0 +1,11 @@
+[[- if eq .Edge "gateway" -]]
+# The platform's tokens (the `platform-tokens` Application, wave 11). See
+# store.yaml. Every object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - store.yaml
+[[- else -]]
+# The platform's tokens are copied only when the edge is a Gateway, so this
+# component holds no objects and no Application points at it.
+[[- end ]]

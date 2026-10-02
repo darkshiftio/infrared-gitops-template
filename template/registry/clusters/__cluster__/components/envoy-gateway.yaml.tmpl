@@ -1,0 +1,74 @@
+[[- if eq .Edge "gateway" -]]
+# Envoy Gateway, the edge's controller: its own CRDs (gateway-crds-helm) and the
+# controller (gateway-helm), both v1.9.2 from one OCI repository. Wave 11.
+#
+# The Gateway API CRDs are not installed here. The cluster provides them (k3s
+# installs them with its gateway-api-crd chart), and a second copy would take
+# turns owning them: gateway-crds-helm installs only Envoy Gateway's own, and
+# gateway-helm's CRD subchart is off.
+#
+# The GatewayClass, the EnvoyProxy that puts Envoy on each node's ports 80 and
+# 443, the Gateway and its routes are the `edge` Application's (wave 13).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: envoy-gateway
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "11"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    - repoURL: docker.io/envoyproxy
+      chart: gateway-crds-helm
+      targetRevision: v1.9.2
+      helm:
+        releaseName: envoy-gateway-crds
+        valuesObject:
+          crds:
+            gatewayAPI:
+              enabled: false
+            envoyGateway:
+              enabled: true
+    - repoURL: docker.io/envoyproxy
+      chart: gateway-helm
+      targetRevision: v1.9.2
+      helm:
+        releaseName: envoy-gateway
+        # The CRD subchart would bring the Gateway API CRDs as well.
+        skipCrds: true
+        valuesObject:
+          crds:
+            enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: envoy-gateway-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # The Envoy fleet binds each node's ports 80 and 443 (hostPort), which Pod
+    # Security baseline forbids.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: privileged
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      # Envoy Gateway's CRDs outgrow the last-applied annotation.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# Envoy Gateway is installed only when the edge is a Gateway (the Installation's
+# spec.edge: gateway). This cluster's edge is Traefik, so this file holds no
+# objects.
+[[- end ]]

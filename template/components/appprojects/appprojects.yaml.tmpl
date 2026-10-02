@@ -23,6 +23,14 @@ spec:
     - https://aws.github.io/eks-charts
     - https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/
     - https://victoriametrics.github.io/helm-charts/
+[[- if eq .Edge "gateway" ]]
+    # The edge (Edge gateway): Envoy Gateway's and Cloudflare's origin issuer's
+    # OCI charts (registered below), the issuer's CRDs at its tag, external-dns.
+    - docker.io/envoyproxy
+    - ghcr.io/cloudflare/origin-ca-issuer-charts
+    - https://github.com/cloudflare/origin-ca-issuer
+    - https://kubernetes-sigs.github.io/external-dns/
+[[- end ]]
   # Every namespace and every cluster-scoped kind. This covers, among the
   # rest, builds (namespaces builds and build-credentials, the Role it adds in
   # ir-org-[[ .OrgName ]], Namespaces, and kpack's ClusterStore, ClusterStack
@@ -59,3 +67,37 @@ spec:
       kind: ClusterRole
     - group: rbac.authorization.k8s.io
       kind: ClusterRoleBinding
+[[- if eq .Edge "gateway" ]]
+---
+# Argo CD pulls an OCI helm chart only from a registered repository. Envoy
+# Gateway's and Cloudflare's origin issuer's charts are public, so these entries
+# carry no credentials. They are here, at wave 0, because an Application cannot
+# register the repository its own chart comes from.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: envoy-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+    app.kubernetes.io/part-of: infrared-gitops
+stringData:
+  name: envoy-charts
+  type: helm
+  url: docker.io/envoyproxy
+  enableOCI: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: origin-ca-issuer-charts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+    app.kubernetes.io/part-of: infrared-gitops
+stringData:
+  name: origin-ca-issuer-charts
+  type: helm
+  url: ghcr.io/cloudflare/origin-ca-issuer-charts
+  enableOCI: "true"
+[[- end ]]

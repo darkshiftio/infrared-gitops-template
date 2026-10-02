@@ -1,0 +1,79 @@
+[[- if eq .Edge "gateway" -]]
+# =============================================================================
+# infrared-platform: the one place the platform's tokens are read from.
+# =============================================================================
+# The Infrared chart keeps every token the platform's own components use in one
+# Secret, `infrared-platform-tokens` in [[ .InfraredNamespace ]], made from the
+# install's values. This store reads that Secret, and only that one, as the
+# ServiceAccount below. A component that needs a token copies the key it needs
+# into its own namespace with an ExternalSecret:
+#
+#   key                    copied to
+#   cloudflare-api-token   external-dns/cloudflare-api-token (DNS records)
+#                          envoy-gateway-system/cloudflare-api-token (origin
+#                          certificates)
+#
+# `conditions` limits the store to those namespaces: any other namespace,
+# a product's zone included, cannot read a token through it.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-tokens-reader
+  namespace: [[ .InfraredNamespace ]]
+---
+# get on the one Secret, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-tokens-reader
+  namespace: [[ .InfraredNamespace ]]
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["infrared-platform-tokens"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-tokens-reader
+  namespace: [[ .InfraredNamespace ]]
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: platform-tokens-reader
+subjects:
+  - kind: ServiceAccount
+    name: platform-tokens-reader
+    namespace: [[ .InfraredNamespace ]]
+---
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: infrared-platform
+  annotations:
+    # After its ServiceAccount and Role.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  conditions:
+    - namespaces:
+        - external-dns
+        - envoy-gateway-system
+  provider:
+    kubernetes:
+      remoteNamespace: [[ .InfraredNamespace ]]
+      server:
+        url: https://kubernetes.default.svc
+        caProvider:
+          type: ConfigMap
+          name: kube-root-ca.crt
+          key: ca.crt
+          namespace: [[ .InfraredNamespace ]]
+      auth:
+        serviceAccount:
+          name: platform-tokens-reader
+          namespace: [[ .InfraredNamespace ]]
+[[- else -]]
+# The platform's tokens are copied only when the edge is a Gateway: no store.
+[[- end ]]
