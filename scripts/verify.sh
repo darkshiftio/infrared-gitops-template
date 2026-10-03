@@ -298,12 +298,13 @@ for v in "${variants[@]}"; do
     while IFS=$'\t' read -r name layer; do
       [ -n "$name" ] || continue
       if [ -z "$layer" ]; then
-        if grep -qw -- "$name" <<<"${unlabelled//\$cluster/$cluster}"; then
+        # Whole names only: grep -w would take a hyphen for a word's end.
+        if tr ' ' '\n' <<<"${unlabelled//\$cluster/$cluster}" | grep -qxF -- "$name"; then
           layers_by_name=$((layers_by_name + 1))
         else
           bad "$variant: Application $name has no infrared.darkshift.io/layer"
         fi
-      elif grep -qw -- "$layer" <<<"$known_layers"; then
+      elif tr ' ' '\n' <<<"$known_layers" | grep -qxF -- "$layer"; then
         layers_labelled=$((layers_labelled + 1))
       else
         bad "$variant: Application $name names layer $layer, which infrared-api does not know ($known_layers)"
