@@ -559,6 +559,13 @@ pod and an API key does not. The pods carry `app.kubernetes.io/name: zot`, which
 the operator's network rule for publishing steps selects. Removing the `zot`
 Application removes Zot and nothing in the bucket.
 
+Two checks run against a cluster, never from CI:
+
+```bash
+scripts/registry-check.sh <context> <org>    # D1, D2: <org> pushes only under <org>/, a copy outlives Zot's pod, and the admin's delete of it leaves the source's blobs
+scripts/registry-build-check.sh <context>    # D3: kpack pushes a whole build to the registry's address over plain HTTP, and a node runs it by digest
+```
+
 ### Agent Substrate
 
 With `.Stores`, `.Registry` and `.SubstrateCapable` together the template runs
