@@ -704,12 +704,14 @@ The operator's scaffold writes those files for a Product it delivers, and also
 `products`, when the gitops repo has none; it adds each later Product's
 destination to it. The template never renders that file either.
 
-One check runs against a cluster with a Gateway edge, never from CI. It goes
-through Infrared's API with a bearer token, as the UI does, and removes what it
-made unless `KEEP=1`:
+Two checks run against a cluster with a Gateway edge, never from CI. They go
+through Infrared's API with a bearer token, as the UI does, and remove what they
+made unless `KEEP=1`. The publish check starts one agent run, which is billed
+to the org's Anthropic key, so it starts nothing without `SPEND=1`:
 
 ```bash
-scripts/product-check.sh <context> <org> <token file>   # G1, G3 to G5: a Product from a starter zip is built, released and promoted, and its zone answers over HTTPS behind sign-in
+scripts/product-check.sh <context> <org> <token file>           # G1, G3 to G5: a Product from a starter zip is built, released and promoted, and its zone answers over HTTPS behind sign-in
+SPEND=1 scripts/publish-check.sh <context> <org> <token file>   # G6: a step publishes an image and a chart, a zone runs the image by digest, and the step's key is refused outside its org's path
 ```
 
 ### Disabled components
