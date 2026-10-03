@@ -61,20 +61,25 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores") |
 | `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1"}` | the operator's `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty |
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
+| `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
+| `.ForgeURL` | `` or `http://gitea-http.infrared.svc.cluster.local:3000` | the forge's root as the cluster reaches it, without a trailing slash: repos are `<ForgeURL>/<owner>/<repo>`. Empty for GitHub |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
 encoding/json matches them case-insensitively, so `hack/render -data` reads
 either, and `Backup`'s keys as `INFRARED_BACKUP` spells them (`bucket`, …).
 `hack/render` takes `-stores`, `-backup` as JSON and `-disabled` as a JSON
-array, exactly as the operator's environment carries them.
+array, exactly as the operator's environment carries them, and `-forge` with
+`-forge-url`.
 
 The zero value of every newer field renders exactly the files the template
-rendered before the field existed. Only `.Edge`, `.Stores` and `.Disabled` turn
-anything on or off: a Traefik cluster that carries `spec.previews` by hand, on
-any cloud, renders the same files as one without, and so does a cluster with a
-`.Backup` but no stores (`make verify` checks both). `.Cloud` only picks the
-Postgres volume's StorageClass when `.Stores` is on (Linode's Retain class on
+rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled` and
+`.Forge` turn anything on or off: a Traefik cluster that carries
+`spec.previews` by hand, on any cloud, renders the same files as one without
+(`make verify` checks it). A `.Backup` without the stores, and `.Forge` `gitea`,
+change only what the `infrared` Application carries (see "The install's
+settings"). `.Cloud` only picks the StorageClass of the Postgres volume, when
+`.Stores` is on, and of Gitea's, for `.Forge` `gitea` (Linode's Retain class on
 `linode`); `.SubstrateCapable` switches nothing yet, it is for Substrate.
 
 ### What the operator does after rendering
@@ -109,6 +114,41 @@ Adoption therefore never rotates them. It uses `releaseName: infrared`,
 `ServerSideApply=true`, and carries no resources finalizer, so deleting the
 Application never deletes the CRDs and with them every Infrared object.
 
+#### The install's settings
+
+Argo CD renders the chart from the Application's values alone, so every setting
+the install gave `helm install` has to be in them too. Until then it survives
+only while Helm still owns the field, and the next change drops it: the stores,
+for one, which the operator reads at every render of this repo. The template
+writes each setting from the Data the operator hands it, and only when it is
+set, so a cluster without it renders the same file as before:
+
+| Data | Chart value |
+|---|---|
+| `.ImageRegistry`, `.Images` | `image.registry`, each `<component>.image` (see "Images") |
+| `.Edge` `gateway` | `installation.edge: gateway` |
+| `.PlatformDomain` and `.InfraredHost`, in gateway mode | `installation.previews.domain`, and `installation.previews.signInURL: https://<InfraredHost>` |
+| `.Stores` | `stores.enabled: true` |
+| `.Backup.Bucket` (with its `.Endpoint` and `.Region` when set) | `backup` |
+| `.Disabled` | `components.disabled` |
+| `.Forge` `gitea` | `gitea.enabled: true`, `giteaAdmin.existingSecret: infrared-gitea-admin`, and on `.Cloud` `linode` `gitea.persistence.storageClass: linode-block-storage-retain` |
+
+The edge and its previews are carried in gateway mode only. The operator writes
+`spec.edge` and `spec.previews` to the Installation only while each is empty, so
+on a Traefik cluster they are the Installation's own, often set by a person,
+and the chart never had them: carrying them would change that cluster's files
+for nothing. `installation.previews` is rebuilt from the two names the Data has,
+so a previews setting with more fields (`managedRoots`, `ingressHost`, ...)
+loses them in Argo CD's render, which matters only if the Installation's
+`spec.previews` is ever emptied.
+
+`giteaAdmin.existingSecret` keeps Gitea's site admin as the install made it,
+like the Secrets above: the chart generates `infrared-gitea-admin` once, and
+`lookup` returns nothing under Argo CD. Gitea's volume keeps the install's
+size only while that is the chart's default, 10Gi: Argo CD would try to shrink
+a larger claim, which Kubernetes refuses, so a larger size goes in the org's
+values file as well.
+
 ### The org's values file
 
 The `infrared` Application has two sources: the chart first, then this gitops
@@ -124,7 +164,8 @@ digit; the chart source comes first so that a branch name can never be taken
 for it. Org settings such as `ui.extensions` therefore belong in the values
 file, never in `infrared.yaml`. Argo CD gives `valuesObject` precedence over
 `valueFiles`, so the values the template sets (cluster name, template version,
-pull secret, existing Secrets, build registry) win over the file.
+pull secret, existing Secrets, build registry, and the install's settings in
+"The install's settings") win over the file.
 
 ## Components
 
@@ -247,8 +288,9 @@ The Cluster has one volume of 20 GiB, for its data and its WAL together. On
 class of Linode's volume driver (CSI 1.1.4), which the cluster brings: the
 driver is installed with the nodes, so the template never installs it. Every
 Linode volume is a service on the Linode account, which holds a limited
-number, so the Cluster is the only object that names a Linode class, and
-`make verify` checks it. On any other cloud the volume comes from the
+number, so the Cluster and, with `.Forge` `gitea`, Gitea's volume (through the
+`infrared` Application's values) are the only things that name a Linode class,
+and `make verify` checks it. On any other cloud the volume comes from the
 cluster's default StorageClass. A deleted node takes no data with it: the
 instance starts again on another node, on the same volume. There is no
 disruption budget, which would keep one instance from moving on a drain.
@@ -411,6 +453,7 @@ make render BUILD_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 make render EDGE=gateway PLATFORM_DOMAIN=preprod.example.com INFRARED_HOST=infrared.preprod.example.com
 make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
+make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
 make verify                             # the CI gate
 scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
 ```

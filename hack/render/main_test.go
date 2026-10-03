@@ -302,3 +302,50 @@ func TestDisabledIdiom(t *testing.T) {
 		}
 	}
 }
+
+// The forge fields load from the operator's JSON by their Go names. Gitea needs
+// its URL, and GitHub, the empty Forge, has none.
+func TestForgeFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Forge": "gitea", "ForgeURL": "http://gitea-http.infrared.svc.cluster.local:3000"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.Forge != "gitea" || d.ForgeURL != "http://gitea-http.infrared.svc.cluster.local:3000" {
+		t.Errorf("loaded Forge %q, ForgeURL %q", d.Forge, d.ForgeURL)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct{ forge, url string }{
+		{"", ""},
+		{"gitea", "http://gitea-http.infrared.svc.cluster.local:3000"},
+		{"gitea", "https://git.example.com/gitea"},
+	} {
+		d := base
+		d.Forge, d.ForgeURL = c.forge, c.url
+		if err := validate(d); err != nil {
+			t.Errorf("Forge %q, ForgeURL %q: %v", c.forge, c.url, err)
+		}
+	}
+	for _, c := range []struct{ forge, url string }{
+		{"github", ""},
+		{"Gitea", "http://gitea-http:3000"},
+		{"gitea", ""},
+		{"gitea", "http://gitea-http:3000/"},
+		{"gitea", "gitea-http:3000"},
+		{"gitea", "http://user:secret@gitea-http:3000"},
+		{"gitea", "http://gitea-http:3000?x=1"},
+		{"", "http://gitea-http:3000"},
+	} {
+		d := base
+		d.Forge, d.ForgeURL = c.forge, c.url
+		if err := validate(d); err == nil {
+			t.Errorf("Forge %q, ForgeURL %q: validated", c.forge, c.url)
+		}
+	}
+}

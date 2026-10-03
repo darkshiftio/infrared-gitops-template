@@ -24,13 +24,17 @@
 #     platform's tokens and the edge's Gateway, certificate and routes are
 #     there and wired to each other; without it no file of them holds an object
 #   - the stores: with Stores, CloudNativePG and one Postgres instance on one
-#     20Gi volume (Linode's Retain class on Linode, the only object that names a
-#     Linode class), with a role and a database each for seaweedfs and
-#     substrate; SeaweedFS across the nodes with every file on two of them,
-#     its filer metadata in that Postgres, the buckets ate-snapshots and
-#     registry with an identity each and no key in the repo; without Stores,
-#     no object of them
-#   - the infrared Application carries the operator's image registry and pins
+#     20Gi volume (Linode's Retain class on Linode), with a role and a database
+#     each for seaweedfs and substrate; SeaweedFS across the nodes with every
+#     file on two of them, its filer metadata in that Postgres, the buckets
+#     ate-snapshots and registry with an identity each and no key in the repo;
+#     without Stores, no object of them
+#   - only the Postgres Cluster and, with Forge gitea, Gitea's volume name a
+#     Linode volume class, and only on Linode: each makes one volume
+#   - the infrared Application carries the operator's image registry and pins,
+#     and exactly the install's settings that are set: the edge and its
+#     previews in gateway mode, the stores, the backup bucket, the components
+#     left out, and Gitea with its admin Secret for Forge gitea
 #   - order: a component that needs another one's webhook or store waits for it
 #     in a PreSync hook, and an object a webhook admits has a sync wave of its
 #     own in its component (the edge race of a first install)
@@ -39,13 +43,15 @@
 #   - nothing renders where the org's own files live (products/, product-*,
 #     products-project.yaml, values/)
 #   - with Edge "" or traefik, a platform domain, Infrared's host, a cloud and
-#     the preflight's result change nothing, and neither does a backup bucket
-#     without the stores: the render equals the plain one
+#     the preflight's result change nothing: the render equals the plain one;
+#     a backup bucket without the stores, and Forge gitea, change only the
+#     infrared Application's values
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys; without one, no backup object
 #   - a component named in Disabled renders its Application to comments only,
-#     and nothing else changes but the repo's README.md
+#     and nothing else changes but the repo's README.md and the infrared
+#     Application's components.disabled
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, and kinds it lacks are skipped)
 #
@@ -109,11 +115,14 @@ cat >"$work/gateway.json" <<EOF
 EOF
 
 # The stores variant: the gateway's Data plus the platform's own stores, on
-# Linode, with Infisical left out and the stores backed up outside.
+# Linode, with Infisical left out, the stores backed up outside, and Gitea as
+# the forge. It is the shape of an install like linode-mgmt's.
 backup_bucket=acme-backups
 backup_endpoint=https://objects.example.com
+gitea_url=http://gitea-http.infrared.svc.cluster.local:3000
 yq -p json -o json '. + {"Stores": true, "Disabled": ["infisical"],
-    "Backup": {"Bucket": "'"$backup_bucket"'", "Endpoint": "'"$backup_endpoint"'", "Region": "region-1"}}' \
+    "Backup": {"Bucket": "'"$backup_bucket"'", "Endpoint": "'"$backup_endpoint"'", "Region": "region-1"},
+    "Forge": "gitea", "ForgeURL": "'"$gitea_url"'"}' \
   "$work/gateway.json" >"$work/stores.json"
 
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
@@ -127,6 +136,7 @@ variants=(
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
+  "gitea demo-gt k3s - -forge gitea -forge-url $gitea_url"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -152,9 +162,11 @@ for v in "${variants[@]}"; do
   if [ -z "$pull_secret" ] && [ -n "$data_file" ]; then
     pull_secret="$(yq -p json -r '.imagePullSecret // .ImagePullSecret // ""' "$data_file")"
   fi
-  # The variant's edge, stores and cloud, by flag or in its -data file.
+  # The variant's edge, stores, cloud, names, backup bucket, components left
+  # out and forge, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
-  stores=false cloud="" backup="" endpoint=""
+  stores=false cloud="" backup="" endpoint="" region="" domain="" host="" disabled="[]"
+  forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
   if [ -n "$data_file" ]; then
@@ -163,8 +175,15 @@ for v in "${variants[@]}"; do
     cloud="$(yq -p json -r '.Cloud // ""' "$data_file")"
     backup="$(yq -p json -r '.Backup.Bucket // ""' "$data_file")"
     endpoint="$(yq -p json -r '.Backup.Endpoint // ""' "$data_file")"
+    region="$(yq -p json -r '.Backup.Region // ""' "$data_file")"
+    domain="$(yq -p json -r '.PlatformDomain // ""' "$data_file")"
+    host="$(yq -p json -r '.InfraredHost // ""' "$data_file")"
+    disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
+    forge="$(yq -p json -r '.Forge // ""' "$data_file")"
   fi
-  # Backups need the stores.
+  # The infrared Application carries the install's backup bucket even without
+  # the stores, but backups need the stores.
+  carried_backup="$backup"
   [ "$stores" = true ] || backup=""
 
   # Leftover template syntax, only in files that came from a .tmpl (vendored
@@ -216,6 +235,30 @@ for v in "${variants[@]}"; do
   fi
   [ "$(yq -r '.spec.sources[0].helm.valuesObject.builds.registry' "$reg/components/infrared.yaml")" = "$registry" ] \
     || bad "$variant: infrared Application builds.registry is not \"$registry\""
+  # The install's settings that Argo CD's render of the chart has to keep once
+  # it adopts the release, each carried only when it is set: exactly these
+  # keys, with these values. The edge and its previews only in gateway mode.
+  want=""
+  if [ "$edge" = gateway ]; then
+    want="installation: {edge: gateway"
+    [ -n "$domain" ] && [ -n "$host" ] && want="$want, previews: {domain: \"$domain\", signInURL: \"https://$host\"}"
+    want="$want}"$'\n'
+  fi
+  [ "$stores" = true ] && want="${want}stores: {enabled: true}"$'\n'
+  [ -n "$carried_backup" ] \
+    && want="${want}backup: {bucket: \"$carried_backup\"${endpoint:+, endpoint: \"$endpoint\"}${region:+, region: \"$region\"}}"$'\n'
+  [ "$disabled" != "[]" ] && want="${want}components: {disabled: $disabled}"$'\n'
+  if [ "$forge" = gitea ]; then
+    gitea_class=""
+    [ "$cloud" = linode ] && gitea_class=", persistence: {storageClass: linode-block-storage-retain}"
+    want="${want}gitea: {enabled: true$gitea_class}"$'\n'"giteaAdmin: {existingSecret: infrared-gitea-admin}"$'\n'
+  fi
+  want="$(yq -o json -I0 'sort_keys(..)' <<<"${want:-"{}"}")"
+  got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject
+      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin)$"))) | sort_keys(..)' \
+    "$reg/components/infrared.yaml")"
+  [ "$got" = "$want" ] && ok "$variant: infrared Application carries the install's settings: $got" \
+    || bad "$variant: infrared Application carries $got, want $want"
 
   # The infrared Application: the chart first, with the org's values file from
   # this repo ($values) under the template's own valuesObject.
@@ -525,12 +568,19 @@ for v in "${variants[@]}"; do
     [ -z "$left" ] && ok "$variant: no stores, no stores objects" || bad "$variant: stores objects rendered without Stores: $left"
   fi
   # Each Linode volume is a service on a limited Linode account: only the
-  # Postgres Cluster names Linode's volume class, so it makes the one volume.
+  # Postgres Cluster and, with Forge gitea, Gitea's volume (through the infrared
+  # Application's values) name Linode's volume class, so each makes one volume.
+  # The Cluster is counted twice, rendered and built.
   linode_refs="$(grep -rhE '^[^#]*linode-block-storage' "$out" "$work/$variant-built" | sed 's/^ *//' | sort | uniq -c | sed 's/^ *//' || true)"
-  if [ "$stores" = true ] && [ "$cloud" = linode ]; then
-    [ "$linode_refs" = "2 storageClass: linode-block-storage-retain" ] \
-      && [ "$(grep -rlE '^[^#]*linode-block-storage' "$out" | sed "s#^$out/##")" = components/postgres/cluster.yaml ] \
-      && ok "$variant: only the Postgres Cluster names a Linode volume class" || bad "$variant: a Linode volume class is named elsewhere: $linode_refs"
+  linode_files="$(grep -rlE '^[^#]*linode-block-storage' "$out" | sed "s#^$out/##" | sort | tr '\n' ' ' | sed 's/ $//' || true)"
+  want_files=() want_refs=0
+  if [ "$cloud" = linode ]; then
+    [ "$stores" = true ] && want_files+=(components/postgres/cluster.yaml) && want_refs=$((want_refs + 2))
+    [ "$forge" = gitea ] && want_files+=("registry/clusters/$cluster/components/infrared.yaml") && want_refs=$((want_refs + 1))
+  fi
+  if [ "$want_refs" -gt 0 ]; then
+    [ "$linode_refs" = "$want_refs storageClass: linode-block-storage-retain" ] && [ "$linode_files" = "${want_files[*]}" ] \
+      && ok "$variant: only ${want_files[*]} name a Linode volume class" || bad "$variant: a Linode volume class is named elsewhere: $linode_files ($linode_refs)"
   else
     [ -z "$linode_refs" ] && ok "$variant: no Linode volume class named" || bad "$variant: a Linode volume class is named: $linode_refs"
   fi
@@ -582,24 +632,40 @@ done
 # An Installation on Traefik may carry previews settings by hand (infrared-mgmt
 # does) and sit on any cloud. With Edge "" or traefik, a platform domain,
 # Infrared's host, a cloud and the preflight's result must change nothing, so
-# such a cluster's gitops repo hydrates to the same files when this lands.
-for v in "traefik -edge traefik" \
-    "traefik-facts -platform-domain preprod.example.com -infrared-host infrared.example.com -cloud aws -substrate-capable" \
-    "traefik-linode -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
-    "backup-alone -backup {\"bucket\":\"$backup_bucket\",\"endpoint\":\"$backup_endpoint\"}"; do
-  read -r variant extra <<<"$v"
+# such a cluster's gitops repo hydrates to the same files when this lands. A
+# backup bucket without the stores, and Gitea as the forge without a build
+# registry, change only the infrared Application, which carries them (checked
+# above for the gitea variant).
+infrared_app=registry/clusters/demo/components/infrared.yaml
+for v in "traefik - -edge traefik" \
+    "traefik-facts - -platform-domain preprod.example.com -infrared-host infrared.example.com -cloud aws -substrate-capable" \
+    "traefik-linode - -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
+    "backup-alone $infrared_app -backup {\"bucket\":\"$backup_bucket\",\"endpoint\":\"$backup_endpoint\"}" \
+    "gitea-alone $infrared_app -forge gitea -forge-url $gitea_url -cloud linode"; do
+  read -r variant changes extra <<<"$v"
+  [ "$changes" = - ] && changes=""
   # shellcheck disable=SC2086
   "$work/render" -out "$work/$variant" -cluster demo -flavor k3s -build-registry "" $extra >/dev/null
-  if diff -r "$work/k3s" "$work/$variant" >/dev/null; then
-    ok "$variant: renders exactly what the plain k3s render does"
+  changed="$({ diff -rq "$work/k3s" "$work/$variant" || true; } | sed -E "s#^Files $work/k3s/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$changed" = "$changes" ]; then
+    ok "$variant: renders exactly what the plain k3s render does${changes:+, but $changes}"
   else
-    bad "$variant: differs from the plain k3s render: $(diff -rq "$work/k3s" "$work/$variant" | head -n 5 | tr '\n' ' ')"
+    bad "$variant: differs from the plain k3s render in '$changed', want '$changes'"
   fi
 done
+[ "$(yq -r '.spec.sources[0].helm.valuesObject.backup | .bucket + " " + .endpoint' "$work/backup-alone/$infrared_app")" \
+    = "$backup_bucket $backup_endpoint" ] \
+  && ok "backup-alone: the infrared Application carries the bucket without the stores" \
+  || bad "backup-alone: the infrared Application does not carry the backup bucket"
+[ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject | [.gitea, .giteaAdmin]' "$work/gitea-alone/$infrared_app")" \
+    = '[{"enabled":true,"persistence":{"storageClass":"linode-block-storage-retain"}},{"existingSecret":"infrared-gitea-admin"}]' ] \
+  && ok "gitea-alone: the infrared Application turns Gitea on, on a Linode volume, with the install's admin Secret" \
+  || bad "gitea-alone: the infrared Application's gitea values are wrong"
 
 # --- Disabled leaves a component out, and changes nothing else ----------------------
 # Each optional component, named in Disabled on a variant that renders it: its
-# Application holds no objects, and only it and the repo's README.md change.
+# Application holds no objects, and only it, the repo's README.md and the
+# infrared Application, which carries the list, change.
 # appprojects, argocd and infrared cannot be disabled (hack/render refuses them).
 # render_again <variant> <out> [flags]: renders a variant of the list above again.
 render_again() {
@@ -627,11 +693,14 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
     out="$work/disabled-$base-$name"
     cluster="$(render_again "$base" "$out" -disabled "[\"$name\"]")" || { bad "disabled $name: no variant $base"; continue; }
     app="registry/clusters/$cluster/components/$name.yaml"
+    infrared="registry/clusters/$cluster/components/infrared.yaml"
     changed="$({ diff -rq "$work/$base" "$out" || true; } | sed -E "s#^Files $work/$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
-    if holds_objects "$work/$base/$app" && ! holds_objects "$out/$app" && [ "$changed" = "README.md $app" ]; then
-      ok "disabled $name: its Application is left out, nothing else changes"
+    want="$(printf '%s\n' README.md "$app" "$infrared" | sort | tr '\n' ' ' | sed 's/ $//')"
+    if holds_objects "$work/$base/$app" && ! holds_objects "$out/$app" && [ "$changed" = "$want" ] \
+        && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.components.disabled' "$out/$infrared")" = "[\"$name\"]" ]; then
+      ok "disabled $name: its Application is left out, the infrared Application carries it, nothing else changes"
     else
-      bad "disabled $name: changed '$changed'; want README.md and an empty $app"
+      bad "disabled $name: changed '$changed'; want $want, an empty $app and components.disabled [\"$name\"]"
     fi
   done
 done

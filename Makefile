@@ -22,6 +22,11 @@ STORES   ?= false
 BACKUP   ?=
 DISABLED ?=
 CLOUD    ?=
+# FORGE: "" (GitHub, as before) or gitea, with FORGE_URL, the forge's root as the
+# cluster reaches it. E.g.
+# make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
+FORGE     ?=
+FORGE_URL ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -30,7 +35,8 @@ render:
 	rm -rf $(OUT)
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
 		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" \
-		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)"
+		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
+		-forge "$(FORGE)" -forge-url "$(FORGE_URL)"
 
 ## verify: the gate CI runs
 verify:

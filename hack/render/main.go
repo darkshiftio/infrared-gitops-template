@@ -88,6 +88,13 @@ type Data struct {
 	// Disabled is the operator's INFRARED_DISABLED_COMPONENTS: the components,
 	// by Application name, that the template leaves out.
 	Disabled []string `json:"Disabled"`
+	// Forge is the forge the org's repos live on: "gitea", or "" for GitHub, as
+	// before the field existed. The operator never passes "github".
+	Forge string `json:"Forge"`
+	// ForgeURL is the forge's root as the cluster reaches it, e.g.
+	// http://gitea-http.infrared.svc.cluster.local:3000, without a trailing
+	// slash: repos are <ForgeURL>/<owner>/<repo>. Empty for GitHub.
+	ForgeURL string `json:"ForgeURL"`
 }
 
 // ImageRef is one component's image pin: Images["api"].Tag and .Digest.
@@ -162,10 +169,11 @@ func (f disabledFlag) Set(s string) error {
 	return nil
 }
 
-// Edges and Clouds are the values Edge and Cloud may take.
+// Edges, Clouds and Forges are the values Edge, Cloud and Forge may take.
 var (
 	Edges  = []string{"", "traefik", "gateway"}
 	Clouds = []string{"", "aws", "linode"}
+	Forges = []string{"", "gitea"}
 )
 
 // imagesFlag reads -images: a JSON object of component to {"tag", "digest"},
@@ -256,6 +264,8 @@ func main() {
 	flag.BoolVar(&d.Stores, "stores", false, "Stores: the platform's own Postgres and SeaweedFS")
 	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "..."} (empty: no backups)`)
 	flag.Var(disabledFlag{&d.Disabled}, "disabled", `Disabled, as a JSON array of component names: ["infisical"] (empty: none)`)
+	flag.StringVar(&d.Forge, "forge", "", `Forge: "" (GitHub, as before) or "gitea"`)
+	flag.StringVar(&d.ForgeURL, "forge-url", "", "ForgeURL: the forge's root as the cluster reaches it, no trailing slash (Gitea only)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -273,8 +283,8 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, stores %t, backup bucket %q, disabled %q)\n",
-		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.Stores, d.Backup.Bucket, d.Disabled)
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, stores %t, backup bucket %q, disabled %q, forge %q)\n",
+		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge)
 }
 
 // mergeDataFile loads a JSON Data file, then re-applies every flag the user set
@@ -320,6 +330,8 @@ func mergeDataFile(d *Data, path string) error {
 		"stores":            func() { d.Stores = explicit.Stores },
 		"backup":            func() { d.Backup = explicit.Backup },
 		"disabled":          func() { d.Disabled = explicit.Disabled },
+		"forge":             func() { d.Forge = explicit.Forge },
+		"forge-url":         func() { d.ForgeURL = explicit.ForgeURL },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -366,7 +378,28 @@ func validate(d Data) error {
 		}
 	}
 	errs = append(errs, validateBackup(d.Backup)...)
+	errs = append(errs, validateForge(d.Forge, d.ForgeURL)...)
 	return errors.Join(errs...)
+}
+
+// validateForge checks Forge and ForgeURL together: Gitea needs its URL, and
+// GitHub ("") has none.
+func validateForge(forge, forgeURL string) []error {
+	if !slices.Contains(Forges, forge) {
+		return []error{fmt.Errorf("Forge must be one of %q, got %q", Forges, forge)}
+	}
+	if forge == "" {
+		if forgeURL != "" {
+			return []error{errors.New("ForgeURL needs a Forge: GitHub (\"\") has none")}
+		}
+		return nil
+	}
+	u, err := url.Parse(forgeURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
+		strings.HasSuffix(forgeURL, "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return []error{fmt.Errorf("ForgeURL must be the forge's http(s) root without a trailing slash, got %q", forgeURL)}
+	}
+	return nil
 }
 
 // validateBackup checks the shape of each Backup field that is set; an empty
