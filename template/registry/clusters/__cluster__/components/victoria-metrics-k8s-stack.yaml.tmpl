@@ -87,6 +87,46 @@ spec:
           enabled: false
         kubeEtcd:
           enabled: false
+[[- if eq .ClusterFlavor "k3s" ]]
+        # k3s keeps one metrics registry for the whole process, so a node's
+        # kubelet and API server endpoints each serve all of it, about 60,000
+        # series. The kubelet scrape keeps the kubelet's own families, and the
+        # API server scrape drops the other components' families and ten
+        # histograms that none of this chart's rules or dashboards read: about
+        # 30,000 series a node in place of 120,000, which fits VMSingle's 1 GiB.
+        kubelet:
+          vmScrapes:
+            kubelet:
+              spec:
+                # This list replaces the chart's for this one scrape, so the
+                # chart's two label drops are repeated here.
+                metricRelabelConfigs:
+                  - action: labeldrop
+                    regex: (uid)
+                  - action: labeldrop
+                    regex: (id|name)
+                  - action: keep
+                    sourceLabels: [__name__]
+                    regex: (kubelet_.+|volume_manager_.+|storage_operation_.+|csi_operations_.+|plugin_manager_.+|kubernetes_build_info|go_.+|process_.+|rest_client_requests_total)
+        kubeApiServer:
+          vmScrape:
+            spec:
+              # The chart's one endpoint, with the drops added.
+              endpoints:
+                - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+                  port: https
+                  scheme: https
+                  tlsConfig:
+                    caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                    serverName: kubernetes
+                  metricRelabelConfigs:
+                    - action: drop
+                      sourceLabels: [__name__]
+                      regex: (kubelet|kubeproxy|scheduler|volume_manager|storage_operation|prober|lasso)_.+
+                    - action: drop
+                      sourceLabels: [__name__]
+                      regex: (etcd_request_duration_seconds_bucket|apiserver_watch_events_dispatch_duration_seconds_bucket|apiserver_request_body_size_bytes_bucket|apiserver_storage_list_duration_seconds_bucket|apiserver_watch_list_duration_seconds_bucket|apiserver_watch_cache_read_wait_seconds_bucket|apiserver_watch_cache_initialization_duration_seconds_bucket|apiserver_response_sizes_bucket|apiserver_watch_events_sizes_bucket|apiserver_admission_controller_admission_duration_seconds_bucket)
+[[- end ]]
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
