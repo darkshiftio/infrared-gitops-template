@@ -1,6 +1,7 @@
 [[- $disabled := " " ]][[ range .Disabled ]][[ $disabled = printf "%s%s " $disabled . ]][[ end -]]
 [[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -43,7 +44,11 @@ components/
   substrate-crds/          Agent Substrate's CRDs and the admission policy on SandboxConfigs, vendored and pinned
   substrate-podcert/       its pod-certificate controller, and the hook that makes its two CAs
   substrate/               its control plane (API, controller, atelet, router, egress), vendored and pinned, and its fence
+[[- if $testActors ]]
   substrate-actors/        the platform's worker pool, its actor images and its ActorTemplates
+[[- else ]]
+  substrate-actors/        the platform's worker pool; Substrate's test actors are off
+[[- end ]]
 [[- end ]]
 [[- end ]]
 [[- if and $copies (not .Registry) ]]
@@ -127,7 +132,11 @@ products/                  yours: one directory per product (see "Products")
 | 22 | `substrate` | Substrate's control plane (namespace `ate-system`): records in the Postgres database `substrate`, snapshots in the bucket `ate-snapshots`; only Infrared's operator reaches its API and router |
 [[- end ]]
 [[- if not (contains " substrate-actors " $disabled) ]]
+[[- if $testActors ]]
 | 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`), the actor images copied to `[[ .Registry ]]/platform/substrate/`, and the ActorTemplates `counter-v1` and `sandbox-v1` in the atespace `platform` |
+[[- else ]]
+| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`). Substrate's test actors, the ActorTemplates `counter-v1` and `sandbox-v1`, are off: the Installation names `substrate-test-actors` among its disabled components, as the Infrared chart does unless its value `substrate.testActors` is true |
+[[- end ]]
 [[- end ]]
 [[- end ]]
 [[- end ]]
@@ -143,10 +152,11 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
 | 100 | `argocd` | Argo CD, managing itself |
-[[- if .Disabled ]]
+[[- $left := "" ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ if $left ]][[ $left = printf "%s, `%s`" $left . ]][[ else ]][[ $left = printf "`%s`" . ]][[ end ]][[ end ]][[ end ]]
+[[- if $left ]]
 
 Left out on purpose, as the Installation's disabled components:
-[[- range $i, $c := .Disabled ]][[ if $i ]],[[ end ]] `[[ $c ]]`[[ end ]].
+[[- printf " %s" $left ]].
 [[- end ]]
 
 Every Application here carries the label

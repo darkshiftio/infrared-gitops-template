@@ -1,3 +1,4 @@
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # =============================================================================
 # Before the platform's actors: Substrate's API and router, and the registry.
@@ -6,8 +7,9 @@
 # cluster"). This PreSync hook waits, up to half an hour, until the WorkerPool
 # CRD is established, Substrate's API and router and the registry inside the
 # cluster have a ready endpoint[[ if .ImagePullSecret ]], and the store infrared-platform, which
-# copies the pull secret, is Ready[[ end ]]. The hooks after it copy the images into
-# the registry, as its user platform, and talk to the API.
+# copies the pull secret, is Ready[[ end ]].[[ if $testActors ]] The hooks after it copy the images into
+# the registry, as its user platform, and talk to the API.[[ else ]] With Substrate's test actors off
+# there are no hooks after it: only the WorkerPool.[[ end ]]
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount

@@ -1,3 +1,4 @@
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret)) -]]
 # =============================================================================
 # infrared-platform: the one place the platform's tokens are read from.
@@ -22,9 +23,9 @@
 #
 # It also reads the install's pull secret, [[ .ImagePullSecret ]], which Agent Substrate's
 # namespaces copy whole: its images on ghcr are private. They pull with it in
-# podcertificate-controller-system, ate-system and ate-workers, and the copy of
+# podcertificate-controller-system, ate-system and ate-workers[[ if $testActors ]], and the copy of
 # the actor images into the registry inside the cluster reads them with it in
-# registry (components/substrate*).
+# registry[[ end ]] (components/substrate*).
 [[- end ]]
 #
 # `conditions` limits the store to those namespaces: any other namespace,
@@ -83,7 +84,9 @@ spec:
         - podcertificate-controller-system
         - ate-system
         - ate-workers
+[[- if $testActors ]]
         - registry
+[[- end ]]
 [[- end ]]
   provider:
     kubernetes:

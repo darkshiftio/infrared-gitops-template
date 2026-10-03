@@ -1,3 +1,4 @@
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # The platform's own actors on Agent Substrate (the `substrate-actors`
 # Application, wave 23):
@@ -5,15 +6,28 @@
 #   wait.yaml          PreSync: Substrate's API and router, and the registry
 #                      inside the cluster, answer
 [[- if .ImagePullSecret ]]
+[[- if $testActors ]]
 #   pull-secrets.yaml  the pull secret for the workers' image, and for the copy
+[[- else ]]
+#   pull-secrets.yaml  the pull secret for the workers' image
+[[- end ]]
 [[- end ]]
 #   workers.yaml       the WorkerPool platform: three warm gVisor workers in
 #                      the namespace ate-workers
+[[- if $testActors ]]
 #   images.yaml        Sync hook, wave 1: the counter demo's image and the test
 #                      actor's, copied from ghcr into [[ .Registry ]]
 #   templates.yaml     Sync hook, wave 2: the atespace platform and its
 #                      ActorTemplates, each with its golden snapshot
+[[- end ]]
 #
+[[- if not $testActors ]]
+# Substrate's test actors (the ActorTemplates counter-v1 and sandbox-v1, and
+# their images) are off: the install names substrate-test-actors among the
+# components it leaves out, as the Infrared chart does unless its value
+# substrate.testActors is true. images.yaml and templates.yaml hold no objects.
+#
+[[- end ]]
 # Every object names its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -23,8 +37,10 @@ resources:
   - pull-secrets.yaml
 [[- end ]]
   - workers.yaml
+[[- if $testActors ]]
   - images.yaml
   - templates.yaml
+[[- end ]]
 [[- else -]]
 # Agent Substrate runs only where the operator's preflight found the cluster able
 # to host it, with the platform's own stores and the registry inside the

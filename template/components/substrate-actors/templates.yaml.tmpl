@@ -1,4 +1,5 @@
-[[- if and .Stores .SubstrateCapable .Registry -]]
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
+[[- if and .Stores .SubstrateCapable .Registry $testActors -]]
 # =============================================================================
 # The platform's ActorTemplates, in the atespace platform.
 # =============================================================================
@@ -299,6 +300,12 @@ spec:
                   path: token
         - name: tmp
           emptyDir: {}
+[[- else if and .Stores .SubstrateCapable .Registry -]]
+# Substrate's test actors are off: the install names substrate-test-actors among
+# the components it leaves out, as the Infrared chart does unless its value
+# substrate.testActors is true. They are the platform's only ActorTemplates, so
+# nothing is made here: no atespace, no ActorTemplate. sandbox-v1 runs any command
+# it is sent, which is why they are off by default.
 [[- else -]]
 # Agent Substrate runs only where the operator's preflight found the cluster able
 # to host it, with the platform's own stores and the registry inside the

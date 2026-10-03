@@ -60,7 +60,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores") |
 | `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1"}` | the operator's `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty |
-| `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
+| `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"), and `substrate-test-actors`, Substrate's test actors (see "Agent Substrate"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 | `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
 | `.ForgeURL` | `` or `http://gitea-http.infrared.svc.cluster.local:3000` | the forge's root as the cluster reaches it, without a trailing slash: repos are `<ForgeURL>/<owner>/<repo>`. Empty for GitHub |
 | `.Registry` | `` or `10.43.0.50:5000` | the operator's `INFRARED_REGISTRY` (chart value `registry.address`): the address of the registry inside the cluster, a private IPv4 address and a port. With `.Stores` the template runs Zot there, its Service's pinned ClusterIP and port, and builds push the builder to it (see "The registry"). Empty: no registry inside the cluster |
@@ -152,7 +152,8 @@ set, so a cluster without it renders the same file as before:
 | `.PlatformDomain` and `.InfraredHost`, in gateway mode | `installation.previews.domain`, and `installation.previews.signInURL: https://<InfraredHost>` |
 | `.Stores` | `stores.enabled: true` |
 | `.Backup.Bucket` (with its `.Endpoint` and `.Region` when set) | `backup` |
-| `.Disabled` | `components.disabled` |
+| `.Disabled` | `components.disabled`, without `substrate-test-actors` |
+| `.Stores` and `.Registry`, with `substrate-test-actors` not in `.Disabled` | `substrate.testActors: true` (see "Agent Substrate") |
 | `.Forge` `gitea` | `gitea.enabled: true`, `giteaAdmin.existingSecret: infrared-gitea-admin`, and on `.Cloud` `linode` `gitea.persistence.storageClass: linode-block-storage-retain` |
 | `.Registry` | `registry.address` |
 | `.Copies`, each field that is set | `copies` (`recipients`, and each of `postgres`, `mirror`, `objects`, `gitea` with its `schedule` and `retention`) |
@@ -594,7 +595,7 @@ and its bundled Postgres.
 |---|---|
 | Records | The database `substrate` on the platform's Postgres, as the role `substrate` (`stores/postgres-substrate`), schema `public`, TLS as SeaweedFS's filers use it (`sslmode=require`). Its DSN is the Secret `ate-system/ate-api-server-secret-envvars`, made by an ExternalSecret through `infrared-stores`. |
 | Snapshots | The bucket `ate-snapshots`, as the S3 identity `ate-snapshots` (`stores/seaweedfs-s3-ate-snapshots`, copied to `ate-system/ate-s3-credentials` through `infrared-stores`), path-style at `http://seaweedfs-s3.stores.svc:8333`, for the API and atelet. A template's snapshots go under `platform/<template>/`. |
-| Substrate's images | ghcr, by digest. With an `.ImagePullSecret`, the store `infrared-platform` copies that Secret into `podcertificate-controller-system`, `ate-system`, `ate-workers` and `registry`; the workers pull with it through the ServiceAccount `default` of `ate-workers`, because a WorkerPool cannot name a pull secret. The router's Envoy (`envoyproxy/envoy`) and the SandboxConfig's pause image (`registry.k8s.io/pause`) are upstream's, by digest, and atelet fetches gVisor from Google's public bucket, as upstream's `gvisor-default` names it. |
+| Substrate's images | ghcr, by digest. With an `.ImagePullSecret`, the store `infrared-platform` copies that Secret into `podcertificate-controller-system`, `ate-system`, `ate-workers` and, for the copy of the test actors' images, `registry`; the workers pull with it through the ServiceAccount `default` of `ate-workers`, because a WorkerPool cannot name a pull secret. The router's Envoy (`envoyproxy/envoy`) and the SandboxConfig's pause image (`registry.k8s.io/pause`) are upstream's, by digest, and atelet fetches gVisor from Google's public bucket, as upstream's `gvisor-default` names it. |
 | Actor images | atelet pulls them itself, without a login and without the nodes' registry mirrors. It runs with `--gcp-auth-for-image-pulls=false` and `--localhost-registry-replacement=<Registry>`: an image named on `localhost` (or a loopback address) is pulled from the registry inside the cluster, over plain HTTP. A template names `localhost/platform/substrate/<image>:<tag>@sha256:...`, so an immutable template never holds the registry's address, and the pull takes the path the Substrate spike proved with its node registry. |
 
 The hooks do what Substrate's installer (`ate-setup`) does by hand, and each is
@@ -606,8 +607,8 @@ safe to run again:
 | `substrate-prepare` (PreSync) | The pools `actor-id-jwt-pool` (ES256), `actor-id-ca-pool` and `actor-id-ca-certs` (its root alone), made once; the ConfigMap `ate-api-authentication`, which trusts the cluster's ServiceAccount tokens for the audience `api.ate-system.svc`, the issuer read from the cluster's discovery document; the label `ate.dev/substrate-version=<version>` on each node without one; then waits for Substrate's CRDs, the trust bundles, the Postgres, SeaweedFS's S3 gateway and the stores. |
 | CronJob `substrate-node-labels` | Every ten minutes, labels a node that joined since, so atelet runs there. |
 | `substrate-actors-wait` (PreSync) | Waits for the API, the router and Zot to answer. |
-| `substrate-images` (Sync, wave 1, in `registry`) | Copies the counter demo's image and the test actor's (`sandbox`) from ghcr to `<Registry>/platform/substrate/` with crane, as the registry's user `platform` (`registry/platform-push`, which the operator writes), then checks that each pulls by digest without a login. |
-| `substrate-templates` (Sync, wave 2) | Makes the atespace `platform` and the ActorTemplates `counter-v1` and `sandbox-v1` through the API, then waits for each golden snapshot. A template of the same name with other images fails the hook: templates are immutable, so a change is a new version in the name. |
+| `substrate-images` (Sync, wave 1, in `registry`; with the test actors) | Copies the counter demo's image and the test actor's (`sandbox`) from ghcr to `<Registry>/platform/substrate/` with crane, as the registry's user `platform` (`registry/platform-push`, which the operator writes), then checks that each pulls by digest without a login. |
+| `substrate-templates` (Sync, wave 2; with the test actors) | Makes the atespace `platform` and the ActorTemplates `counter-v1` and `sandbox-v1` through the API, then waits for each golden snapshot. A template of the same name with other images fails the hook: templates are immutable, so a change is a new version in the name. |
 
 The CAs are made with OpenSSL, in memory in the hook's own pod, in the formats
 Substrate's `localca` and `localjwtauthority` read: one Ed25519 root each,
@@ -634,8 +635,24 @@ Nothing else: no organization's namespace, no zone, no worker pod. An actor's
 own traffic leaves its sandbox only through the egress gateway, which refuses
 every destination its EgressPolicy does not name, and no template here has one.
 
+**Substrate's test actors are off by default.** `counter-v1` (upstream's
+counter demo) and `sandbox-v1` (upstream's sandbox demo, which runs any command
+it is sent) exist only for the two checks below. `substrate-test-actors` in
+`.Disabled` leaves them out: no copy of their images, no `substrate-templates`
+hook, so no atespace and no ActorTemplate, and no pull secret in `registry`.
+The WorkerPool `platform` and the wait stay. Without the name the template
+renders them, exactly as before the setting existed. The Infrared chart names
+`substrate-test-actors` among the components it hands the operator
+(`INFRARED_DISABLED_COMPONENTS`) whenever the stores and a registry are on,
+unless its value `substrate.testActors` is true. So the template never carries
+the name in the `infrared` Application's `components.disabled`, and carries
+`substrate.testActors: true` when the stores and a registry are on and the name
+is absent, which keeps the setting through adoption (see "The install's
+settings"). Turning them off later leaves the atespace and the ActorTemplates
+in Substrate's database, as removing `substrate-actors` does.
+
 Two checks run against a cluster, never from CI, from the place the policy
-admits:
+admits. Each needs the test actors, and stops at once, saying so, without them:
 
 ```bash
 scripts/substrate-counter-test.sh <context>   # E5: a counter actor keeps both counters through a suspend and a resume on another worker
@@ -725,6 +742,11 @@ managed (see "The stores"). Only the Application is left out: the files under
 `components/<name>/` still render, and nothing points at them. The repo's
 README lists what was left out. `make verify` disables each optional component
 in turn and checks that nothing else changes.
+
+One name is not an Application: `substrate-test-actors` leaves Substrate's test
+actors out of `substrate-actors` (see "Agent Substrate"). The Infrared chart
+adds it, so it is neither carried in the `infrared` Application's
+`components.disabled` nor listed in the repo's README as left out.
 
 The template does not follow dependencies, so leave out only what nothing
 else needs: without `external-secrets` the edge gets no tokens, without

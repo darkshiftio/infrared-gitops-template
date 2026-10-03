@@ -26,6 +26,11 @@
 # ACTOR=<name>, on the restored install, sends the fourth request, which has to
 # wake it from its snapshot with both counters at 4, then does 5. The default,
 # PHASE=all, is the whole test with an actor of its own.
+#
+# Needs Substrate's test actors, which are off by default: the install sets the
+# Infrared chart's value substrate.testActors to true, and the template makes
+# counter-v1 (README, "Agent Substrate"). Without it the test stops at once and
+# says so.
 # Needs: kubectl, jq. Applies objects in ate-system and ate-workers only.
 # =============================================================================
 set -euo pipefail
@@ -39,7 +44,7 @@ case "$PHASE" in
 esac
 # shellcheck source-path=SCRIPTDIR source=substrate-lib.sh
 . "$(dirname "$0")/substrate-lib.sh"
-preflight
+preflight counter-v1
 
 job="substrate-counter-test-$(date -u +%Y%m%d-%H%M%S)"
 start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

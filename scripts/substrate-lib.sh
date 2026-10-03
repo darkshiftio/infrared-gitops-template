@@ -32,14 +32,19 @@ die() {
   exit 1
 }
 
-# preflight: the context answers and Substrate's templates are there.
+# preflight <ActorTemplate>: the context answers, Substrate runs there, and so
+# does the test actor the check needs. Substrate's test actors (counter-v1 and
+# sandbox-v1) are off by default: the install turns them on with the Infrared
+# chart's value substrate.testActors (true), and the template then makes them in
+# the substrate-actors Application.
 preflight() {
+  local template=$1
   command -v kubectl >/dev/null || die "missing tool: kubectl"
   command -v jq >/dev/null || die "missing tool: jq"
   k get --raw /readyz >/dev/null 2>&1 || die "context $CTX does not answer"
   k -n ate-system get deployment ate-api-server >/dev/null 2>&1 || die "no Substrate on $CTX (ate-system/ate-api-server)"
-  k -n ate-system get configmap substrate-actor-templates >/dev/null 2>&1 \
-    || die "no ActorTemplates on $CTX: the substrate-actors Application has not synced"
+  k -n ate-system get configmap substrate-actor-templates -o jsonpath='{.data}' 2>/dev/null | jq -e --arg f "$template.json" 'has($f)' >/dev/null 2>&1 \
+    || die "no ActorTemplate $template on $CTX. This check needs Substrate's test actors, which are off by default: set the Infrared chart's value substrate.testActors to true for this install, and run it again once the substrate-actors Application has synced"
 }
 
 # The ServiceAccount the client Jobs run as; the caller adds Roles to it.

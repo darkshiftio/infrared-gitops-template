@@ -216,13 +216,23 @@ spec:
 [[- end ]]
 [[- end ]][[ end ]]
 [[- end ]]
-[[- if .Disabled ]]
+[[- $kept := false ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ $kept = true ]][[ end ]][[ end ]]
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
+[[- if $kept ]]
           # The components the install leaves out (INFRARED_DISABLED_COMPONENTS).
           components:
             disabled:
-[[- range .Disabled ]]
+[[- range .Disabled ]][[ if ne . "substrate-test-actors" ]]
               - [[ . | quote ]]
+[[- end ]][[ end ]]
 [[- end ]]
+[[- if and .Stores .Registry $testActors ]]
+          # Substrate's test actors are on (substrate.testActors). With the
+          # stores and a registry the chart leaves them out unless it is true,
+          # naming substrate-test-actors among the components left out, which
+          # is never carried above; so adoption keeps them on only with it.
+          substrate:
+            testActors: true
 [[- end ]]
 [[- if eq .Forge "gitea" ]]
           # Gitea, the install's forge, which the chart runs. The install made

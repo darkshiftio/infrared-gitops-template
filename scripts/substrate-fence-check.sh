@@ -22,6 +22,11 @@
 # A refused call is a connection that never opens: the policy drops it, so it
 # times out. Every probe pod and Job, the ServiceAccount substrate-check and the
 # actor are removed afterwards unless KEEP=1.
+#
+# Needs Substrate's test actors, which are off by default, because sandbox-v1
+# runs any command it is sent: the install sets the Infrared chart's value
+# substrate.testActors to true, and the template makes sandbox-v1 (README,
+# "Agent Substrate"). Without it the check stops at once and says so.
 # Needs: kubectl, jq. Applies objects in that organization's namespace,
 # ate-workers and ate-system only.
 # =============================================================================
@@ -29,7 +34,7 @@ set -euo pipefail
 CTX="${1:?usage: scripts/substrate-fence-check.sh <kube context> [organization namespace]}"
 # shellcheck source-path=SCRIPTDIR source=substrate-lib.sh
 . "$(dirname "$0")/substrate-lib.sh"
-preflight
+preflight sandbox-v1
 
 org_ns="${2:-$(k get namespaces -l infrared.darkshift.io/org -o jsonpath='{.items[0].metadata.name}')}"
 [ -n "$org_ns" ] || die "no organization's namespace (label infrared.darkshift.io/org) on $CTX: name one"

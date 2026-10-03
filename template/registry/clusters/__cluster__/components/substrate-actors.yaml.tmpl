@@ -1,8 +1,10 @@
 [[- $on := true ]][[ range .Disabled ]][[ if eq . "substrate-actors" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if not $on -]]
 # substrate-actors is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
 [[- else if and .Stores .SubstrateCapable .Registry -]]
+[[- if $testActors -]]
 # The platform's own actors on Agent Substrate (components/substrate-actors):
 # the WorkerPool platform in the namespace ate-workers, three warm gVisor
 # workers; a Sync hook that copies the counter demo's image and the test
@@ -13,6 +15,17 @@
 #
 # The counter test and the fence check (scripts/substrate-*.sh in the template)
 # run against these.
+[[- else -]]
+# The platform's own actors on Agent Substrate (components/substrate-actors):
+# the WorkerPool platform in the namespace ate-workers, three warm gVisor
+# workers. Wave 23, after the control plane (22).
+#
+# Substrate's test actors, the ActorTemplates counter-v1 and sandbox-v1 that the
+# counter test and the fence check (scripts/substrate-*.sh in the template) run
+# against, are off: the Installation names substrate-test-actors among its
+# disabled components, as the Infrared chart does unless its value
+# substrate.testActors is true.
+[[- end ]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
