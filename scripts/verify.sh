@@ -931,9 +931,9 @@ for v in "${variants[@]}"; do
     xs() { line "$c" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$1\") | .metadata.namespace + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] + \" \" + .spec.secretStoreRef.name + \" \" + .spec.target.name + \" \" + (.spec.data | map(.secretKey + \"=\" + .remoteRef.key + \"/\" + .remoteRef.property) | join(\",\"))"; }
     [ "$(sel "$sc" '.metadata.name + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"] + " " + .metadata.labels["infrared.darkshift.io/layer"]')" = "stores-credentials 19 secrets" ] \
       && [ "$(sel "$c" 'select(.kind == "ClusterSecretStore") | .metadata.annotations["argocd.argoproj.io/sync-wave"]')" = 1 ] \
-      && line "$c" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]' | grep -qw infrared \
-      && line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]' | grep -qw seaweedfs-s3-objects-copy \
-      && line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]' | grep -qw seaweedfs-s3-gitea-dump \
+      && grep -qw infrared <<<"$(line "$c" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" \
+      && grep -qw seaweedfs-s3-objects-copy <<<"$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" \
+      && grep -qw seaweedfs-s3-gitea-dump <<<"$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" \
       && [ "$(xs objects-copy-s3)" = "infrared 2 infrared-stores objects-copy-s3 AWS_ACCESS_KEY_ID=seaweedfs-s3-objects-copy/AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY=seaweedfs-s3-objects-copy/AWS_SECRET_ACCESS_KEY" ] \
       && [ "$(xs gitea-dump-s3)" = "infrared 2 infrared-stores gitea-dump-s3 AWS_ACCESS_KEY_ID=seaweedfs-s3-gitea-dump/AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY=seaweedfs-s3-gitea-dump/AWS_SECRET_ACCESS_KEY" ] \
       && ok "$variant: the copies' keys reach infrared (objects-copy-s3, gitea-dump-s3) through infrared-stores, after the store" \
