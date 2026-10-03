@@ -824,8 +824,12 @@ its name.
 1. Merge to `main` with `make verify` green.
 2. Tag `vX.Y.Z` (semver) on that commit and push the tag. Tags are
    immutable: never move one.
-3. Bump the operator's default template version in a PR to
-   infrared-operator. Existing installations keep the version they were
-   bootstrapped with; the rendered repo is theirs from then on.
+3. Set infrared-chart's `gitops.templateVersion` to the tag in the chart's
+   next release, in the same change as the operator image that can render it
+   (a template that names a newer Data field needs an operator that has it).
+   The chart's default always names a released tag, never a commit; the
+   operator renders the version the API hands it from that value. Existing
+   installations keep the version they were bootstrapped with; the rendered
+   repo is theirs from then on.
 
 Breaking the rendering contract or the Data fields is a major version.
