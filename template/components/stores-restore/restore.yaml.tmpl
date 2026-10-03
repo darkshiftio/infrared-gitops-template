@@ -128,9 +128,11 @@ spec:
                 echo "waiting to sign in to Postgres as seaweedfs"
                 sleep 10
               done
+              # The block is quoted $reset$, not $$: Kubernetes reads $$ in a
+              # container's command as an escaped $, so $$ would reach psql as $.
               psql -X -v ON_ERROR_STOP=1 -v point="$POINT" <<'SQL'
               SET infrared.restore_point = :'point';
-              DO $$
+              DO $reset$
               DECLARE
                 want text := 'infrared-restore ' || current_setting('infrared.restore_point') || ': file index reset';
                 have text;
@@ -144,7 +146,7 @@ spec:
                   EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), want);
                   RAISE NOTICE 'dropped what seaweedfs owned: the lost cluster''s file index';
                 END IF;
-              END $$;
+              END $reset$;
               SQL
           securityContext:
             allowPrivilegeEscalation: false
