@@ -98,11 +98,42 @@ spec:
           # INFRARED_BUILD_REGISTRY so adoption keeps it.
           builds:
             registry: [[ .BuildRegistry | quote ]]
+[[- $rr := .RegistryRetention ]]
+[[- $retention := or $rr.UntaggedAfter $rr.KeepTags $rr.KeepNewest $rr.GCInterval $rr.GCDelay ]]
+[[- if or .Registry $retention ]]
 [[- if .Registry ]]
           # The registry inside the cluster (INFRARED_REGISTRY), whose users,
           # rules and push credentials the operator mints.
+[[- end ]]
+[[- if $retention ]]
+          # Zot's garbage collection and retention as the install set them
+          # (INFRARED_REGISTRY_RETENTION); what is unset keeps the template's.
+[[- end ]]
           registry:
+[[- if .Registry ]]
             address: [[ .Registry | quote ]]
+[[- end ]]
+[[- if $retention ]]
+            retention:
+[[- with $rr.UntaggedAfter ]]
+              untaggedAfter: [[ . | quote ]]
+[[- end ]]
+[[- if $rr.KeepTags ]]
+              keepTags:
+[[- range $rr.KeepTags ]]
+                - [[ . | quote ]]
+[[- end ]]
+[[- end ]]
+[[- with $rr.KeepNewest ]]
+              keepNewest: [[ . ]]
+[[- end ]]
+[[- with $rr.GCInterval ]]
+              gcInterval: [[ . | quote ]]
+[[- end ]]
+[[- with $rr.GCDelay ]]
+              gcDelay: [[ . | quote ]]
+[[- end ]]
+[[- end ]]
 [[- end ]]
 [[- if eq .Edge "gateway" ]]
           # The Installation's edge and previews as the install set them
@@ -134,6 +165,56 @@ spec:
 [[- if .Backup.Region ]]
             region: [[ .Backup.Region | quote ]]
 [[- end ]]
+[[- end ]]
+[[- $c := .Copies ]]
+[[- if or $c.Postgres.Schedule $c.Postgres.Retention $c.Mirror.Schedule $c.Mirror.Retention $c.Objects.Schedule $c.Objects.Retention $c.Gitea.Schedule $c.Gitea.Retention $c.Recipients ]]
+          # The platform's copies as the install set them (INFRARED_COPIES):
+          # when each is made, how long it is kept, and the age recipients the
+          # copies of Infrared's objects and of Gitea are encrypted to. What is
+          # unset keeps the chart's and the template's defaults.
+          copies:
+[[- if $c.Recipients ]]
+            recipients:
+[[- range $c.Recipients ]]
+              - [[ . | quote ]]
+[[- end ]]
+[[- end ]]
+[[- with $c.Postgres ]][[ if or .Schedule .Retention ]]
+            postgres:
+[[- with .Schedule ]]
+              schedule: [[ . | quote ]]
+[[- end ]]
+[[- with .Retention ]]
+              retention: [[ . | quote ]]
+[[- end ]]
+[[- end ]][[ end ]]
+[[- with $c.Mirror ]][[ if or .Schedule .Retention ]]
+            mirror:
+[[- with .Schedule ]]
+              schedule: [[ . | quote ]]
+[[- end ]]
+[[- with .Retention ]]
+              retention: [[ . | quote ]]
+[[- end ]]
+[[- end ]][[ end ]]
+[[- with $c.Objects ]][[ if or .Schedule .Retention ]]
+            objects:
+[[- with .Schedule ]]
+              schedule: [[ . | quote ]]
+[[- end ]]
+[[- with .Retention ]]
+              retention: [[ . | quote ]]
+[[- end ]]
+[[- end ]][[ end ]]
+[[- with $c.Gitea ]][[ if or .Schedule .Retention ]]
+            gitea:
+[[- with .Schedule ]]
+              schedule: [[ . | quote ]]
+[[- end ]]
+[[- with .Retention ]]
+              retention: [[ . | quote ]]
+[[- end ]]
+[[- end ]][[ end ]]
 [[- end ]]
 [[- if .Disabled ]]
           # The components the install leaves out (INFRARED_DISABLED_COMPONENTS).

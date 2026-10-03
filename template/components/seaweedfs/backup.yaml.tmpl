@@ -1,19 +1,48 @@
+[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- if and .Stores .Backup.Bucket -]]
 # =============================================================================
 # SeaweedFS's buckets, copied to the bucket outside the cluster every hour.
 # =============================================================================
+[[- if .Copies.Mirror.Schedule ]]
+# On the install's schedule, [[ .Copies.Mirror.Schedule ]] (UTC), rclone makes the copy of each
+# bucket match it:
+[[- else ]]
 # Every hour, at 17 past, rclone makes the copy of each bucket match it:
+[[- end ]]
 #
 #   [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/current/<bucket>/          the bucket as it is
 #   [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/archive/<run>/<bucket>/    what that run replaced or deleted
 #   [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/runs/<run>.json            that the run finished
 #
 # A run is named by its start, e.g. 20261002T221700Z. What a run replaces or
+[[- if .Copies.Mirror.Retention ]]
+# deletes is kept for [[ .Copies.Mirror.Retention ]], so any object of that time can be
+# brought back; archives and marks older than that are deleted.
+[[- else ]]
 # deletes is kept for seven days, so any object of the last seven days can be
 # brought back; archives and marks older than that are deleted. A copy of every
 # object at every hour would take 168 times the buckets' size.
+[[- end ]]
+[[- if $copies ]]
 #
+# The copies of Infrared's objects (infrared-objects) and of Gitea
+# (gitea-dumps), which the Infrared chart makes and encrypts, come last: the
+# other buckets in current/ are never older than a copy that is there.
+[[- end ]]
+[[- if $restore ]]
+#
+# A restore, from [[ .Restore.Point ]], copies the buckets back from current/ (the
+# stores-restore Application). Until it marks the ConfigMap restore-stores
+# (key buckets), a run copies nothing and fails: the new, empty buckets would
+# empty the copy the restore reads.
+[[- end ]]
+#
+[[- if $copies ]]
+# rclone reads with the S3 identity backup (Read and List on every bucket, see
+[[- else ]]
 # rclone reads with the S3 identity backup (Read and List on both buckets, see
+[[- end ]]
 # identities.yaml) and writes with the platform's backup keys (Secret
 # infrared-platform-tokens, keys backup-access-key-id and
 # backup-secret-access-key), copied here through the ClusterSecretStore
@@ -52,7 +81,7 @@ metadata:
   name: seaweedfs-backup
   namespace: stores
 spec:
-  schedule: "17 * * * *"
+  schedule: [[ default "17 * * * *" .Copies.Mirror.Schedule | quote ]]
   timeZone: Etc/UTC
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 1800
@@ -79,7 +108,7 @@ spec:
                 - name: HOME
                   value: /tmp
                 - name: BUCKETS
-                  value: "ate-snapshots registry"
+                  value: "ate-snapshots registry[[ if $copies ]] infrared-objects gitea-dumps[[ end ]]"
                 - name: DESTINATION
                   value: [[ printf "dst:%s/%s/seaweedfs" .Backup.Bucket .ClusterName | quote ]]
                 # The source: SeaweedFS, as the identity backup.
@@ -129,14 +158,26 @@ spec:
                 - /bin/sh
                 - -ec
                 - |
+[[- if $restore ]]
+                  # The restore from [[ .Restore.Point ]] reads current/: until it has
+                  # copied every bucket back, copying these would empty it.
+                  if [ "$(cat /restore-stores/point 2>/dev/null)" != [[ .Restore.Point | quote ]] ] || [ ! -s /restore-stores/buckets ]; then
+                    echo "the restore from [[ .Restore.Point ]] has not copied the buckets back yet (stores/restore-stores): nothing copied" >&2
+                    exit 1
+                  fi
+[[- end ]]
                   run="$(date -u +%Y%m%dT%H%M%SZ)"
                   for bucket in $BUCKETS; do
                     rclone sync "src:$bucket" "$DESTINATION/current/$bucket" \
                       --backup-dir "$DESTINATION/archive/$run/$bucket" \
                       --fast-list --stats-one-line --stats 5m -v
                   done
+[[- if .Copies.Mirror.Retention ]]
+                  # [[ .Copies.Mirror.Retention ]]: archives and marks named before the cutoff go.
+[[- else ]]
                   # Seven days: archives and marks named before the cutoff go.
-                  cutoff="$(date -u -d "@$(( $(date -u +%s) - 7 * 24 * 3600 ))" +%Y%m%d%H%M%S)"
+[[- end ]]
+                  cutoff="$(date -u -d "@$(( $(date -u +%s) - [[ trimSuffix "d" (default "7d" .Copies.Mirror.Retention) ]] * 24 * 3600 ))" +%Y%m%d%H%M%S)"
                   older() { awk -v name="$(printf '%s' "$1" | tr -dc 0-9)" -v cutoff="$cutoff" 'BEGIN { exit !(name < cutoff) }'; }
                   for dir in $(rclone lsf --dirs-only "$DESTINATION/archive/" 2>/dev/null); do
                     if older "$dir"; then rclone purge "$DESTINATION/archive/${dir%/}"; fi
@@ -161,9 +202,22 @@ spec:
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp
+[[- if $restore ]]
+                - name: restore-stores
+                  mountPath: /restore-stores
+                  readOnly: true
+[[- end ]]
           volumes:
             - name: tmp
               emptyDir: {}
+[[- if $restore ]]
+            # The restore's markers, read at each run's start; absent before
+            # the restore's first one.
+            - name: restore-stores
+              configMap:
+                name: restore-stores
+                optional: true
+[[- end ]]
 [[- else -]]
 # Backups are off (INFRARED_BACKUP), or there are no stores: nothing to copy.
 [[- end ]]

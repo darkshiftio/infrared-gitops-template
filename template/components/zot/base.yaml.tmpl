@@ -1,3 +1,4 @@
+[[- $r := .RegistryRetention -]]
 [[- if and .Stores .Registry -]]
 # =============================================================================
 # zot-base: the base of Zot's config, which the Infrared operator completes.
@@ -16,8 +17,15 @@
 #            repositories back from the bucket, and forgets the keys. Each
 #            repository holds its own layers (dedupe off), so deleting one
 #            organization's repositories frees its layers and nobody else's.
+[[- if or $r.UntaggedAfter $r.KeepTags $r.KeepNewest $r.GCInterval $r.GCDelay ]]
+#            Garbage is collected, untagged images deleted and tags kept as
+#            the install's registry.retention says (below); what it leaves
+#            unset keeps the defaults: every hour, after a day, every v-tag
+#            and the ten newest tags.
+[[- else ]]
 #            Garbage is collected every hour; untagged images go after a day,
 #            and each repository keeps every v-tag and its ten newest tags.
+[[- end ]]
 #   http     plain HTTP on port 5000. compat docker2s2 admits Docker schema 2
 #            manifests, which the Paketo images builds start from are: without
 #            it Zot refuses them.
@@ -49,17 +57,17 @@ data:
         "rootDirectory": "/var/lib/registry",
         "dedupe": false,
         "gc": true,
-        "gcDelay": "1h",
-        "gcInterval": "1h",
+        "gcDelay": [[ default "1h" $r.GCDelay | quote ]],
+        "gcInterval": [[ default "1h" $r.GCInterval | quote ]],
         "retention": {
-          "delay": "24h",
+          "delay": [[ default "24h" $r.UntaggedAfter | quote ]],
           "policies": [
             {
               "repositories": ["**"],
               "deleteUntagged": true,
               "keepTags": [
-                {"patterns": ["^v[0-9]"]},
-                {"patterns": [".*"], "mostRecentlyPushedCount": 10}
+                {"patterns": [[ if $r.KeepTags ]][[ "[" ]][[ range $i, $p := $r.KeepTags ]][[ if $i ]], [[ end ]][[ quote $p ]][[ end ]][[ "]" ]][[ else ]]["^v[0-9]"][[ end ]]},
+                {"patterns": [".*"], "mostRecentlyPushedCount": [[ if $r.KeepNewest ]][[ $r.KeepNewest ]][[ else ]]10[[ end ]]}
               ]
             }
           ]

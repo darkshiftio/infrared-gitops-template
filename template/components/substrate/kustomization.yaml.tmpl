@@ -30,6 +30,9 @@ resources:
   - credentials.yaml
   - config.yaml
   - prepare.yaml
+[[- if and .Backup.Bucket .Restore.Point ]]
+  - restore-wait.yaml
+[[- end ]]
   - node-labels.yaml
   - role.yaml
   - ate-api-server.yaml

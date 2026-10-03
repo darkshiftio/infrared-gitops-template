@@ -3,13 +3,24 @@
 # Postgres's backups, to the bucket outside the cluster.
 # =============================================================================
 # CloudNativePG's Barman Cloud plugin archives every WAL segment as it is
+[[- if .Copies.Postgres.Schedule ]]
+# written (the Cluster's plugin, cluster.yaml) and takes a base backup on the
+# install's schedule, [[ .Copies.Postgres.Schedule ]] (seconds first, UTC), and one when this is
+# first applied. Both go to
+[[- else ]]
 # written (the Cluster's plugin, cluster.yaml) and takes a base backup every
 # day at 03:00 UTC, and one when this is first applied. Both go to
+[[- end ]]
 #
-#   s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/postgres/<server name>/
+#   s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/postgres/[[ default "<server name>" .PostgresServerName ]]/
 #
+[[- if .Copies.Postgres.Retention ]]
+# and are kept for [[ .Copies.Postgres.Retention ]]: Barman deletes what a restore to any point of
+# that time no longer needs.
+[[- else ]]
 # and are kept for seven days: Barman deletes what a restore to any point of
 # the last seven days no longer needs.
+[[- end ]]
 #
 # The keys are the platform's (Secret infrared-platform-tokens, keys
 # backup-access-key-id and backup-secret-access-key), copied here through the
@@ -61,7 +72,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
 spec:
-  retentionPolicy: "7d"
+  retentionPolicy: [[ default "7d" .Copies.Postgres.Retention | quote ]]
   configuration:
     destinationPath: [[ printf "s3://%s/%s/postgres" .Backup.Bucket .ClusterName | quote ]]
 [[- if .Backup.Endpoint ]]
@@ -94,8 +105,13 @@ metadata:
 spec:
   cluster:
     name: postgres
+[[- if .Copies.Postgres.Schedule ]]
+  # Seconds first, in UTC: the install's copies.postgres.schedule.
+  schedule: [[ .Copies.Postgres.Schedule | quote ]]
+[[- else ]]
   # Seconds first: every day at 03:00 UTC.
   schedule: "0 0 3 * * *"
+[[- end ]]
   immediate: true
   backupOwnerReference: self
   method: plugin

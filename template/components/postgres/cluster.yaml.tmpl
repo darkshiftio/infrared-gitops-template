@@ -34,6 +34,33 @@ spec:
   # PostgreSQL 18.6 with the standard extensions (pgvector among them), by digest.
   imageName: ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie@sha256:f89a40f4d74aa6e0900917eaf6299b125a6382eb02fd4ee5d46f55bcbf7e5726
   enablePDB: false
+[[- if and .Backup.Bucket .Restore.Point .Restore.Postgres.Source ]]
+  # A restore, from [[ .Restore.Point ]]: the Cluster starts from the archive of
+  # server [[ .Restore.Postgres.Source ]] in the bucket outside the cluster[[ if .Restore.Postgres.TargetTime ]], up to
+  # [[ .Restore.Postgres.TargetTime ]][[ end ]], instead of an empty database, and archives
+  # under a name of its own (plugins, below). The role seaweedfs takes the
+  # password in postgres-seaweedfs, which this install made, and every other
+  # role the one in its DatabaseRole's Secret. CloudNativePG reads bootstrap
+  # only when it creates the Cluster, so this changes nothing once it runs.
+  bootstrap:
+    recovery:
+      source: origin
+      database: seaweedfs
+      owner: seaweedfs
+      secret:
+        name: postgres-seaweedfs
+[[- if .Restore.Postgres.TargetTime ]]
+      recoveryTarget:
+        targetTime: [[ .Restore.Postgres.TargetTime | quote ]]
+[[- end ]]
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: backup
+          serverName: [[ .Restore.Postgres.Source | quote ]]
+[[- else ]]
   # The first consumer's database and role are made with the cluster; the
   # DatabaseRole and Database in seaweedfs.yaml take them over from there.
   bootstrap:
@@ -42,6 +69,7 @@ spec:
       owner: seaweedfs
       secret:
         name: postgres-seaweedfs
+[[- end ]]
   postgresql:
     parameters:
       # SeaweedFS's filers keep their connection pools unbounded.
@@ -60,11 +88,17 @@ spec:
 [[- if .Backup.Bucket ]]
   # Every WAL segment to the bucket outside the cluster, as it is written
   # (backup.yaml).
+[[- if .PostgresServerName ]]
+  # Under this install's own server name, never another install's.
+[[- end ]]
   plugins:
     - name: barman-cloud.cloudnative-pg.io
       isWALArchiver: true
       parameters:
         barmanObjectName: backup
+[[- with .PostgresServerName ]]
+        serverName: [[ . | quote ]]
+[[- end ]]
 [[- end ]]
 [[- else -]]
 # The platform's own stores are off (INFRARED_STORES): no Postgres.

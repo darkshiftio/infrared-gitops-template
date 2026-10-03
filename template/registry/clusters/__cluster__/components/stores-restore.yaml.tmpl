@@ -1,0 +1,51 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "stores-restore" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# stores-restore is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Stores .Backup.Bucket .Restore.Point -]]
+# A restore, from [[ .Restore.Point ]], brings the stores back (components/stores-restore):
+# once Postgres has recovered from the archive outside the cluster, it resets
+# SeaweedFS's file index, then copies every bucket back from the copy outside,
+# and marks the ConfigMap stores/restore-stores after each. SeaweedFS waits for
+# the first mark; Zot, Agent Substrate and the hourly mirror for the second.
+# The Infrared operator renders this only while the restore is in progress.
+# Wave 18, with SeaweedFS, in the backups layer.
+#
+# No resources finalizer: removing this Application leaves the stores as they
+# are.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: stores-restore
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: backups
+  annotations:
+    argocd.argoproj.io/sync-wave: "18"
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/stores-restore
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: stores
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# The stores come back from the bucket outside the cluster only while a
+# restore is in progress, with the platform's own stores and a backup bucket.
+# None is, so this file holds no objects.
+[[- end ]]

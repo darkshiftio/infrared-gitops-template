@@ -1,0 +1,122 @@
+[[- if and .Stores .Backup.Bucket .Restore.Point -]]
+# =============================================================================
+# A restore, from [[ .Restore.Point ]]: SeaweedFS waits for its file index to be reset.
+# =============================================================================
+# The recovered Postgres holds the lost cluster's file index, whose entries
+# name data that went with the lost nodes. The stores-restore Application
+# resets it once Postgres has recovered, then marks the ConfigMap
+# stores/restore-stores (key postgres, for this point). This PreSync hook holds
+# SeaweedFS's sync until then, half an hour at a time, so no filer starts on the
+# old index. It reads that one ConfigMap, nothing else.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seaweedfs-restore-wait
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: restore-wait-seaweedfs
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["restore-stores"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: restore-wait-seaweedfs
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: restore-wait-seaweedfs
+subjects:
+  - kind: ServiceAccount
+    name: seaweedfs-restore-wait
+    namespace: stores
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweedfs-restore-wait
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: seaweedfs-restore-wait
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: POINT
+              value: [[ .Restore.Point | quote ]]
+            - name: MARKER
+              value: postgres
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              marked() {
+                [ "$(kubectl -n stores get configmap restore-stores -o jsonpath='{.data.point}' 2>/dev/null)" = "$POINT" ] &&
+                  [ -n "$(kubectl -n stores get configmap restore-stores -o jsonpath="{.data.$MARKER}" 2>/dev/null)" ]
+              }
+              until marked; do
+                echo "waiting for the restore from $POINT to mark $MARKER in stores/restore-stores"
+                sleep 10
+              done
+              echo "the restore from $POINT marked $MARKER"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# No restore is in progress: SeaweedFS waits for nothing more.
+[[- end ]]

@@ -423,3 +423,143 @@ func TestRegistrySplitIdiom(t *testing.T) {
 		}
 	}
 }
+
+// The copies, Zot's retention and a restore load from the operator's
+// environment's JSON (camelCase keys) through their flags, refuse an unknown
+// field, and an empty flag is the zero value.
+func TestCopiesRetentionRestoreFlags(t *testing.T) {
+	var c Copies
+	cf := jsonFlag[Copies]{&c, "copies"}
+	if err := cf.Set(`{"recipients": ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"],
+		"postgres": {"schedule": "0 0 3 * * *", "retention": "7d"}, "gitea": {"schedule": "10 * * * *"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Recipients) != 1 || c.Postgres != (CopySchedule{Schedule: "0 0 3 * * *", Retention: "7d"}) ||
+		c.Gitea.Schedule != "10 * * * *" || c.Mirror != (CopySchedule{}) {
+		t.Errorf("-copies loaded %+v", c)
+	}
+	for _, bad := range []string{`{"recipient": []}`, `{"postgres": {"when": "x"}}`, `{} {}`} {
+		if err := cf.Set(bad); err == nil {
+			t.Errorf("-copies took %s", bad)
+		}
+	}
+	if err := cf.Set(""); err != nil || c.Recipients != nil || c.Postgres != (CopySchedule{}) {
+		t.Errorf("-copies '' = %+v, %v; want the zero value", c, err)
+	}
+	var r RegistryRetention
+	rf := jsonFlag[RegistryRetention]{&r, "registry-retention"}
+	if err := rf.Set(`{"untaggedAfter": "48h", "keepTags": ["^v[0-9]", "^release-"], "keepNewest": 20}`); err != nil {
+		t.Fatal(err)
+	}
+	if r.UntaggedAfter != "48h" || len(r.KeepTags) != 2 || r.KeepNewest != 20 || r.GCInterval != "" {
+		t.Errorf("-registry-retention loaded %+v", r)
+	}
+	if err := rf.Set(`{"keepNewest": "20"}`); err == nil {
+		t.Error("-registry-retention took a number as a string")
+	}
+	var x Restore
+	xf := jsonFlag[Restore]{&x, "restore"}
+	if err := xf.Set(`{"point": "20261003T050500Z", "postgres": {"source": "postgres", "targetTime": "2026-10-03T05:17:00Z"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if x != (Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres", TargetTime: "2026-10-03T05:17:00Z"}}) {
+		t.Errorf("-restore loaded %+v", x)
+	}
+	if got := xf.String(); !strings.Contains(got, `"Point":"20261003T050500Z"`) {
+		t.Errorf("-restore's String is %s", got)
+	}
+}
+
+// The new fields load from the operator's Data JSON by their Go names.
+func TestDataFileCopiesFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Copies": {"Recipients": ["age1x"], "Mirror": {"Schedule": "17 * * * *"}},
+		"RegistryRetention": {"KeepNewest": 5}, "Restore": {"Point": "20261003T050500Z"},
+		"PostgresServerName": "postgres-20261003T060000Z"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Copies.Recipients) != 1 || d.Copies.Mirror.Schedule != "17 * * * *" || d.RegistryRetention.KeepNewest != 5 ||
+		d.Restore.Point != "20261003T050500Z" || d.PostgresServerName != "postgres-20261003T060000Z" {
+		t.Errorf("loaded Copies %+v, RegistryRetention %+v, Restore %+v, PostgresServerName %q",
+			d.Copies, d.RegistryRetention, d.Restore, d.PostgresServerName)
+	}
+}
+
+func TestValidateCopiesRetentionRestore(t *testing.T) {
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	const recipient = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
+	stores := func(d *Data) { d.Stores, d.Backup = true, BackupTarget{Bucket: "acme-backups"} }
+	for name, mutate := range map[string]func(*Data){
+		"every copy": func(d *Data) {
+			d.Copies = Copies{Recipients: []string{recipient}, Postgres: CopySchedule{"0 30 2 * * *", "14d"},
+				Mirror: CopySchedule{"*/30 * * * *", "10d"}, Objects: CopySchedule{"5 * * * MON-FRI", "9d"}, Gitea: CopySchedule{"10 * * * *", "365d"}}
+		},
+		"retention": func(d *Data) {
+			d.RegistryRetention = RegistryRetention{UntaggedAfter: "1h30m", KeepTags: []string{`^v\d+`, "^release-"}, KeepNewest: 1000, GCInterval: "2h", GCDelay: "30m"}
+		},
+		"server name": func(d *Data) { d.PostgresServerName = "postgres-20261003T060000Z" },
+		"restore": func(d *Data) {
+			stores(d)
+			d.PostgresServerName = "postgres-20261004T101500Z"
+			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres", TargetTime: "2026-10-03T05:17:00Z"}}
+		},
+		"restore, no archive": func(d *Data) { stores(d); d.Restore = Restore{Point: "20261003T050500Z"} },
+	} {
+		d := base
+		mutate(&d)
+		if err := validate(d); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, mutate := range map[string]func(*Data){
+		"five-field Postgres schedule": func(d *Data) { d.Copies.Postgres.Schedule = "0 3 * * *" },
+		"six-field mirror schedule":    func(d *Data) { d.Copies.Mirror.Schedule = "0 17 * * * *" },
+		"retention in hours":           func(d *Data) { d.Copies.Objects.Retention = "168h" },
+		"retention of 0 days":          func(d *Data) { d.Copies.Gitea.Retention = "0d" },
+		"an SSH key as recipient":      func(d *Data) { d.Copies.Recipients = []string{"ssh-ed25519 AAAA"} },
+		"recipient twice":              func(d *Data) { d.Copies.Recipients = []string{recipient, recipient} },
+		"retention in days":            func(d *Data) { d.RegistryRetention.UntaggedAfter = "1d" },
+		"a tag pattern that breaks":    func(d *Data) { d.RegistryRetention.KeepTags = []string{"^v[0-9"} },
+		"a tag pattern not ASCII":      func(d *Data) { d.RegistryRetention.KeepTags = []string{"^vé"} },
+		"keep newest negative":         func(d *Data) { d.RegistryRetention.KeepNewest = -1 },
+		"server name upper case":       func(d *Data) { d.PostgresServerName = "Postgres" },
+		"server name with a slash":     func(d *Data) { d.PostgresServerName = "postgres/x" },
+		"restore without stores":       func(d *Data) { d.Restore.Point = "20261003T050500Z" },
+		"restore point not a stamp": func(d *Data) {
+			stores(d)
+			d.Restore.Point = "2026-10-03T05:05:00Z"
+		},
+		"restore source, no new name": func(d *Data) {
+			stores(d)
+			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres"}}
+		},
+		"restore into its own source": func(d *Data) {
+			stores(d)
+			d.PostgresServerName = "postgres"
+			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres"}}
+		},
+		"target time not UTC": func(d *Data) {
+			stores(d)
+			d.PostgresServerName = "postgres-20261004T101500Z"
+			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres", TargetTime: "2026-10-03T05:17:00+02:00"}}
+		},
+		"target time, no source": func(d *Data) {
+			stores(d)
+			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{TargetTime: "2026-10-03T05:17:00Z"}}
+		},
+		"postgres without a point": func(d *Data) { stores(d); d.Restore.Postgres.Source = "postgres" },
+	} {
+		d := base
+		mutate(&d)
+		if err := validate(d); err == nil {
+			t.Errorf("%s: validated", name)
+		}
+	}
+}

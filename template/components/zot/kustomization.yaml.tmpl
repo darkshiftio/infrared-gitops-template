@@ -9,6 +9,9 @@ resources:
   - wait.yaml
   - base.yaml
   - s3-keys.yaml
+[[- if and .Backup.Bucket .Restore.Point ]]
+  - restore-wait.yaml
+[[- end ]]
 [[- else -]]
 # The registry inside the cluster runs only with a registry address
 # (INFRARED_REGISTRY) and the platform's own stores (INFRARED_STORES), so this

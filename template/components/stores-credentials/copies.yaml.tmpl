@@ -1,0 +1,71 @@
+[[- if and .Stores .Backup.Bucket .Copies.Recipients -]]
+# =============================================================================
+# The keys of the two encrypted copies the Infrared chart makes, every hour.
+# =============================================================================
+# The Infrared chart's CronJobs copy Infrared's objects (infrared-objects-copy)
+# and dump Gitea (infrared-gitea-dump), encrypt each to the install's age
+# recipients, and write them to SeaweedFS, which the hourly mirror carries to
+# the bucket outside the cluster. Each writes with an S3 identity that reaches
+# its own bucket alone (components/seaweedfs/identities.yaml), whose keys the
+# store copies from stores/seaweedfs-s3-<identity> into [[ .InfraredNamespace ]]:
+#
+#   Secret              identity      bucket
+#   objects-copy-s3     objects-copy  infrared-objects
+#   gitea-dump-s3       gitea-dump    gitea-dumps
+#
+# Wave 2, alone: after the store (1), whose webhook admits them.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: objects-copy-s3
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-stores
+  target:
+    name: objects-copy-s3
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: AWS_ACCESS_KEY_ID
+      remoteRef:
+        key: seaweedfs-s3-objects-copy
+        property: AWS_ACCESS_KEY_ID
+    - secretKey: AWS_SECRET_ACCESS_KEY
+      remoteRef:
+        key: seaweedfs-s3-objects-copy
+        property: AWS_SECRET_ACCESS_KEY
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: gitea-dump-s3
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-stores
+  target:
+    name: gitea-dump-s3
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: AWS_ACCESS_KEY_ID
+      remoteRef:
+        key: seaweedfs-s3-gitea-dump
+        property: AWS_ACCESS_KEY_ID
+    - secretKey: AWS_SECRET_ACCESS_KEY
+      remoteRef:
+        key: seaweedfs-s3-gitea-dump
+        property: AWS_SECRET_ACCESS_KEY
+[[- else -]]
+# No age recipient is set (INFRARED_COPIES), or there are no stores or backup
+# bucket: the Infrared chart makes no encrypted copy, so no key to copy.
+[[- end ]]

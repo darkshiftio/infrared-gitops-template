@@ -1,3 +1,5 @@
+[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- if .Stores -]]
 # =============================================================================
 # SeaweedFS's S3 identities: who may do what, in which bucket.
@@ -11,8 +13,16 @@
 #   identity        bucket          for
 #   ate-snapshots   ate-snapshots   Agent Substrate's actor snapshots
 #   registry        registry        the registry's images and charts
-[[- if .Backup.Bucket ]]
+[[- if $copies ]]
+#   objects-copy    infrared-objects  the hourly copy of Infrared's objects, encrypted
+#   gitea-dump      gitea-dumps       the hourly dump of Gitea, encrypted
+#   backup          every bucket, read  the hourly copy to the outside bucket
+[[- else if .Backup.Bucket ]]
 #   backup          both, read      the hourly copy to the outside bucket
+[[- end ]]
+[[- if $restore ]]
+#   restore         every bucket, read and write  a restore copying the buckets
+#                   back (stores-restore), while the restore lasts
 [[- end ]]
 #
 # No identity is an administrator. The buckets are made by the chart's bucket
@@ -44,7 +54,22 @@ stringData:
         {
           "name": "backup",
           "credentials": [{"accessKey": "${S3_BACKUP_ACCESS_KEY_ID}", "secretKey": "${S3_BACKUP_SECRET_ACCESS_KEY}"}],
-          "actions": ["Read:ate-snapshots", "List:ate-snapshots", "Read:registry", "List:registry"]
+          "actions": ["Read:ate-snapshots", "List:ate-snapshots", "Read:registry", "List:registry"[[ if $copies ]], "Read:infrared-objects", "List:infrared-objects", "Read:gitea-dumps", "List:gitea-dumps"[[ end ]]]
+        }[[ end ]][[ if $copies ]],
+        {
+          "name": "objects-copy",
+          "credentials": [{"accessKey": "${S3_OBJECTS_COPY_ACCESS_KEY_ID}", "secretKey": "${S3_OBJECTS_COPY_SECRET_ACCESS_KEY}"}],
+          "actions": ["Read:infrared-objects", "Write:infrared-objects", "List:infrared-objects"]
+        },
+        {
+          "name": "gitea-dump",
+          "credentials": [{"accessKey": "${S3_GITEA_DUMP_ACCESS_KEY_ID}", "secretKey": "${S3_GITEA_DUMP_SECRET_ACCESS_KEY}"}],
+          "actions": ["Read:gitea-dumps", "Write:gitea-dumps", "List:gitea-dumps"]
+        }[[ end ]][[ if $restore ]],
+        {
+          "name": "restore",
+          "credentials": [{"accessKey": "${S3_RESTORE_ACCESS_KEY_ID}", "secretKey": "${S3_RESTORE_SECRET_ACCESS_KEY}"}],
+          "actions": ["Read:ate-snapshots", "Write:ate-snapshots", "List:ate-snapshots", "Read:registry", "Write:registry", "List:registry"[[ if $copies ]], "Read:infrared-objects", "Write:infrared-objects", "List:infrared-objects", "Read:gitea-dumps", "Write:gitea-dumps", "List:gitea-dumps"[[ end ]]]
         }[[ end ]]
       ]
     }

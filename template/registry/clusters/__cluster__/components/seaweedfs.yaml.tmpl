@@ -1,4 +1,6 @@
 [[- $on := true ]][[ range .Disabled ]][[ if eq . "seaweedfs" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients ]]
+[[- $restore := and .Stores .Backup.Bucket .Restore.Point ]]
 [[- if not $on -]]
 # seaweedfs is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
@@ -16,11 +18,29 @@
 #
 # S3 at http://seaweedfs-s3.stores.svc:8333, with an identity per bucket
 # (components/seaweedfs/identities.yaml). The chart's bucket hook makes the
+[[- if $copies ]]
+# buckets ate-snapshots, registry, infrared-objects and gitea-dumps after each
+# sync: the last two hold the copies of Infrared's objects and of Gitea, which
+# the Infrared chart makes, encrypted.
+[[- else ]]
 # buckets ate-snapshots and registry after each sync.
+[[- end ]]
 [[- if .Backup.Bucket ]]
 #
+[[- if $copies ]]
+# Every hour every bucket is copied to s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs
+# (components/seaweedfs/backup.yaml), what each copy replaces kept a while.
+[[- else ]]
 # Every hour both buckets are copied to s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs
 # (components/seaweedfs/backup.yaml), what each copy replaces kept seven days.
+[[- end ]]
+[[- end ]]
+[[- if $restore ]]
+#
+# A restore, from [[ .Restore.Point ]], is in progress: a PreSync hook holds this sync
+# until the restored Postgres's file index is reset (components/seaweedfs/
+# restore-wait.yaml), and the identity restore may write every bucket while
+# the stores-restore Application copies them back.
 [[- end ]]
 #
 # No resources finalizer: removing this Application leaves SeaweedFS running,
@@ -152,7 +172,7 @@ spec:
             # The gateway reads the identities file once, at start: a new set of
             # identities is a new value here, so the gateways roll.
             podAnnotations:
-              infrared.darkshift.io/s3-identities: ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]]
+              infrared.darkshift.io/s3-identities: ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]][[ if $copies ]] objects-copy gitea-dump[[ end ]][[ if $restore ]] restore[[ end ]]
             extraEnvironmentVars:
               S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:
                 secretKeyRef:
@@ -180,9 +200,41 @@ spec:
                   name: seaweedfs-s3-backup
                   key: AWS_SECRET_ACCESS_KEY
 [[- end ]]
+[[- if $copies ]]
+              S3_OBJECTS_COPY_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-objects-copy
+                  key: AWS_ACCESS_KEY_ID
+              S3_OBJECTS_COPY_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-objects-copy
+                  key: AWS_SECRET_ACCESS_KEY
+              S3_GITEA_DUMP_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-gitea-dump
+                  key: AWS_ACCESS_KEY_ID
+              S3_GITEA_DUMP_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-gitea-dump
+                  key: AWS_SECRET_ACCESS_KEY
+[[- end ]]
+[[- if $restore ]]
+              S3_RESTORE_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-restore
+                  key: AWS_ACCESS_KEY_ID
+              S3_RESTORE_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-restore
+                  key: AWS_SECRET_ACCESS_KEY
+[[- end ]]
             createBuckets:
               - name: ate-snapshots
               - name: registry
+[[- if $copies ]]
+              - name: infrared-objects
+              - name: gitea-dumps
+[[- end ]]
             resources:
               requests:
                 cpu: 20m
