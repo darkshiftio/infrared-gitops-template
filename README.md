@@ -699,6 +699,19 @@ does not render, so a re-hydration leaves both alone. Keep it that way: no
 template file may be named `product-*` or live under `products/` or
 `registry/clusters/__cluster__/values/`.
 
+The operator's scaffold writes those files for a Product it delivers, and also
+`registry/clusters/<cluster>/components/products-project.yaml`, the AppProject
+`products`, when the gitops repo has none; it adds each later Product's
+destination to it. The template never renders that file either.
+
+One check runs against a cluster with a Gateway edge, never from CI. It goes
+through Infrared's API with a bearer token, as the UI does, and removes what it
+made unless `KEEP=1`:
+
+```bash
+scripts/product-check.sh <context> <org> <token file>   # G1, G3 to G5: a Product from a starter zip is built, released and promoted, and its zone answers over HTTPS behind sign-in
+```
+
 ### Disabled components
 
 `.Disabled` names components the template leaves out, by their Application
