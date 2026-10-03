@@ -70,8 +70,8 @@ The operator's JSON uses camelCase names for the older fields (`clusterName`,
 encoding/json matches them case-insensitively, so `hack/render -data` reads
 either, and `Backup`'s keys as `INFRARED_BACKUP` spells them (`bucket`, …).
 `hack/render` takes `-stores`, `-backup` as JSON and `-disabled` as a JSON
-array, exactly as the operator's environment carries them, and `-forge` with
-`-forge-url`.
+array, exactly as the operator's environment carries them, `-forge` with
+`-forge-url`, and `-registry`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled`,
@@ -81,8 +81,8 @@ rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled`,
 `infrared` Application carries (see "The install's settings"); `.Forge` `gitea`
 turns Gitea on there and, with builds on, swaps GitHub's token job for the
 operator's `gitea-git` (see "Builds"). `.Registry` runs Zot only with `.Stores`, and
-turns builds to the registry inside the cluster when they are on; without both it
-changes only what the `infrared` Application carries. `.Cloud` only picks the StorageClass of the Postgres volume, when
+turns builds to the registry inside the cluster when they are on; with neither,
+it changes only what the `infrared` Application carries. `.Cloud` only picks the StorageClass of the Postgres volume, when
 `.Stores` is on, and of Gitea's, for `.Forge` `gitea` (Linode's Retain class on
 `linode`); `.SubstrateCapable` switches nothing yet, it is for Substrate.
 
