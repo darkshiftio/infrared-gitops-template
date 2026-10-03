@@ -116,7 +116,7 @@ EOF
 
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
-# the forge. It is the shape of an install like linode-mgmt's.
+# the forge: the shape of a Linode install that runs Gitea.
 backup_bucket=acme-backups
 backup_endpoint=https://objects.example.com
 gitea_url=http://gitea-http.infrared.svc.cluster.local:3000
