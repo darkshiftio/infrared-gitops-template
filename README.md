@@ -63,6 +63,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 | `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
 | `.ForgeURL` | `` or `http://gitea-http.infrared.svc.cluster.local:3000` | the forge's root as the cluster reaches it, without a trailing slash: repos are `<ForgeURL>/<owner>/<repo>`. Empty for GitHub |
+| `.Registry` | `` or `10.43.0.50:5000` | the operator's `INFRARED_REGISTRY` (chart value `registry.address`): the address of the registry inside the cluster, a private IPv4 address and a port. With `.Stores` the template runs Zot there, its Service's pinned ClusterIP and port, and builds push the builder to it (see "The registry"). Empty: no registry inside the cluster |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -73,13 +74,15 @@ array, exactly as the operator's environment carries them, and `-forge` with
 `-forge-url`.
 
 The zero value of every newer field renders exactly the files the template
-rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled` and
-`.Forge` turn anything on or off: a Traefik cluster that carries
+rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled`,
+`.Forge` and `.Registry` turn anything on or off: a Traefik cluster that carries
 `spec.previews` by hand, on any cloud, renders the same files as one without
 (`make verify` checks it). A `.Backup` without the stores changes only what the
 `infrared` Application carries (see "The install's settings"); `.Forge` `gitea`
 turns Gitea on there and, with builds on, swaps GitHub's token job for the
-operator's `gitea-git` (see "Builds"). `.Cloud` only picks the StorageClass of the Postgres volume, when
+operator's `gitea-git` (see "Builds"). `.Registry` runs Zot only with `.Stores`, and
+turns builds to the registry inside the cluster when they are on; without both it
+changes only what the `infrared` Application carries. `.Cloud` only picks the StorageClass of the Postgres volume, when
 `.Stores` is on, and of Gitea's, for `.Forge` `gitea` (Linode's Retain class on
 `linode`); `.SubstrateCapable` switches nothing yet, it is for Substrate.
 
@@ -133,6 +136,7 @@ set, so a cluster without it renders the same file as before:
 | `.Backup.Bucket` (with its `.Endpoint` and `.Region` when set) | `backup` |
 | `.Disabled` | `components.disabled` |
 | `.Forge` `gitea` | `gitea.enabled: true`, `giteaAdmin.existingSecret: infrared-gitea-admin`, and on `.Cloud` `linode` `gitea.persistence.storageClass: linode-block-storage-retain` |
+| `.Registry` | `registry.address` |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -186,6 +190,8 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg`, with a backup bucket also `plugin-barman-cloud` + `components/cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1), chart 0.8.1 (Barman Cloud plugin 0.15.1), by digest |
 | 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
 | 18 | `seaweedfs` (Stores only) | https://seaweedfs.github.io/seaweedfs/helm `seaweedfs` + `components/seaweedfs` | chart 4.48.0 (SeaweedFS 4.48, by digest) |
+| 19 | `stores-credentials` (Stores and Registry) | `components/stores-credentials`: ClusterSecretStore `infrared-stores` | — |
+| 20 | `zot` (Stores and Registry) | https://zotregistry.dev/helm-charts `zot` + `components/zot` | chart 0.1.125 (Zot v2.1.21, by digest) |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
@@ -229,6 +235,19 @@ clones `<ForgeURL>/<owner>/<repo>.git`.
 
 The `infrared` Application passes `builds.registry: .BuildRegistry` to the
 chart, so Argo CD's render keeps the operator's `INFRARED_BUILD_REGISTRY`.
+
+With `.Registry` too, builds push to the registry inside the cluster (see "The
+registry"), by its address. The ClusterBuilder's tag is
+`<Registry>/platform/kpack-builder`, pushed as the user `platform` with the
+ServiceAccount `kpack/infrared-builder`, which lists `kpack/registry-push`: the
+operator writes that Secret once the namespace `kpack` exists, and no platform
+credential lives in `builds`. There is no `builds/builder`, no ECR login job and
+no namespace `build-credentials`. A Sync hook, `builds/registry-wait` (wave -1),
+holds the builder (wave 1) until Zot's Service has a ready endpoint and the
+Secret exists: kpack retries a failed push with a delay that doubles each time.
+Each organization's builds run as the operator's `builds/builder-<org>`, which
+lists `builds/registry-push-<org>`, and push under `<org>/`; the source
+credentials are as above.
 
 ### Images
 
@@ -366,6 +385,47 @@ A Cluster built again from nothing writes its WAL to the same prefix, which
 Barman refuses while an older server's archive is there: a restore names a new
 server for the new Cluster.
 
+### The registry
+
+With `.Registry` and `.Stores` the template runs the registry inside the
+cluster: Zot v2.1.21 (chart 0.1.125, by digest) in the namespace `registry`,
+every layer and manifest in SeaweedFS's bucket `registry`. Its Service
+`registry/zot` is a ClusterIP pinned to `.Registry`'s address, on its port, plain
+HTTP: each node mirrors that address to it (k3s's `registries.yaml`, written when
+the node is made, so the template never sets it), and anything in the cluster
+pulls without a login. Builds name the registry by that address, never by a
+name: go-containerregistry, which kpack and the buildpack lifecycle push with,
+falls back to plain HTTP only for a private address.
+
+| Application | What |
+|---|---|
+| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry` alone. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
+| `zot` (wave 20) | `components/zot`: the ConfigMap `zot-base`, the ExternalSecret `zot-s3` (the S3 identity `registry`'s keys, from `stores/seaweedfs-s3-registry`) and two waits; and the chart: one replica, `strategy: Recreate`, not root, a read-only root filesystem, and the Service above. |
+
+Zot's config and its users are split between the template and the operator:
+
+| Object | Written by | What |
+|---|---|---|
+| ConfigMap `registry/zot-base`, key `config.json` | the template | storage on S3, with no keys (Zot's S3 driver reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from its environment, the Secret `zot-s3`), garbage collection every hour and the retention rules, `compat: ["docker2s2"]` (Paketo's images are Docker schema 2, which Zot otherwise refuses), htpasswd at `/etc/zot-auth/htpasswd` and API keys, and the rules: anyone reads, the user `platform` writes under `platform/`, the user `infrared` reads and deletes anywhere |
+| Secret `registry/zot-config`, key `config.json` | the operator | `zot-base` with one rule per organization added under `http.accessControl.repositories` (`<org>/**`, user `<org>`), mounted at `/etc/zot` |
+| Secret `registry/zot-auth`, key `htpasswd` | the operator | the bcrypt hashes of `infrared`, `platform` and each organization's user, mounted at `/etc/zot-auth` |
+
+Zot rereads both Secrets within seconds of a change, without a restart: its
+watch also compares each file's identity, so a Secret volume's swap reaches it.
+Nothing rolls the pod when they change. The operator writes them once `zot-base`
+and the namespace exist, so the `zot` Application holds its sync twice: a
+PreSync hook waits for the store `infrared-stores` and SeaweedFS's S3 gateway,
+and a Sync hook at wave -1, after `zot-base` (-3) and the S3 keys (-2), waits for
+`zot-config`, `zot-auth` and `zot-s3` before Zot starts (0). A PreSync wait for
+the operator's Secrets would never end on a fresh install, because `zot-base` is
+applied by the same sync.
+
+Zot's own database, the users' API keys among it, is on the pod's disk: a new pod
+reads every repository back from the bucket, so an image outlives every registry
+pod and an API key does not. The pods carry `app.kubernetes.io/name: zot`, which
+the operator's network rule for publishing steps selects. Removing the `zot`
+Application removes Zot and nothing in the bucket.
+
 ### Order on a fresh cluster
 
 On a fresh cluster the root app-of-apps creates every Application within
@@ -462,6 +522,7 @@ make render EDGE=gateway PLATFORM_DOMAIN=preprod.example.com INFRARED_HOST=infra
 make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
 make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
+make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000
 make verify                             # the CI gate
 scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
 ```
@@ -480,8 +541,11 @@ conventions, the `infrared` Application's sources (chart pin first, the org's
 values file as `$values`, nothing rendered into `values/`, the `$values` repo
 allowed by AppProject `infrared`), every non-empty `components/*`
 kustomization builds, builds is fully present with a registry (ECR login only
-for ECR) and renders no objects without one, and kubeconform (`-strict`, Argo
-CD kinds against the public CRDs-catalog).
+for ECR) and renders no objects without one, the registry inside the cluster
+with `.Registry` and `.Stores` (Zot's chart, Service, Secrets and waits, the
+store over `stores`, and builds pushed as `platform`) and nothing of it
+without, and kubeconform (`-strict`, Argo CD kinds against the public
+CRDs-catalog).
 
 Bump upstream with `scripts/vendor-argocd.sh` / `scripts/vendor-kpack.sh`
 (edit the version at the top), or by editing a chart `targetRevision`.

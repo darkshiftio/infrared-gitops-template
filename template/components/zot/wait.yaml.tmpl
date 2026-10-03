@@ -1,0 +1,275 @@
+[[- if and .Stores .Registry -]]
+# =============================================================================
+# Before Zot: its store, its bucket's gateway, and the operator's Secrets.
+# =============================================================================
+# On a fresh cluster every Application syncs at once (README, "Order on a fresh
+# cluster"). Two hooks hold this sync, each for up to half an hour:
+#
+#   zot-wait          PreSync. External Secrets' CRDs, the ClusterSecretStore
+#                     infrared-stores Ready (it copies Zot's S3 keys, wave -2),
+#                     and SeaweedFS's S3 gateway with a ready endpoint.
+#   zot-config-wait   Sync, wave -1, after zot-base (-3) and the S3 keys (-2),
+#                     before Zot (0): the Secrets zot-config and zot-auth, which
+#                     the Infrared operator writes from zot-base, and zot-s3.
+#                     It cannot be PreSync: zot-base is applied by this sync, so
+#                     on a fresh install a PreSync wait for them waits for ever.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zot-wait
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+---
+# Read only: CRDs, EndpointSlices and ClusterSecretStores, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-wait-zot
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["clustersecretstores"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-wait-zot
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-wait-zot
+subjects:
+  - kind: ServiceAccount
+    name: zot-wait
+    namespace: registry
+---
+# get on the three Secrets Zot mounts or reads, to see that they exist.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zot-wait
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["zot-config", "zot-auth", "zot-s3"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zot-wait
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: zot-wait
+subjects:
+  - kind: ServiceAccount
+    name: zot-wait
+    namespace: registry
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: zot-wait
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: zot-wait
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: WAIT_CRDS
+              value: "externalsecrets.external-secrets.io"
+            - name: WAIT_SERVICES
+              value: "stores/seaweedfs-s3"
+            - name: WAIT_STORES
+              value: "infrared-stores"
+            - name: WAIT_SECRETS
+              value: ""
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Each list is space-separated; an empty one waits for nothing.
+              established() {
+                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+              }
+              answering() {
+                kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \
+                  -o jsonpath='{.items[*].endpoints[*].conditions.ready}' 2>/dev/null | grep -qw true
+              }
+              store_ready() {
+                [ "$(kubectl get clustersecretstore "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
+              }
+              present() {
+                kubectl -n "${1%%/*}" get secret "${1#*/}" -o name >/dev/null 2>&1
+              }
+              for crd in $WAIT_CRDS; do
+                until established "$crd"; do echo "waiting for the CRD $crd"; sleep 5; done
+              done
+              for svc in $WAIT_SERVICES; do
+                until answering "$svc"; do echo "waiting for a ready endpoint of the Service $svc"; sleep 5; done
+              done
+              for store in $WAIT_STORES; do
+                until store_ready "$store"; do echo "waiting for the ClusterSecretStore $store to be Ready"; sleep 5; done
+              done
+              for secret in $WAIT_SECRETS; do
+                until present "$secret"; do echo "waiting for the Secret $secret"; sleep 5; done
+              done
+              echo "everything this component needs answers"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: zot-config-wait
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: zot-wait
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: WAIT_CRDS
+              value: ""
+            - name: WAIT_SERVICES
+              value: ""
+            - name: WAIT_STORES
+              value: ""
+            - name: WAIT_SECRETS
+              value: "registry/zot-config registry/zot-auth registry/zot-s3"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Each list is space-separated; an empty one waits for nothing.
+              established() {
+                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+              }
+              answering() {
+                kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \
+                  -o jsonpath='{.items[*].endpoints[*].conditions.ready}' 2>/dev/null | grep -qw true
+              }
+              store_ready() {
+                [ "$(kubectl get clustersecretstore "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
+              }
+              present() {
+                kubectl -n "${1%%/*}" get secret "${1#*/}" -o name >/dev/null 2>&1
+              }
+              for crd in $WAIT_CRDS; do
+                until established "$crd"; do echo "waiting for the CRD $crd"; sleep 5; done
+              done
+              for svc in $WAIT_SERVICES; do
+                until answering "$svc"; do echo "waiting for a ready endpoint of the Service $svc"; sleep 5; done
+              done
+              for store in $WAIT_STORES; do
+                until store_ready "$store"; do echo "waiting for the ClusterSecretStore $store to be Ready"; sleep 5; done
+              done
+              for secret in $WAIT_SECRETS; do
+                until present "$secret"; do echo "waiting for the Secret $secret"; sleep 5; done
+              done
+              echo "everything this component needs answers"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# The registry inside the cluster runs only with a registry address and the
+# platform's own stores: nothing to wait for.
+[[- end ]]

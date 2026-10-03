@@ -349,3 +349,77 @@ func TestForgeFields(t *testing.T) {
 		}
 	}
 }
+
+// Registry loads from the operator's JSON by its Go name, and is a private
+// IPv4 address and a port: the address Zot's Service is pinned to, which builds
+// name the registry by.
+func TestRegistryField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Registry": "10.43.0.50:5000"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.Registry != "10.43.0.50:5000" {
+		t.Errorf("loaded Registry %q", d.Registry)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, r := range []string{"", "10.43.0.50:5000", "172.20.0.10:80", "192.168.1.10:65535"} {
+		d := base
+		d.Registry = r
+		if err := validate(d); err != nil {
+			t.Errorf("Registry %q: %v", r, err)
+		}
+	}
+	for _, r := range []string{
+		"registry.infrared.internal:5000", // a name: builds would speak HTTPS to it
+		"10.43.0.50",                      // no port
+		"8.8.8.8:5000",                    // not a private address
+		"10.43.0.50:0",
+		"10.43.0.50:65536",
+		"10.43.0.50:05000",
+		"10.43.0.50:http",
+		"http://10.43.0.50:5000",
+		"10.43.0.50:5000/platform",
+		"[::ffff:10.43.0.50]:5000",
+		"[fd00::50]:5000",
+	} {
+		d := base
+		d.Registry = r
+		if err := validate(d); err == nil {
+			t.Errorf("Registry %q: validated", r)
+		}
+	}
+}
+
+// The zot Application splits Registry into its Service's ClusterIP and port
+// with builtins only: a range over the address's length finds the colon.
+func TestRegistrySplitIdiom(t *testing.T) {
+	src := t.TempDir()
+	tpl := `[[- $ip := .Registry ]][[ $port := "" ]]` +
+		`[[ range $i := len .Registry ]][[ if hasPrefix ":" (slice $.Registry $i) ]]` +
+		`[[ $ip = slice $.Registry 0 $i ]][[ $port = trimPrefix ":" (slice $.Registry $i) ]][[ end ]][[ end ]]` +
+		`[[ $ip ]] [[ $port ]]`
+	if err := os.WriteFile(filepath.Join(src, "a.tmpl"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for registry, want := range map[string]string{
+		"10.43.0.50:5000":  "10.43.0.50 5000",
+		"192.168.1.10:80":  "192.168.1.10 80",
+		"172.20.0.10:8080": "172.20.0.10 8080",
+		"":                 " ",
+	} {
+		out := filepath.Join(t.TempDir(), "out")
+		if _, err := Render(src, out, Data{ClusterName: "c1", Registry: registry}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(filepath.Join(out, "a"))
+		if string(got) != want {
+			t.Errorf("Registry %q rendered %q, want %q", registry, got, want)
+		}
+	}
+}

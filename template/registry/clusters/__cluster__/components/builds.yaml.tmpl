@@ -7,7 +7,7 @@
 # ClusterStack and ClusterBuilder `infrared-builder`, namespace `builds` where
 # products' kpack Images live, and the jobs that keep its registry and GitHub
 # credentials fresh. Wave 26: right after kpack (25), whose CRDs it uses.
-# Builds push to [[ .BuildRegistry ]].
+# Builds push to [[ .BuildRegistry ]][[ if .Registry ]], the registry inside the cluster[[ end ]].
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

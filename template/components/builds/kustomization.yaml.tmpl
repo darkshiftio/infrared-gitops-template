@@ -2,21 +2,29 @@
 # Product image builds with kpack (the `builds` Application, wave 26).
 # Builds push to [[ .BuildRegistry ]]. See README.md.
 #
+[[- if .Registry ]]
+# The objects span namespaces (builds, kpack[[ if ne .Forge "gitea" ]], ir-org-[[ .OrgName ]][[ end ]] and cluster
+# scope), so every one names its own namespace and this kustomization sets none.
+[[- else ]]
 # The objects span namespaces (builds, build-credentials, ir-org-[[ .OrgName ]]
 # and cluster scope), so every one names its own namespace and this
 # kustomization sets none.
+[[- end ]]
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespaces.yaml
   - builder.yaml
+[[- if .Registry ]]
+  - wait.yaml
+[[- end ]]
 [[- if ne .Forge "gitea" ]]
   - github-token.yaml
 [[- end ]]
-[[- if contains ".dkr.ecr." .BuildRegistry ]]
+[[- if and (contains ".dkr.ecr." .BuildRegistry) (not .Registry) ]]
   - ecr-login.yaml
 [[- end ]]
-[[- if or (ne .Forge "gitea") (contains ".dkr.ecr." .BuildRegistry) ]]
+[[- if or (ne .Forge "gitea") (and (contains ".dkr.ecr." .BuildRegistry) (not .Registry)) ]]
 configMapGenerator:
 [[- end ]]
 [[- if ne .Forge "gitea" ]]
@@ -27,7 +35,7 @@ configMapGenerator:
       - scripts/github-jwt.sh
       - scripts/github-token.sh
 [[- end ]]
-[[- if contains ".dkr.ecr." .BuildRegistry ]]
+[[- if and (contains ".dkr.ecr." .BuildRegistry) (not .Registry) ]]
   - name: ecr-login-scripts
     namespace: build-credentials
     files:

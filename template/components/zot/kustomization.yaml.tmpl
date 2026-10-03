@@ -1,0 +1,16 @@
+[[- if and .Stores .Registry -]]
+# The first source of the `zot` Application (wave 20), in the namespace
+# registry: the waits (wait.yaml), the base of Zot's config, which the Infrared
+# operator completes (base.yaml), and Zot's S3 keys (s3-keys.yaml). Zot itself is
+# the chart, the second source. Every object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - wait.yaml
+  - base.yaml
+  - s3-keys.yaml
+[[- else -]]
+# The registry inside the cluster runs only with a registry address
+# (INFRARED_REGISTRY) and the platform's own stores (INFRARED_STORES), so this
+# component holds no objects and no Application points at it.
+[[- end ]]

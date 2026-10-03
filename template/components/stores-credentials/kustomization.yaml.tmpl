@@ -1,0 +1,14 @@
+[[- if and .Stores .Registry -]]
+# The stores' credentials (the `stores-credentials` Application, wave 19). See
+# store.yaml; wait.yaml holds the sync until External Secrets and SeaweedFS's S3
+# gateway answer. Every object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - wait.yaml
+  - store.yaml
+[[- else -]]
+# The stores' credentials are handed out only to the registry inside the
+# cluster, with the platform's own stores, so this component holds no objects
+# and no Application points at it.
+[[- end ]]

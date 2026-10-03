@@ -1,0 +1,79 @@
+[[- if and .Stores .Registry -]]
+# =============================================================================
+# infrared-stores: the stores' credentials, each one handed out by name.
+# =============================================================================
+# The platform's stores keep a Secret in the namespace stores for each of their
+# consumers, made once by their PreSync hooks: seaweedfs-s3-<identity> (an S3
+# identity's keys) and postgres-<role> (a database role). This store reads those
+# Secrets, and only those the Role below names, as the ServiceAccount below. A
+# consumer copies the Secret it needs into its own namespace with an
+# ExternalSecret:
+#
+#   Secret                  copied to
+#   seaweedfs-s3-registry   registry/zot-s3 (the registry's S3 keys)
+#
+# `conditions` limits the store to those namespaces: any other namespace, a
+# product's zone included, cannot read a credential through it. A new consumer
+# adds its Secret to the Role and its namespace to the conditions.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stores-credentials-reader
+  namespace: stores
+---
+# get on the Secrets named here, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stores-credentials-reader
+  namespace: stores
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["seaweedfs-s3-registry"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stores-credentials-reader
+  namespace: stores
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stores-credentials-reader
+subjects:
+  - kind: ServiceAccount
+    name: stores-credentials-reader
+    namespace: stores
+---
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: infrared-stores
+  annotations:
+    # After its ServiceAccount and Role.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  conditions:
+    - namespaces:
+        - registry
+  provider:
+    kubernetes:
+      remoteNamespace: stores
+      server:
+        url: https://kubernetes.default.svc
+        caProvider:
+          type: ConfigMap
+          name: kube-root-ca.crt
+          key: ca.crt
+          namespace: stores
+      auth:
+        serviceAccount:
+          name: stores-credentials-reader
+          namespace: stores
+[[- else -]]
+# The stores' credentials are handed out only to the registry inside the
+# cluster, with the platform's own stores: no store.
+[[- end ]]

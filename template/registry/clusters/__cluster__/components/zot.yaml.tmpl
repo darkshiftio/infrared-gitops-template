@@ -1,0 +1,146 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "zot" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# zot is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Stores .Registry -]]
+[[- /* Registry is <IPv4>:<port>, the Service's ClusterIP and port. No helper
+splits a string, so a range over its length finds the colon. */ -]]
+[[- $ip := .Registry ]][[ $port := "" ]]
+[[- range $i := len .Registry ]][[ if hasPrefix ":" (slice $.Registry $i) ]][[ $ip = slice $.Registry 0 $i ]][[ $port = trimPrefix ":" (slice $.Registry $i) ]][[ end ]][[ end -]]
+# Zot v2.1.21 (chart 0.1.125), the registry inside the cluster, in the
+# namespace registry at [[ .Registry ]]: the Service zot, its ClusterIP pinned,
+# plain HTTP. Every node mirrors that address to it, so the kubelet pulls
+# without a login, and builds name the registry by that address. Wave 20, after
+# SeaweedFS (18), which holds every layer, and the stores' credentials (19),
+# which hand Zot its S3 keys.
+#
+# One replica, replaced and never rolled (strategy Recreate): Zot's database is
+# on the pod's own disk and allows one process. A new pod reads every repository
+# back from the bucket, so an image outlives every registry pod; the users' API
+# keys do not.
+#
+# Its config and its users are the Infrared operator's: the Secret zot-config,
+# from components/zot/base.yaml, at /etc/zot, and the Secret zot-auth at
+# /etc/zot-auth. Zot rereads both within seconds of a change, without a
+# restart, so nothing here rolls the pod when they change.
+#
+# Its pods carry app.kubernetes.io/name: zot, which the operator's network rule
+# for publishing steps selects. Removing this Application removes Zot and
+# nothing in the bucket.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zot
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    # The waits, the base of Zot's config, and its S3 keys.
+    - repoURL: [[ .GitopsRepoURL ]]
+      targetRevision: [[ .DefaultBranch ]]
+      path: components/zot
+    - repoURL: https://zotregistry.dev/helm-charts
+      chart: zot
+      targetRevision: 0.1.125
+      helm:
+        releaseName: zot
+        # The chart's connection tests are never run.
+        skipTests: true
+        valuesObject:
+          image:
+            repository: ghcr.io/project-zot/zot
+            tag: "v2.1.21@sha256:6b69512c00dceaad05b1144e6079aac6aa7309d7fd200f9947ecb1de09cf48c8"
+            pullPolicy: IfNotPresent
+          replicaCount: 1
+          strategy:
+            type: Recreate
+          # The chart's default is NodePort.
+          service:
+            type: ClusterIP
+            clusterIP: [[ $ip | quote ]]
+            port: [[ $port ]]
+          # The config and the users are the operator's Secrets: the chart makes
+          # neither.
+          mountConfig: false
+          mountSecret: false
+          externalSecrets:
+            - secretName: zot-config
+              mountPath: /etc/zot
+            - secretName: zot-auth
+              mountPath: /etc/zot-auth
+          # The S3 driver's keys, the identity registry's (components/zot/s3-keys.yaml).
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: zot-s3
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zot-s3
+                  key: AWS_SECRET_ACCESS_KEY
+          # Not root (the image's own user is), on a read-only filesystem: Zot
+          # writes only its database, in /var/lib/registry (the chart's
+          # emptyDir), and /tmp.
+          podSecurityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          extraVolumes:
+            - name: tmp
+              emptyDir: {}
+          extraVolumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          # A new pod reads every repository back from the bucket before it
+          # answers: up to ten minutes, not the chart's thirty seconds.
+          startupProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: registry
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# The registry inside the cluster, Zot, runs only with a registry address (the
+# operator's INFRARED_REGISTRY) and the platform's own stores (INFRARED_STORES),
+# which hold its layers. This cluster lacks one or the other, so this file
+# holds no objects.
+[[- end ]]

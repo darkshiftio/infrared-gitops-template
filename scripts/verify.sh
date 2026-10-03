@@ -46,6 +46,14 @@
 #     the preflight's result change nothing: the render equals the plain one;
 #     a backup bucket without the stores, and Forge gitea, change only the
 #     infrared Application's values
+#   - the registry inside the cluster, with Registry and Stores: Zot's
+#     Application (chart, image by digest, one replica replaced not rolled, its
+#     Service pinned to Registry's address, the operator's Secrets mounted and
+#     never rendered, S3 keys from the store infrared-stores), zot-base's
+#     config, the waits before Zot, and the store over stores; builds push the
+#     builder as platform, by address, with kpack/infrared-builder; without
+#     both, no object of them; Registry alone changes only the infrared
+#     Application
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys; without one, no backup object
@@ -125,6 +133,11 @@ yq -p json -o json '. + {"Stores": true, "Disabled": ["infisical"],
     "Forge": "gitea", "ForgeURL": "'"$gitea_url"'"}' \
   "$work/gateway.json" >"$work/stores.json"
 
+# The registry variant: the stores' Data plus the registry inside the cluster,
+# which builds push to by address: the shape of the one install.
+zot_registry=10.43.0.50:5000
+yq -p json -o json '. + {"Registry": "'"$zot_registry"'"}' "$work/stores.json" >"$work/registry.json"
+
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 variants=(
@@ -138,6 +151,8 @@ variants=(
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
   "gitea demo-gt k3s - -forge gitea -forge-url $gitea_url"
   "gitea-builds demo-gb k3s 10.43.0.50:5000/demo-org -forge gitea -forge-url $gitea_url"
+  "registry demo-rg k3s $zot_registry -data $work/registry.json"
+  "registry-plain demo-rp k3s $zot_registry -stores -registry $zot_registry"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -169,6 +184,7 @@ for v in "${variants[@]}"; do
   stores=false cloud="" backup="" endpoint="" region="" domain="" host="" disabled="[]"
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
+  zot_addr="$(sed -n -E 's/.*-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
   backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
   if [ -n "$data_file" ]; then
     edge="$(yq -p json -r '.Edge // ""' "$data_file")"
@@ -181,6 +197,7 @@ for v in "${variants[@]}"; do
     host="$(yq -p json -r '.InfraredHost // ""' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
     forge="$(yq -p json -r '.Forge // ""' "$data_file")"
+    zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
   fi
   # The infrared Application carries the install's backup bucket even without
   # the stores, but backups need the stores.
@@ -254,9 +271,10 @@ for v in "${variants[@]}"; do
     [ "$cloud" = linode ] && gitea_class=", persistence: {storageClass: linode-block-storage-retain}"
     want="${want}gitea: {enabled: true$gitea_class}"$'\n'"giteaAdmin: {existingSecret: infrared-gitea-admin}"$'\n'
   fi
+  [ -n "$zot_addr" ] && want="${want}registry: {address: \"$zot_addr\"}"$'\n'
   want="$(yq -o json -I0 'sort_keys(..)' <<<"${want:-"{}"}")"
   got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject
-      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin)$"))) | sort_keys(..)' \
+      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry)$"))) | sort_keys(..)' \
     "$reg/components/infrared.yaml")"
   [ "$got" = "$want" ] && ok "$variant: infrared Application carries the install's settings: $got" \
     || bad "$variant: infrared Application carries $got, want $want"
@@ -337,8 +355,15 @@ for v in "${variants[@]}"; do
       # ECR's login job only for ECR; the GitHub App's token job only for
       # GitHub. On Gitea kpack clones with builds/gitea-git, which the operator
       # writes, so nothing of GitHub's is rendered.
-      wants="Namespace/builds ClusterStore/paketo ClusterStack/noble ClusterBuilder/infrared-builder ServiceAccount/builder"
-      case "$registry" in *.dkr.ecr.*) wants="$wants Namespace/build-credentials CronJob/ecr-login Job/ecr-login-bootstrap" ;; esac
+      wants="Namespace/builds ClusterStore/paketo ClusterStack/noble ClusterBuilder/infrared-builder"
+      if [ -n "$zot_addr" ]; then
+        # The registry inside the cluster: the builder is pushed as platform,
+        # with kpack/infrared-builder, once Zot and the credential are there.
+        wants="$wants ServiceAccount/infrared-builder Job/registry-wait"
+      else
+        wants="$wants ServiceAccount/builder"
+        case "$registry" in *.dkr.ecr.*) wants="$wants Namespace/build-credentials CronJob/ecr-login Job/ecr-login-bootstrap" ;; esac
+      fi
       source_secret=github-git
       if [ "$forge" = gitea ]; then
         source_secret=gitea-git
@@ -352,10 +377,28 @@ for v in "${variants[@]}"; do
       for want in $wants; do
         has "${want%%/*}" "${want#*/}" || bad "$variant: builds lacks $want"
       done
-      [ "$(line "$b" 'select(.kind == "ServiceAccount" and .metadata.name == "builder") | .secrets[].name')" = "registry-push $source_secret" ] \
-        || bad "$variant: ServiceAccount builder does not list registry-push and $source_secret"
-      [ "$(yq -N -r 'select(.kind == "ClusterBuilder") | .spec.tag' "$b")" = "$registry/kpack-builder" ] \
-        || bad "$variant: ClusterBuilder tag is not $registry/kpack-builder"
+      if [ -n "$zot_addr" ]; then
+        sa='select(.kind == "ServiceAccount" and .metadata.name == "infrared-builder")'
+        rw='select(.kind == "Job" and .metadata.name == "registry-wait")'
+        rw_env() { sel "$b" "$rw | .spec.template.spec.containers[0].env[] | select(.name == \"$1\") | .value"; }
+        want_wait=""
+        [ "$stores" = true ] && want_wait=registry/zot
+        [ "$(sel "$b" "$sa | .metadata.namespace + \" \" + (.secrets | map(.name) | join(\",\")) + \" \" + (.imagePullSecrets | map(.name) | join(\",\"))")" \
+            = "kpack registry-push registry-push" ] \
+          && [ "$(sel "$b" 'select(.kind == "ClusterBuilder") | .spec.tag + " " + .spec.serviceAccountRef.namespace + "/" + .spec.serviceAccountRef.name')" \
+            = "$zot_addr/platform/kpack-builder kpack/infrared-builder" ] \
+          && [ -z "$(sel "$b" 'select((.kind == "ServiceAccount" and .metadata.name == "builder") or (.metadata.name | test("ecr-login|build-credentials"))) | .kind')" ] \
+          && [ "$(sel "$b" "$rw | .metadata.annotations[\"argocd.argoproj.io/hook\"] + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"]")" = "Sync -1" ] \
+          && [ "$(rw_env WAIT_SECRETS)" = kpack/registry-push ] && [ "$(rw_env WAIT_SERVICES)" = "$want_wait" ] \
+          && [ "$(line "$b" 'select(.kind == "Role" and .metadata.name == "builds-registry-wait") | .metadata.namespace + " " + (.rules[0].resourceNames | join(","))')" = "kpack registry-push" ] \
+          && ok "$variant: the builder is pushed to $zot_addr/platform/kpack-builder as platform (kpack/infrared-builder), after Zot${want_wait:+ answers} and kpack/registry-push" \
+          || bad "$variant: builds to the registry inside the cluster are wrong"
+      else
+        [ "$(line "$b" 'select(.kind == "ServiceAccount" and .metadata.name == "builder") | .secrets[].name')" = "registry-push $source_secret" ] \
+          || bad "$variant: ServiceAccount builder does not list registry-push and $source_secret"
+        [ "$(yq -N -r 'select(.kind == "ClusterBuilder") | .spec.tag' "$b")" = "$registry/kpack-builder" ] \
+          || bad "$variant: ClusterBuilder tag is not $registry/kpack-builder"
+      fi
       [ "$(yq -N -r 'select(.kind == "Namespace" and .metadata.name == "builds") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$b")" = restricted ] \
         || bad "$variant: namespace builds is not restricted"
       if grep -nE '\| *kubectl apply' "$b" | grep -v -- '--server-side' | grep -q .; then bad "$variant: a client-side kubectl apply in builds"; fi
@@ -581,6 +624,92 @@ for v in "${variants[@]}"; do
     left="$(for f in $store_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: no stores, no stores objects" || bad "$variant: stores objects rendered without Stores: $left"
   fi
+  # The registry inside the cluster: all of it with Registry and Stores, none of
+  # it without.
+  zot_files="$(printf '%s\n' "$reg/components/zot.yaml" "$reg/components/stores-credentials.yaml"
+    find "$out/components/zot" "$out/components/stores-credentials" -name '*.yaml')"
+  if [ "$stores" = true ] && [ -n "$zot_addr" ]; then
+    for a in stores-credentials:19:stores zot:20:registry; do
+      IFS=: read -r name wave ns <<<"$a"
+      f="$reg/components/$name.yaml"
+      [ "$(sel "$f" '.metadata.name')" = "$name" ] && [ "$(sel "$f" '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "$wave" ] \
+        && [ "$(sel "$f" '.spec.project')" = platform ] && [ "$(sel "$f" '.spec.destination.namespace')" = "$ns" ] \
+        && ok "$variant: $name Application (wave $wave)" || bad "$variant: $name Application missing or wrong"
+    done
+    # The store over stores: the registry's S3 keys alone, for registry alone.
+    # The namespace stores is the stores' own Applications'.
+    c="$work/$variant-built/stores-credentials.yaml"
+    [ -z "$(sel "$reg/components/stores-credentials.yaml" '.spec.syncPolicy.syncOptions[] | select(. == "CreateNamespace=true")')" ] \
+      && [ "$(line "$c" 'select(.kind == "ClusterSecretStore" and .metadata.name == "infrared-stores") | .spec.conditions[].namespaces[]')" = registry ] \
+      && [ "$(sel "$c" 'select(.kind == "ClusterSecretStore") | .spec.provider.kubernetes.remoteNamespace')" = stores ] \
+      && [ "$(line "$c" 'select(.kind == "Role") | .metadata.namespace + " " + (.rules[] | (.resourceNames | join(",")) + ":" + (.verbs | join(",")))')" = "stores seaweedfs-s3-registry:get" ] \
+      && ok "$variant: ClusterSecretStore infrared-stores reads only stores/seaweedfs-s3-registry, for registry" \
+      || bad "$variant: ClusterSecretStore infrared-stores is wrong"
+    # Zot: chart and image by digest, one replica replaced and never rolled,
+    # its Service a ClusterIP at the registry's address.
+    f="$reg/components/zot.yaml"
+    zv='.spec.sources[] | select(.chart == "zot") | .helm.valuesObject'
+    [ "$(sel "$f" '.spec.sources[] | select(.chart == "zot") | .repoURL + " " + .targetRevision + " " + (.helm.skipTests | tostring)')" \
+        = "https://zotregistry.dev/helm-charts 0.1.125 true" ] \
+      && [ "$(sel "$f" '.spec.sources[0].path')" = components/zot ] \
+      && [ "$(sel "$f" "$zv | .image.repository")" = ghcr.io/project-zot/zot ] \
+      && sel "$f" "$zv | .image.tag" | grep -qE '^v2\.1\.21@sha256:[0-9a-f]{64}$' \
+      && [ "$(sel "$f" "$zv | (.replicaCount | tostring) + \" \" + .strategy.type")" = "1 Recreate" ] \
+      && [ "$(sel "$f" "$zv | .service | .type + \" \" + .clusterIP + \":\" + (.port | tostring)")" = "ClusterIP $zot_addr" ] \
+      && [ "$(sel "$f" '.spec.syncPolicy.managedNamespaceMetadata.labels["pod-security.kubernetes.io/enforce"]')" = restricted ] \
+      && ok "$variant: Zot v2.1.21 (chart 0.1.125) by digest, one replica replaced, its Service a ClusterIP at $zot_addr" \
+      || bad "$variant: Zot's chart, image, replicas or Service are wrong"
+    # Its config and users are the operator's Secrets, mounted and never
+    # rendered; its S3 keys come from the store; it runs as nobody's root.
+    leaked="$(find "$out" "$work/$variant-built" -name '*.yaml' -exec yq -N -r \
+      'select(.kind == "Secret" and (.metadata.name == "zot-config" or .metadata.name == "zot-auth")) | .metadata.name' {} + 2>/dev/null || true)"
+    [ "$(sel "$f" "$zv | (.mountConfig | tostring) + \" \" + (.mountSecret | tostring)")" = "false false" ] \
+      && [ "$(line "$f" "$zv | .externalSecrets[] | .secretName + \":\" + .mountPath")" = "zot-config:/etc/zot zot-auth:/etc/zot-auth" ] \
+      && [ "$(line "$f" "$zv | .env[] | .name + \":\" + .valueFrom.secretKeyRef.name + \"/\" + .valueFrom.secretKeyRef.key")" \
+          = "AWS_ACCESS_KEY_ID:zot-s3/AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY:zot-s3/AWS_SECRET_ACCESS_KEY" ] \
+      && [ "$(sel "$f" "$zv | (.podSecurityContext.runAsNonRoot | tostring) + \" \" + (.securityContext.readOnlyRootFilesystem | tostring) + \" \" + (.securityContext.allowPrivilegeEscalation | tostring)")" = "true true false" ] \
+      && [ -z "$leaked" ] \
+      && ok "$variant: Zot mounts the operator's zot-config and zot-auth, which nothing here renders, reads zot-s3, not as root" \
+      || bad "$variant: Zot's config, users, keys or security context are wrong${leaked:+ (renders the Secrets $leaked)}"
+    # zot-base: the config the operator completes, Zot v2.1.21's keys, no key in it.
+    z="$work/$variant-built/zot.yaml"
+    base="$(sel "$z" 'select(.kind == "ConfigMap" and .metadata.name == "zot-base") | .data["config.json"]')"
+    # yq reads a key in ["..."], and a string after ==, as a glob: the rules are
+    # matched by an anchored regular expression instead.
+    zb() { yq -p json -o json -I0 "$1" <<<"$base" 2>/dev/null || true; }
+    [ -n "$base" ] && yq -p json -e 'true' <<<"$base" >/dev/null 2>&1 \
+      && [ "$(zb '.http.compat')" = '["docker2s2"]' ] \
+      && [ "$(zb '[.http.address, .http.port, .http.auth.htpasswd.path, .http.auth.apikey]')" = '["0.0.0.0","5000","/etc/zot-auth/htpasswd",true]' ] \
+      && [ "$(zb '.storage | [.dedupe, .gc, .storageDriver.name, .storageDriver.bucket, .storageDriver.regionendpoint, .storageDriver.forcepathstyle]')" \
+          = '[false,true,"s3","registry","http://seaweedfs-s3.stores.svc:8333",true]' ] \
+      && [ "$(zb '[.. | select(tag == "!!map") | keys[] | select(test("(?i)accesskey|secretkey|password|token"))] | length')" = 0 ] \
+      && [ "$(zb '.http.accessControl.repositories | keys')" = '["**","platform/**"]' ] \
+      && [ "$(zb '.http.accessControl.repositories | to_entries | .[] | select(.key | test("^[*]{2}$")) | .value')" \
+          = '{"anonymousPolicy":["read"],"defaultPolicy":["read"]}' ] \
+      && [ "$(zb '.http.accessControl.repositories | to_entries | .[] | select(.key | test("^platform/[*]{2}$")) | .value')" \
+          = '{"anonymousPolicy":["read"],"defaultPolicy":["read"],"policies":[{"users":["platform"],"actions":["read","create","update","delete"]}]}' ] \
+      && [ "$(zb '.http.accessControl.adminPolicy')" = '{"users":["infrared"],"actions":["read","delete"]}' ] \
+      && ok "$variant: zot-base: S3 in the bucket registry with no key in it, docker2s2, htpasswd and API keys, anyone reads, platform writes platform/, infrared deletes" \
+      || bad "$variant: zot-base's config.json is wrong"
+    # Order: zot-base, then the S3 keys, then the wait for the operator's
+    # Secrets (a Sync hook: they come from zot-base), then Zot; before all of
+    # it, a PreSync wait for the store and SeaweedFS's S3 gateway.
+    w() { sel "$z" "select(.kind == \"$1\" and .metadata.name == \"$2\") | .metadata.annotations[\"argocd.argoproj.io/sync-wave\"]"; }
+    j_env() { sel "$z" "select(.kind == \"Job\" and .metadata.name == \"$1\") | .spec.template.spec.containers[0].env[] | select(.name == \"$2\") | .value"; }
+    [ "$(w ConfigMap zot-base) $(w ExternalSecret zot-s3) $(w Job zot-config-wait)" = "-3 -2 -1" ] \
+      && [ "$(sel "$z" 'select(.kind == "Job" and .metadata.name == "zot-config-wait") | .metadata.annotations["argocd.argoproj.io/hook"]')" = Sync ] \
+      && [ "$(j_env zot-config-wait WAIT_SECRETS)" = "registry/zot-config registry/zot-auth registry/zot-s3" ] \
+      && [ "$(sel "$z" 'select(.kind == "Job" and .metadata.name == "zot-wait") | .metadata.annotations["argocd.argoproj.io/hook"]')" = PreSync ] \
+      && [ "$(j_env zot-wait WAIT_STORES) $(j_env zot-wait WAIT_SERVICES)" = "infrared-stores stores/seaweedfs-s3" ] \
+      && [ "$(line "$z" 'select(.kind == "ExternalSecret") | .spec.secretStoreRef.name + " " + .spec.target.name + " " + (.spec.data | map(.remoteRef.key + "/" + .remoteRef.property) | join(","))')" \
+          = "infrared-stores zot-s3 seaweedfs-s3-registry/AWS_ACCESS_KEY_ID,seaweedfs-s3-registry/AWS_SECRET_ACCESS_KEY" ] \
+      && ok "$variant: Zot starts after zot-base (-3), its S3 keys (-2) and the operator's zot-config and zot-auth (Sync hook, -1)" \
+      || bad "$variant: the order before Zot is wrong"
+  else
+    left="$(for f in $zot_files; do holds_objects "$f" && echo "$f"; done || true)"
+    [ -z "$left" ] && ok "$variant: no registry inside the cluster, no objects of it" || bad "$variant: registry objects rendered without Registry and Stores: $left"
+  fi
+
   # Each Linode volume is a service on a limited Linode account: only the
   # Postgres Cluster and, with Forge gitea, Gitea's volume (through the infrared
   # Application's values) name Linode's volume class, so each makes one volume.
@@ -650,13 +779,16 @@ done
 # backup bucket without the stores, and Gitea as the forge without a build
 # registry, change only the infrared Application, which carries them (checked
 # above for the gitea variant), and Gitea the builds component's README, which
-# describes the org's forge and holds no objects. Changes are comma-separated.
+# describes the org's forge and holds no objects. A registry address without
+# the stores runs no registry, and changes only the infrared Application too.
+# Changes are comma-separated.
 infrared_app=registry/clusters/demo/components/infrared.yaml
 for v in "traefik - -edge traefik" \
     "traefik-facts - -platform-domain preprod.example.com -infrared-host infrared.example.com -cloud aws -substrate-capable" \
     "traefik-linode - -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
     "backup-alone $infrared_app -backup {\"bucket\":\"$backup_bucket\",\"endpoint\":\"$backup_endpoint\"}" \
-    "gitea-alone components/builds/README.md,$infrared_app -forge gitea -forge-url $gitea_url -cloud linode"; do
+    "gitea-alone components/builds/README.md,$infrared_app -forge gitea -forge-url $gitea_url -cloud linode" \
+    "registry-alone $infrared_app -registry $zot_registry"; do
   read -r variant changes extra <<<"$v"
   [ "$changes" = - ] && changes=""
   changes="${changes//,/ }"
@@ -677,6 +809,10 @@ done
     = '[{"enabled":true,"persistence":{"storageClass":"linode-block-storage-retain"}},{"existingSecret":"infrared-gitea-admin"}]' ] \
   && ok "gitea-alone: the infrared Application turns Gitea on, on a Linode volume, with the install's admin Secret" \
   || bad "gitea-alone: the infrared Application's gitea values are wrong"
+
+[ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.registry' "$work/registry-alone/$infrared_app")" = "{\"address\":\"$zot_registry\"}" ] \
+  && ok "registry-alone: the infrared Application carries the registry's address without the stores" \
+  || bad "registry-alone: the infrared Application does not carry the registry's address"
 
 # --- Disabled leaves a component out, and changes nothing else ----------------------
 # Each optional component, named in Disabled on a variant that renders it: its
@@ -703,7 +839,8 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
     "k3s-builds builds" \
     "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge" \
     "stores-plain cloudnative-pg postgres seaweedfs" \
-    "stores-backup platform-tokens"; do
+    "stores-backup platform-tokens" \
+    "registry-plain stores-credentials zot"; do
   read -r base names <<<"$v"
   for name in $names; do
     out="$work/disabled-$base-$name"

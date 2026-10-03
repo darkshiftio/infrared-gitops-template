@@ -1,4 +1,34 @@
 [[- if .BuildRegistry -]]
+[[ if .Registry -]]
+# =============================================================================
+# The ServiceAccount the builder is pushed with, and the buildpacks builds use.
+# =============================================================================
+# Builds push to the registry inside the cluster, [[ .Registry ]], which takes a
+# push only from a user its rules allow (components/zot/base.yaml):
+#   - the ClusterBuilder pushes the builder image under platform/ as the user
+#     platform, with this ServiceAccount, `infrared-builder` in the namespace
+#     kpack. It lists registry-push, kubernetes.io/dockerconfigjson for
+#     [[ .Registry ]], which the Infrared operator writes once the namespace
+#     kpack exists; wait.yaml holds the builder back until it does. No platform
+#     credential lives in builds, where an organization's gitops repo may create
+#     any object.
+#   - each organization's builds push under its own path, <org>/, as its own
+#     user: the operator makes builds/registry-push-<org> and the
+#     ServiceAccount builds/builder-<org>, which its kpack Images name.
+# Anything in the cluster pulls without a login, the kubelet included.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  name: infrared-builder
+  namespace: kpack
+secrets:
+  - name: registry-push
+imagePullSecrets:
+  - name: registry-push
+[[- else -]]
 # =============================================================================
 # The ServiceAccount builds run with, and the buildpacks they use.
 # =============================================================================
@@ -43,6 +73,7 @@ secrets:
 [[- end ]]
 imagePullSecrets:
   - name: registry-push
+[[- end ]]
 ---
 # =============================================================================
 # The buildpacks kpack may use, pinned by tag AND digest.
@@ -99,8 +130,14 @@ spec:
 # contain node-engine and npm-install, and one group would run the install
 # twice. This is also the order Paketo's own builder uses.
 #
+[[- if .Registry ]]
+# The builder image is pushed to [[ .Registry ]]/platform/kpack-builder, by
+# address and over plain HTTP: the build tools fall back to HTTP only for a
+# private address, never for a name. Zot makes the repository on the first push.
+[[- else ]]
 # The builder image is pushed to [[ .BuildRegistry ]]/kpack-builder; that
 # repository must exist (ECR does not create repositories on push).
+[[- end ]]
 # =============================================================================
 apiVersion: kpack.io/v1alpha2
 kind: ClusterBuilder
@@ -109,10 +146,17 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
   name: infrared-builder
 spec:
+[[- if .Registry ]]
+  tag: [[ .Registry ]]/platform/kpack-builder
+  serviceAccountRef:
+    name: infrared-builder
+    namespace: kpack
+[[- else ]]
   tag: [[ .BuildRegistry ]]/kpack-builder
   serviceAccountRef:
     name: builder
     namespace: builds
+[[- end ]]
   stack:
     kind: ClusterStack
     name: noble

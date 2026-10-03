@@ -20,11 +20,13 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -95,6 +97,11 @@ type Data struct {
 	// http://gitea-http.infrared.svc.cluster.local:3000, without a trailing
 	// slash: repos are <ForgeURL>/<owner>/<repo>. Empty for GitHub.
 	ForgeURL string `json:"ForgeURL"`
+	// Registry is the operator's INFRARED_REGISTRY: the address of the registry
+	// inside the cluster, <IPv4>:<port>, e.g. 10.43.0.50:5000, or "" for none.
+	// With Stores the template runs Zot there (its Service's pinned ClusterIP
+	// and port), and builds push the builder to it.
+	Registry string `json:"Registry"`
 }
 
 // ImageRef is one component's image pin: Images["api"].Tag and .Digest.
@@ -266,6 +273,7 @@ func main() {
 	flag.Var(disabledFlag{&d.Disabled}, "disabled", `Disabled, as a JSON array of component names: ["infisical"] (empty: none)`)
 	flag.StringVar(&d.Forge, "forge", "", `Forge: "" (GitHub, as before) or "gitea"`)
 	flag.StringVar(&d.ForgeURL, "forge-url", "", "ForgeURL: the forge's root as the cluster reaches it, no trailing slash (Gitea only)")
+	flag.StringVar(&d.Registry, "registry", "", "Registry: the address of the registry inside the cluster, <IPv4>:<port> (empty for none)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -283,8 +291,8 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, stores %t, backup bucket %q, disabled %q, forge %q)\n",
-		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge)
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, stores %t, backup bucket %q, disabled %q, forge %q, registry %q)\n",
+		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge, d.Registry)
 }
 
 // mergeDataFile loads a JSON Data file, then re-applies every flag the user set
@@ -332,6 +340,7 @@ func mergeDataFile(d *Data, path string) error {
 		"disabled":          func() { d.Disabled = explicit.Disabled },
 		"forge":             func() { d.Forge = explicit.Forge },
 		"forge-url":         func() { d.ForgeURL = explicit.ForgeURL },
+		"registry":          func() { d.Registry = explicit.Registry },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -379,7 +388,28 @@ func validate(d Data) error {
 	}
 	errs = append(errs, validateBackup(d.Backup)...)
 	errs = append(errs, validateForge(d.Forge, d.ForgeURL)...)
+	if err := validateRegistry(d.Registry); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// validateRegistry checks Registry: empty, or <IPv4>:<port> with a private
+// address. The template pins Zot's Service to that address and port, and
+// builds name the registry by it: their tools speak plain HTTP only to a
+// private address (go-containerregistry's fallback), never to a name.
+func validateRegistry(registry string) error {
+	if registry == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(registry)
+	ip := net.ParseIP(host)
+	n, perr := strconv.Atoi(port)
+	if err != nil || strings.Contains(host, ":") || ip == nil || ip.To4() == nil || !ip.IsPrivate() ||
+		perr != nil || n < 1 || n > 65535 || port != strconv.Itoa(n) {
+		return fmt.Errorf("Registry must be a private IPv4 address and a port, e.g. 10.43.0.50:5000, got %q", registry)
+	}
+	return nil
 }
 
 // validateForge checks Forge and ForgeURL together: Gitea needs its URL, and

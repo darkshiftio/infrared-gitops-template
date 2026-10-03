@@ -1,0 +1,41 @@
+[[- if and .Stores .Registry -]]
+# Zot's S3 keys: the S3 identity `registry` (Read, Write, List and Tagging on
+# the bucket registry, and nothing else), whose keys SeaweedFS keeps in the
+# Secret stores/seaweedfs-s3-registry. They are copied through the
+# ClusterSecretStore infrared-stores (components/stores-credentials) into
+# registry/zot-s3, which Zot reads as AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY. The values the API server would fill in are written
+# out, so Argo CD compares like with like.
+#
+# Wave -2, alone: External Secrets' webhook admits it, so it is applied, and
+# synced, before Zot (the chart, wave 0) that reads its Secret. A refused apply
+# then fails the sync, which Argo CD retries.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: zot-s3
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-stores
+  target:
+    name: zot-s3
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: AWS_ACCESS_KEY_ID
+      remoteRef:
+        key: seaweedfs-s3-registry
+        property: AWS_ACCESS_KEY_ID
+    - secretKey: AWS_SECRET_ACCESS_KEY
+      remoteRef:
+        key: seaweedfs-s3-registry
+        property: AWS_SECRET_ACCESS_KEY
+[[- else -]]
+# The registry inside the cluster runs only with a registry address and the
+# platform's own stores: no S3 keys to copy.
+[[- end ]]

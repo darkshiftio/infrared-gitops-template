@@ -36,6 +36,10 @@ spec:
     - https://cloudnative-pg.github.io/charts
     - https://seaweedfs.github.io/seaweedfs/helm
 [[- end ]]
+[[- if and .Stores .Registry ]]
+    # The registry inside the cluster (Stores and Registry): Zot's chart.
+    - https://zotregistry.dev/helm-charts
+[[- end ]]
   # Every namespace and every cluster-scoped kind. This covers, among the
   # rest, builds (namespaces builds and build-credentials, the Role it adds in
   # ir-org-[[ .OrgName ]], Namespaces, and kpack's ClusterStore, ClusterStack
