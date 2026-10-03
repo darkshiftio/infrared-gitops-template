@@ -12,6 +12,9 @@
 #   - every Application under registry/ is labelled
 #     app.kubernetes.io/part-of=infrared-gitops, and every component carries a
 #     sync wave, a retry block and SkipDryRunOnMissingResource
+#   - every Application names its layer with infrared.darkshift.io/layer, one
+#     infrared-api knows, but the root and the ten on main, which keep their
+#     files byte for byte and take their layer from their names
 #   - the infrared Application takes the chart first (the operator reads its
 #     pin as the first numeric targetRevision) and the org's values file from
 #     this repo as $values; nothing renders into the org's values/ directory
@@ -195,6 +198,15 @@ for kind in $(yq -N -r 'select(.kind == "CustomResourceDefinition") | .spec.name
   done
 done
 
+# The platform's layers, as infrared-api names them (internal/server/layers.go),
+# in the order they become available; and the Applications on main, which carry
+# no layer label so that their files stay byte for byte as they were: the root
+# app-of-apps (registry-$cluster) and the ten under components/.
+known_layers="infrared version-control gitops secrets certificates edge databases object-storage registry agent-runtime build-runtime observability backups"
+# shellcheck disable=SC2016 # $cluster is replaced per variant, below.
+unlabelled='registry-$cluster appprojects argocd aws-load-balancer-controller builds cert-manager external-secrets infisical infrared kpack victoria-metrics-k8s-stack'
+layers_labelled=0 layers_by_name=0
+
 # holds_objects <file>: true when the YAML file has at least one object.
 holds_objects() { [ -n "$(yq -N -r '.kind // ""' "$1" 2>/dev/null | grep -v '^$' || true)" ]; }
 # sel <file> <yq expression>: what the expression yields, one value a line.
@@ -275,6 +287,28 @@ for v in "${variants[@]}"; do
       yq -N -e '.spec.syncPolicy.syncOptions[] | select(. == "SkipDryRunOnMissingResource=true")' "$f" >/dev/null \
         || bad "$variant: $(basename "$f") lacks SkipDryRunOnMissingResource=true"
     fi
+  done
+
+  # Layers: every Application names its layer with infrared.darkshift.io/layer,
+  # one of the layers infrared-api knows, except the root and the ten
+  # Applications on main, which keep their files byte for byte and take their
+  # layer from their names (README, "Layers and wave bands").
+  for f in "$reg/registry.yaml" "$reg"/components/*.yaml; do
+    holds_objects "$f" || continue
+    while IFS=$'\t' read -r name layer; do
+      [ -n "$name" ] || continue
+      if [ -z "$layer" ]; then
+        if grep -qw -- "$name" <<<"${unlabelled//\$cluster/$cluster}"; then
+          layers_by_name=$((layers_by_name + 1))
+        else
+          bad "$variant: Application $name has no infrared.darkshift.io/layer"
+        fi
+      elif grep -qw -- "$layer" <<<"$known_layers"; then
+        layers_labelled=$((layers_labelled + 1))
+      else
+        bad "$variant: Application $name names layer $layer, which infrared-api does not know ($known_layers)"
+      fi
+    done < <(sel "$f" 'select(.kind == "Application") | [.metadata.name, (.metadata.labels["infrared.darkshift.io/layer"] // "")] | @tsv')
   done
 
   # Flavor-specific components.
@@ -984,6 +1018,7 @@ for v in "${variants[@]}"; do
   fi
   ok "$variant: rendered and checked ($(find "$out" -type f | wc -l | tr -d ' ') files)"
 done
+[ "$layers_labelled" -gt 0 ] && ok "layers: $layers_labelled Applications across the variants name a layer infrared-api knows; $layers_by_name, the root and main's ten, take theirs from their names"
 
 # --- Traefik renders what it rendered before ----------------------------------------
 # An Installation on Traefik may carry previews settings by hand (infrared-mgmt

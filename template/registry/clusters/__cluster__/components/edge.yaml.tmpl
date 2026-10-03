@@ -19,6 +19,7 @@ metadata:
   namespace: argocd
   labels:
     app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: edge
   annotations:
     argocd.argoproj.io/sync-wave: "13"
     # The API server fills in Gateway API defaults; a server-side diff counts

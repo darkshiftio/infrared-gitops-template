@@ -110,6 +110,9 @@ Every Application this template creates carries
 `<namespace>.<name>` of the GitopsRepo object, so the operator falls back to
 this label to find the Applications it reports Synced/Healthy on.
 
+Infrared's API reads **`infrared.darkshift.io/layer`** for the layer an
+Application belongs to (see "Layers and wave bands").
+
 ### The infrared Application and adoption
 
 The first `helm install` of the chart creates the release and its Secrets
@@ -218,6 +221,64 @@ be Healthy.
 is by port-forward), `kustomize.buildOptions: --enable-helm` and
 `application.resourceTrackingMethod: annotation`. The `argocd` Application
 does not prune automatically.
+
+### Layers and wave bands
+
+Infrared shows the management cluster's platform layer by layer, in the order
+the layers become available, each one Ready, Partly ready or Not ready and
+naming what blocks it; the sync waves stay one click away. The API computes
+the layers (infrared-api `internal/server/layers.go`): from Argo CD's
+Applications, a few workloads Argo CD keeps no health for, the stores' backups,
+and the operator's record of which components a hydration rendered and why it
+left the others out (`GitopsRepo` `status.components`, in the words of the
+comment a file renders when it holds no objects).
+
+An Application names its layer with the label **`infrared.darkshift.io/layer`**.
+The root app-of-apps and the ten Applications that existed before layers
+(`appprojects`, `argocd`, `aws-load-balancer-controller`, `builds`,
+`cert-manager`, `external-secrets`, `infisical`, `infrared`, `kpack`,
+`victoria-metrics-k8s-stack`) carry none, so a gitops repo hydrated before this
+renders the same files; the API knows their layers by their names. Every other
+Application carries the label, and `make verify` refuses one without it, or one
+whose value is not a layer the API knows.
+
+| # | Layer (label value) | Applications, by wave | What else the API reads |
+|---|---|---|---|
+| 1 | Infrared (`infrared`) | `infrared` (40), sync only | the chart's operator, api, ui and mcp Deployments |
+| 2 | Version control (`version-control`) | none | Gitea's Deployment, from the chart (`gitea.enabled`) |
+| 3 | GitOps (`gitops`) | `registry-<cluster>`, `appprojects` (0), `argocd` (100) | Argo CD's application controller and repo server |
+| 4 | Secrets (`secrets`) | `external-secrets` (10), `platform-tokens` (11), `infisical` (15), `stores-credentials` (19) | |
+| 5 | Certificates (`certificates`) | `cert-manager` (10) | |
+| 6 | Edge and DNS (`edge`) | `aws-load-balancer-controller` (10), `envoy-gateway` (11), `origin-ca-issuer` (11), `external-dns` (12), `edge` (13) | |
+| 7 | Databases (`databases`) | `cloudnative-pg` (16), `postgres` (17) | |
+| 8 | Object storage (`object-storage`) | `seaweedfs` (18) | |
+| 9 | Registry (`registry`) | `zot` (20) | |
+| 10 | Agent runtime (`agent-runtime`) | `substrate-crds` (20), `substrate-podcert` (21), `substrate` (22), `substrate-actors` (23) | |
+| 11 | Build runtime (`build-runtime`) | `kpack` (25), `builds` (26) | |
+| 12 | Observability (`observability`) | `victoria-metrics-k8s-stack` (30) | |
+| 13 | Backups (`backups`) | none | the WAL archive and the last base backup of `stores/postgres`, and the last run of the CronJob `stores/seaweedfs-backup` |
+
+Which members serve a layer and which only support it, the layers each one
+needs, and how a state is judged are the API's; this repo only places each
+Application in its layer. A Product's zones and a workload cluster's registry
+belong to no layer and appear in the sync waves alone.
+
+No sync wave moved for the layers. Waves order what Argo CD applies, and on a
+fresh cluster a wave never waits for the one before it ("Order on a fresh
+cluster"); the layers order what a person reads. The waves still fall in bands
+that follow the layers, and a new component takes a wave in the band of its
+layer:
+
+| Waves | Band |
+|---|---|
+| 0 | the AppProjects |
+| 10 to 13 | secrets, certificates, and the edge with its DNS |
+| 15 to 19 | Infisical, then the stores: CloudNativePG, Postgres, SeaweedFS and the stores' credentials |
+| 20 to 23 | the registry inside the cluster, and Agent Substrate |
+| 25 to 26 | builds |
+| 30 | observability |
+| 40 | Infrared adopting itself |
+| 100 | Argo CD managing itself |
 
 ### Builds
 
