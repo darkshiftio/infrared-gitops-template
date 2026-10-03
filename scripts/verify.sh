@@ -994,13 +994,14 @@ for v in "${variants[@]}"; do
       && grep -q 'DROP OWNED BY seaweedfs;' <<<"$reset_sql" && grep -q "COMMENT ON DATABASE" <<<"$reset_sql" && grep -q 'IF have = want THEN' <<<"$reset_sql" \
       && [ "$(jenv stores-index-reset containers POINT) $(jenv stores-index-reset containers MARKER)" = "$restoring_point postgres" ] \
       && grep -q -- '--ignore-existing' <<<"$copy_sh" && ! grep -qE 'rclone (sync|move|delete|purge)' <<<"$copy_sh" \
+      && grep -qF 'if ! listed="$(rclone lsf --max-depth 1 "$SOURCE/$bucket")"; then' <<<"$copy_sh" && ! grep -q '2>/dev/null' <<<"$copy_sh" \
       && [ "$(jenv stores-restore initContainers BUCKETS)" = "${want_buckets% }" ] \
       && [ "$(jenv stores-restore initContainers SOURCE)" = "outside:$backup/$cluster/seaweedfs/current" ] \
       && [ "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ACCESS_KEY_ID) $(jenv stores-restore initContainers RCLONE_CONFIG_SEAWEEDFS_ACCESS_KEY_ID)" = "seaweedfs-backup seaweedfs-s3-restore" ] \
       && [ "$(jenv stores-restore containers POINT) $(jenv stores-restore containers MARKER)" = "$restoring_point buckets" ] \
       && [ "$(line "$r" 'select(.kind == "Role" and .metadata.name == "stores-restore") | .rules[] | (.resourceNames // [] | join(",")) + ":" + (.verbs | join(","))')" = ":create restore-stores:get,patch" ] \
       && [ "$(sel "$r" 'select(.kind == "Job" and .metadata.name == "stores-restore-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_SERVICES") | .value)')" = "PreSync stores/postgres-rw" ] \
-      && ok "$variant: the file index reset once (0), then every bucket copied back without overwriting (1), each marking stores/restore-stores for $restoring_point" \
+      && ok "$variant: the file index reset once (0), then every bucket copied back without overwriting (1), a failed listing failing the Job, each marking stores/restore-stores for $restoring_point" \
       || bad "$variant: the stores' restore Jobs are wrong"
     # The waits: SeaweedFS for the index, Zot and Substrate for the buckets,
     # each a PreSync hook reading that one ConfigMap through a Role in stores.

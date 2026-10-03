@@ -290,7 +290,14 @@ spec:
                 done
               done
               for bucket in $BUCKETS; do
-                if [ -z "$(rclone lsf --max-depth 1 "$SOURCE/$bucket" 2>/dev/null | head -n 1)" ]; then
+                # Only a copy that lists empty is skipped. A listing that fails
+                # (a key, the network, a missing bucket) fails the Job, which
+                # runs again, rather than mark a bucket it never copied.
+                if ! listed="$(rclone lsf --max-depth 1 "$SOURCE/$bucket")"; then
+                  echo "could not list $SOURCE/$bucket: nothing marked" >&2
+                  exit 1
+                fi
+                if [ -z "$listed" ]; then
                   echo "the copy outside holds nothing for $bucket: nothing to copy back"
                   continue
                 fi
