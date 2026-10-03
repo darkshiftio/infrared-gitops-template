@@ -21,9 +21,11 @@ kind: ClusterRole
 metadata:
   name: infrared-substrate-node-labels
 rules:
+  # kubectl label reads the node before it patches it, as the prepare hook's
+  # role learned (0fd5d8d): without get, a new node is never labelled.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["list", "patch"]
+    verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
