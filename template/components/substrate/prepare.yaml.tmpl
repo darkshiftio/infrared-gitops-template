@@ -61,9 +61,10 @@ rules:
   - apiGroups: ["certificates.k8s.io"]
     resources: ["clustertrustbundles"]
     verbs: ["get"]
+  # kubectl label reads the node before it patches it.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["list", "patch"]
+    verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
