@@ -2,7 +2,7 @@
 [[- if not $on -]]
 # platform-tokens is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
-[[- else if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket)) -]]
+[[- else if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret)) -]]
 # The platform's tokens (components/platform-tokens): the ClusterSecretStore
 # `infrared-platform`, which reads the Secret `infrared-platform-tokens` that
 # the Infrared chart keeps in [[ .InfraredNamespace ]], and the account it reads

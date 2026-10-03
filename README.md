@@ -57,7 +57,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
 | `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`; empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
-| `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. While it is false the template leaves Substrate out |
+| `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores") |
 | `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1"}` | the operator's `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty |
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
@@ -75,16 +75,20 @@ array, exactly as the operator's environment carries them, `-forge` with
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled`,
-`.Forge` and `.Registry` turn anything on or off: a Traefik cluster that carries
-`spec.previews` by hand, on any cloud, renders the same files as one without
-(`make verify` checks it). A `.Backup` without the stores changes only what the
-`infrared` Application carries (see "The install's settings"); `.Forge` `gitea`
-turns Gitea on there and, with builds on, swaps GitHub's token job for the
-operator's `gitea-git` (see "Builds"). `.Registry` runs Zot only with `.Stores`, and
-turns builds to the registry inside the cluster when they are on; with neither,
-it changes only what the `infrared` Application carries. `.Cloud` only picks the StorageClass of the Postgres volume, when
-`.Stores` is on, and of Gitea's, for `.Forge` `gitea` (Linode's Retain class on
-`linode`); `.SubstrateCapable` switches nothing yet, it is for Substrate.
+`.Forge`, `.Registry` and `.SubstrateCapable` turn anything on or off: a Traefik
+cluster that carries `spec.previews` by hand, on any cloud, renders the same
+files as one without (`make verify` checks it). A `.Backup` without the stores
+changes only what the `infrared` Application carries (see "The install's
+settings"); `.Forge` `gitea` turns Gitea on there and, with builds on, swaps
+GitHub's token job for the operator's `gitea-git` (see "Builds"). `.Registry`
+runs Zot only with `.Stores`, and turns builds to the registry inside the
+cluster when they are on; with neither, it changes only what the `infrared`
+Application carries. `.Cloud` only picks the StorageClass of the Postgres
+volume, when `.Stores` is on, and of Gitea's, for `.Forge` `gitea` (Linode's
+Retain class on `linode`). `.SubstrateCapable` runs Agent Substrate only with
+`.Stores` and `.Registry` both set; without either, the preflight's yes changes
+no file, so a Traefik cluster without the stores renders the same files
+whatever its preflight says (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -192,6 +196,10 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 18 | `seaweedfs` (Stores only) | https://seaweedfs.github.io/seaweedfs/helm `seaweedfs` + `components/seaweedfs` | chart 4.48.0 (SeaweedFS 4.48, by digest) |
 | 19 | `stores-credentials` (Stores and Registry) | `components/stores-credentials`: ClusterSecretStore `infrared-stores` | — |
 | 20 | `zot` (Stores and Registry) | https://zotregistry.dev/helm-charts `zot` + `components/zot` | chart 0.1.125 (Zot v2.1.21, by digest) |
+| 20 | `substrate-crds` (Stores, Registry and SubstrateCapable) | `components/substrate-crds`, vendored from Agent Substrate | `ce05e5d` (see "Agent Substrate") |
+| 21 | `substrate-podcert` (the same) | `components/substrate-podcert` | the same, images by digest |
+| 22 | `substrate` (the same) | `components/substrate` | the same, images by digest |
+| 23 | `substrate-actors` (the same) | `components/substrate-actors` | the same, images by digest |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
@@ -266,7 +274,7 @@ it renders to a comment only otherwise.
 
 | Application | What |
 |---|---|
-| `platform-tokens` | ClusterSecretStore `infrared-platform` (Kubernetes provider) reading the Secret `infrared-platform-tokens` in `.InfraredNamespace`, which the Infrared chart keeps, as ServiceAccount `platform-tokens-reader` (get on that one Secret). `conditions` limit it to the namespaces below. |
+| `platform-tokens` | ClusterSecretStore `infrared-platform` (Kubernetes provider) reading the Secret `infrared-platform-tokens` in `.InfraredNamespace`, which the Infrared chart keeps, as ServiceAccount `platform-tokens-reader` (get on that one Secret). `conditions` limit it to the namespaces below. With Agent Substrate and an `.ImagePullSecret`, it also reads that Secret, for Substrate's namespaces (see "Agent Substrate"), and renders even without a Gateway. |
 | `envoy-gateway` | Envoy Gateway's CRDs and controller. The Gateway API CRDs are the cluster's (k3s ships them) and are never installed here. |
 | `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. |
 | `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. |
@@ -399,7 +407,7 @@ falls back to plain HTTP only for a private address.
 
 | Application | What |
 |---|---|
-| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry` alone. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
+| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry` alone, and with Agent Substrate `ate-system` too, for `seaweedfs-s3-ate-snapshots` and `postgres-substrate`. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
 | `zot` (wave 20) | `components/zot`: the ConfigMap `zot-base`, the ExternalSecret `zot-s3` (the S3 identity `registry`'s keys, from `stores/seaweedfs-s3-registry`) and two waits; and the chart: one replica, `strategy: Recreate`, not root, a read-only root filesystem, and the Service above. |
 
 Zot's config and its users are split between the template and the operator:
@@ -425,6 +433,89 @@ reads every repository back from the bucket, so an image outlives every registry
 pod and an API key does not. The pods carry `app.kubernetes.io/name: zot`, which
 the operator's network rule for publishing steps selects. Removing the `zot`
 Application removes Zot and nothing in the bucket.
+
+### Agent Substrate
+
+With `.Stores`, `.Registry` and `.SubstrateCapable` together the template runs
+Agent Substrate, the agent runtime: actors in gVisor sandboxes on warm worker
+pods, suspended to SeaweedFS and resumed on demand. Four Applications, each
+labelled `infrared.darkshift.io/layer: agent-runtime`, in the waves 20 to 23:
+
+| Wave | Application | What |
+|---|---|---|
+| 20 | `substrate-crds` | WorkerPool, SandboxConfig and CSIDriverConfig, and the ValidatingAdmissionPolicy every SandboxConfig passes. No resources finalizer: removing it leaves them. |
+| 21 | `substrate-podcert` | The pod-certificate controller, in `podcertificate-controller-system` (Pod Security baseline): it signs each component's short-lived certificate through the cluster's `certificates.k8s.io/v1beta1` and publishes their trust bundles. A PreSync hook makes its two CAs. |
+| 22 | `substrate` | The control plane, in `ate-system` (privileged): the API (two replicas), the controller, atelet on every labelled node, the router and the egress gateway, and the NetworkPolicies on the API and the router. A PreSync hook makes the actor-identity pools, writes the API's authentication settings, labels the nodes and waits for what the control plane needs. |
+| 23 | `substrate-actors` | The WorkerPool `platform` in `ate-workers` (privileged): three gVisor workers of one CPU and 1 GiB. Sync hooks copy the actor images into the registry (wave 1), then make the atespace `platform` and its ActorTemplates (wave 2). |
+
+The manifests are upstream's at the commit in `scripts/substrate-images.json`,
+vendored by `scripts/vendor-substrate.sh` with every image by digest, and each
+component's kustomization patches them: the namespaces are Argo CD's
+(`CreateNamespace`, with their Pod Security label), the API and atelet keep
+snapshots in S3, atelet's image settings are below, and every pod pulls with the
+install's pull secret. Left out: upstream's `atenet-router-monitoring.yaml`, a
+GKE Managed Prometheus PodMonitoring; its OTLP settings, which name GKE's
+collector (here the endpoint is empty, which Substrate reads as no collector);
+and its bundled Postgres.
+
+| What | Where |
+|---|---|
+| Records | The database `substrate` on the platform's Postgres, as the role `substrate` (`stores/postgres-substrate`), schema `public`, TLS as SeaweedFS's filers use it (`sslmode=require`). Its DSN is the Secret `ate-system/ate-api-server-secret-envvars`, made by an ExternalSecret through `infrared-stores`. |
+| Snapshots | The bucket `ate-snapshots`, as the S3 identity `ate-snapshots` (`stores/seaweedfs-s3-ate-snapshots`, copied to `ate-system/ate-s3-credentials` through `infrared-stores`), path-style at `http://seaweedfs-s3.stores.svc:8333`, for the API and atelet. A template's snapshots go under `platform/<template>/`. |
+| Substrate's images | ghcr, by digest. With an `.ImagePullSecret`, the store `infrared-platform` copies that Secret into `podcertificate-controller-system`, `ate-system`, `ate-workers` and `registry`; the workers pull with it through the ServiceAccount `default` of `ate-workers`, because a WorkerPool cannot name a pull secret. The router's Envoy (`envoyproxy/envoy`) and the SandboxConfig's pause image (`registry.k8s.io/pause`) are upstream's, by digest, and atelet fetches gVisor from Google's public bucket, as upstream's `gvisor-default` names it. |
+| Actor images | atelet pulls them itself, without a login and without the nodes' registry mirrors. It runs with `--gcp-auth-for-image-pulls=false` and `--localhost-registry-replacement=<Registry>`: an image named on `localhost` (or a loopback address) is pulled from the registry inside the cluster, over plain HTTP. A template names `localhost/platform/substrate/<image>:<tag>@sha256:...`, so an immutable template never holds the registry's address, and the pull takes the path the Substrate spike proved with its node registry. |
+
+The hooks do what Substrate's installer (`ate-setup`) does by hand, and each is
+safe to run again:
+
+| Hook | What it does |
+|---|---|
+| `substrate-podcert-prepare` (PreSync) | The CA pools `service-dns-ca-pool` and `pod-identity-ca-pool` in `podcertificate-controller-system`, made once. |
+| `substrate-prepare` (PreSync) | The pools `actor-id-jwt-pool` (ES256), `actor-id-ca-pool` and `actor-id-ca-certs` (its root alone), made once; the ConfigMap `ate-api-authentication`, which trusts the cluster's ServiceAccount tokens for the audience `api.ate-system.svc`, the issuer read from the cluster's discovery document; the label `ate.dev/substrate-version=<version>` on each node without one; then waits for Substrate's CRDs, the trust bundles, the Postgres, SeaweedFS's S3 gateway and the stores. |
+| CronJob `substrate-node-labels` | Every ten minutes, labels a node that joined since, so atelet runs there. |
+| `substrate-actors-wait` (PreSync) | Waits for the API, the router and Zot to answer. |
+| `substrate-images` (Sync, wave 1, in `registry`) | Copies the counter demo's image and the test actor's (`sandbox`) from ghcr to `<Registry>/platform/substrate/` with crane, as the registry's user `platform` (`registry/platform-push`, which the operator writes), then checks that each pulls by digest without a login. |
+| `substrate-templates` (Sync, wave 2) | Makes the atespace `platform` and the ActorTemplates `counter-v1` and `sandbox-v1` through the API, then waits for each golden snapshot. A template of the same name with other images fails the hook: templates are immutable, so a change is a new version in the name. |
+
+The CAs are made with OpenSSL, in memory in the hook's own pod, in the formats
+Substrate's `localca` and `localjwtauthority` read: one Ed25519 root each,
+valid 365 days, never replaced. Each CA Secret is labelled
+`infrared.darkshift.io/substrate-ca=true` and carries its root's expiry in the
+annotation `infrared.darkshift.io/not-after`, which the hooks print at each
+sync. Nothing rotates them yet; read the dates with:
+
+```bash
+kubectl --context <cluster> get secrets -A -l infrared.darkshift.io/substrate-ca=true \
+  -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,NOT_AFTER:.metadata.annotations.infrared\.darkshift\.io/not-after'
+```
+
+**Only Infrared's operator reaches Substrate.** Its API accepts any
+ServiceAccount token issued for its audience and authorizes nothing, and its
+router authenticates nothing. So two NetworkPolicies admit, to the API's port
+443, Infrared's operator (namespace `.InfraredNamespace`, pods
+`app.kubernetes.io/name=infrared` and `app.kubernetes.io/component=operator`),
+Substrate's atelet, router, egress gateway and controller, and pods in
+`ate-system` labelled `infrared.darkshift.io/substrate-client=true` (the
+templates hook and the checks below); to the router's Service ports, the
+operator and those pods; and to port 9090 of both, the namespace `monitoring`.
+Nothing else: no organization's namespace, no zone, no worker pod. An actor's
+own traffic leaves its sandbox only through the egress gateway, which refuses
+every destination its EgressPolicy does not name, and no template here has one.
+
+Two checks run against a cluster, never from CI, from the place the policy
+admits:
+
+```bash
+scripts/substrate-counter-test.sh <context>   # E5: a counter actor keeps both counters through a suspend and a resume on another worker
+scripts/substrate-fence-check.sh <context>    # E4: the API and the router refuse an organization's namespace, ate-workers and the inside of an actor
+```
+
+The atespace, the templates and every actor are records in Substrate's
+database: removing `substrate-actors` leaves them. A new Substrate version is a
+new atelet DaemonSet and a new node label; the hooks label only nodes without
+one, as `ate-setup` does, so an upgrade moves the nodes' label and the workers
+by hand until upgrades are a version bump. The API's two replicas aside, the
+router, the egress gateway and the pod-certificate controller are one pod each.
 
 ### Order on a fresh cluster
 
@@ -523,6 +614,7 @@ make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
 make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
 make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000
+make render STORES=true REGISTRY=10.43.0.50:5000 SUBSTRATE_CAPABLE=true PULL_SECRET=ghcr-pull
 make verify                             # the CI gate
 scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
 ```
@@ -544,11 +636,19 @@ kustomization builds, builds is fully present with a registry (ECR login only
 for ECR) and renders no objects without one, the registry inside the cluster
 with `.Registry` and `.Stores` (Zot's chart, Service, Secrets and waits, the
 store over `stores`, and builds pushed as `platform`) and nothing of it
-without, and kubeconform (`-strict`, Argo CD kinds against the public
-CRDs-catalog).
+without, Agent Substrate with `.Stores`, `.Registry` and `.SubstrateCapable`
+(its four Applications and their layer label, every image by digest from the
+pins, no PodMonitoring, its records and snapshots through `infrared-stores`,
+atelet's image settings, the pull secret wherever it pulls, the
+NetworkPolicies, the hooks and the ActorTemplates) and none of it without, and
+kubeconform (`-strict`, Argo CD kinds against the public CRDs-catalog).
 
 Bump upstream with `scripts/vendor-argocd.sh` / `scripts/vendor-kpack.sh`
-(edit the version at the top), or by editing a chart `targetRevision`.
+(edit the version at the top), or by editing a chart `targetRevision`. Agent
+Substrate: copy the new `substrate-images.json` over
+`scripts/substrate-images.json`, run `scripts/vendor-substrate.sh`, and give each
+ActorTemplate in `components/substrate-actors/templates.yaml` a new version in
+its name.
 
 ## Cutting a version
 

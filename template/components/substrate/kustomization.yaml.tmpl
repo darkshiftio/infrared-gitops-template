@@ -1,0 +1,165 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# Agent Substrate's control plane (the `substrate` Application, wave 22), in the
+# namespace ate-system. Upstream's manifests, vendored from the pinned commit by
+# scripts/vendor-substrate.sh, with images by digest:
+#
+#   role.yaml                 the controller's ClusterRole and Role
+#   ate-api-server.yaml       the API (2 replicas) and its headless Service api
+#   ate-controller.yaml       WorkerPools to Deployments, workers to records
+#   atelet.yaml               the node supervisor, a DaemonSet on every labelled node
+#   atenet-router.yaml        Envoy and ext_proc: wakes an actor for a request
+#   atenet-egress.yaml        the egress gateway, each actor's outbound policy
+#   sandboxconfig-gvisor.yaml the gVisor runtime every template here names
+#
+# upstream's base bundle less atenet-router-monitoring.yaml, GKE Managed
+# Prometheus's PodMonitoring, which this install never renders. Ours beside it:
+#
+#   network-policies.yaml  only Infrared's operator reaches the API and the router
+#   credentials.yaml       the Postgres DSN, the S3 keys[[ if .ImagePullSecret ]] and the pull secret[[ end ]], copied
+#   config.yaml            telemetry settings: no collector
+#   prepare.yaml           PreSync: the actor-identity pools, the API's
+#                          authentication settings, the node labels, the waits
+#   node-labels.yaml       labels a node that joins later
+#
+# Everything this install changes in upstream's objects is a patch below. Every
+# object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - network-policies.yaml
+  - credentials.yaml
+  - config.yaml
+  - prepare.yaml
+  - node-labels.yaml
+  - role.yaml
+  - ate-api-server.yaml
+  - ate-controller.yaml
+  - atelet.yaml
+  - atenet-router.yaml
+  - atenet-egress.yaml
+  - sandboxconfig-gvisor.yaml
+patches:
+  # Argo CD makes the namespace (CreateNamespace, with its Pod Security label),
+  # before the PreSync hook that runs in it.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: ate-system
+  # Snapshots in SeaweedFS's bucket ate-snapshots, with its S3 identity's keys
+  # (credentials.yaml): the API copies snapshots to tags and deletes the ones
+  # nothing refers to.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ate-api-server
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: ate-api-server
+                env:
+                  - name: ATE_STORAGE_BACKEND
+                    value: s3
+                  - name: AWS_REGION
+                    value: us-east-1
+                  - name: AWS_ENDPOINT_URL
+                    value: http://seaweedfs-s3.stores.svc:8333
+                  - name: AWS_S3_USE_PATH_STYLE
+                    value: "true"
+                  - name: AWS_ACCESS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: ate-s3-credentials
+                        key: AWS_ACCESS_KEY_ID
+                  - name: AWS_SECRET_ACCESS_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: ate-s3-credentials
+                        key: AWS_SECRET_ACCESS_KEY
+  # atelet, on every node: snapshots in the same bucket, and actor images from
+  # the registry inside the cluster. atelet pulls images itself, without a
+  # login and without the node's registry mirrors: no GCP credentials, and
+  # every image named on a localhost or loopback registry (a template names
+  # localhost/platform/substrate/<image>@sha256:...) is pulled from
+  # [[ .Registry ]] instead, over plain HTTP. The args are upstream's list with
+  # those two changed: a patch replaces the whole list.
+  - target:
+      kind: DaemonSet
+      labelSelector: app=atelet
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: atelet
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: atelet
+                args:
+                  - --gcp-auth-for-image-pulls=false
+                  - --localhost-registry-replacement=[[ .Registry ]]
+                  - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+                  - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+                  - --drain-delay=0s
+                  - --drain-timeout=5m
+                env:
+                  - name: ATE_STORAGE_BACKEND
+                    value: s3
+                  - name: AWS_REGION
+                    value: us-east-1
+                  - name: AWS_ENDPOINT_URL
+                    value: http://seaweedfs-s3.stores.svc:8333
+                  - name: AWS_S3_USE_PATH_STYLE
+                    value: "true"
+                  - name: AWS_ACCESS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: ate-s3-credentials
+                        key: AWS_ACCESS_KEY_ID
+                  - name: AWS_SECRET_ACCESS_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: ate-s3-credentials
+                        key: AWS_SECRET_ACCESS_KEY
+[[- if .ImagePullSecret ]]
+  # Substrate's images are private: every workload here pulls with
+  # [[ .ImagePullSecret ]], copied from [[ .InfraredNamespace ]] (credentials.yaml).
+  - target:
+      kind: Deployment
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: any
+      spec:
+        template:
+          spec:
+            imagePullSecrets:
+              - name: [[ .ImagePullSecret ]]
+  - target:
+      kind: DaemonSet
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: any
+      spec:
+        template:
+          spec:
+            imagePullSecrets:
+              - name: [[ .ImagePullSecret ]]
+[[- end ]]
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster, so this component holds no objects and no Application points at it.
+[[- end ]]

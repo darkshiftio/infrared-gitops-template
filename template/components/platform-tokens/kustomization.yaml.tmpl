@@ -1,4 +1,4 @@
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket)) -]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret)) -]]
 # The platform's tokens (the `platform-tokens` Application, wave 11). See
 # store.yaml; wait.yaml holds the sync until External Secrets answers. Every
 # object names its own namespace.

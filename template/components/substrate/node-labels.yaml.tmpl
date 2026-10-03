@@ -1,0 +1,105 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# A node that joins later gets Substrate's label too.
+# =============================================================================
+# atelet and the workers run only on nodes labelled
+# ate.dev/substrate-version=one-install-ce05e5d-7e86cab. The PreSync hook (prepare.yaml) labels the
+# nodes there are at a sync; this CronJob labels, every ten minutes, a node
+# that joined since, a replaced one say, so that atelet starts there without a
+# sync. Like the hook, it leaves alone a node that carries the label already,
+# whatever its version. Safe to run any number of times.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-node-labels
+  namespace: ate-system
+---
+# List the nodes and label them: nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-substrate-node-labels
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-substrate-node-labels
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-substrate-node-labels
+subjects:
+  - kind: ServiceAccount
+    name: substrate-node-labels
+    namespace: ate-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: substrate-node-labels
+  namespace: ate-system
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: substrate-node-labels
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: label
+              # alpine/k8s 1.37.0: kubectl and a busybox shell.
+              image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: SUBSTRATE_VERSION
+                  value: one-install-ce05e5d-7e86cab
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  for node in $(kubectl get nodes -l '!ate.dev/substrate-version' -o name); do
+                    kubectl label "$node" "ate.dev/substrate-version=$SUBSTRATE_VERSION" >/dev/null
+                    echo "labelled $node ate.dev/substrate-version=$SUBSTRATE_VERSION"
+                  done
+                  echo "$(kubectl get nodes -l "ate.dev/substrate-version=$SUBSTRATE_VERSION" -o name | wc -l | tr -d ' ') of $(kubectl get nodes -o name | wc -l | tr -d ' ') nodes run Substrate $SUBSTRATE_VERSION"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no nodes to label.
+[[- end ]]

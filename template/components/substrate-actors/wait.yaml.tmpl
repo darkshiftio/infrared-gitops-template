@@ -1,19 +1,19 @@
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret)) -]]
+[[- if and .Stores .SubstrateCapable .Registry -]]
 # =============================================================================
-# Before the store: External Secrets' webhook answers.
+# Before the platform's actors: Substrate's API and router, and the registry.
 # =============================================================================
-# On a fresh cluster every Application starts at once, and this one can reach
-# the API server before External Secrets' admission webhook has an endpoint:
-# the ClusterSecretStore is then refused. This PreSync hook waits, up to half
-# an hour, until the store's CRD is established and the webhook's Service has
-# a ready endpoint, so the sync starts when the store can be admitted and
-# spends none of its retries on the race.
+# On a fresh cluster every Application syncs at once (README, "Order on a fresh
+# cluster"). This PreSync hook waits, up to half an hour, until the WorkerPool
+# CRD is established, Substrate's API and router and the registry inside the
+# cluster have a ready endpoint[[ if .ImagePullSecret ]], and the store infrared-platform, which
+# copies the pull secret, is Ready[[ end ]]. The hooks after it copy the images into
+# the registry, as its user platform, and talk to the API.
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: platform-tokens-wait
-  namespace: [[ .InfraredNamespace ]]
+  name: substrate-actors-wait
+  namespace: ate-workers
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -23,7 +23,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: infrared-wait-platform-tokens
+  name: infrared-wait-substrate-actors
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -42,7 +42,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: infrared-wait-platform-tokens
+  name: infrared-wait-substrate-actors
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -50,17 +50,17 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: infrared-wait-platform-tokens
+  name: infrared-wait-substrate-actors
 subjects:
   - kind: ServiceAccount
-    name: platform-tokens-wait
-    namespace: [[ .InfraredNamespace ]]
+    name: substrate-actors-wait
+    namespace: ate-workers
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: platform-tokens-wait
-  namespace: [[ .InfraredNamespace ]]
+  name: substrate-actors-wait
+  namespace: ate-workers
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -72,7 +72,7 @@ spec:
   ttlSecondsAfterFinished: 3600
   template:
     spec:
-      serviceAccountName: platform-tokens-wait
+      serviceAccountName: substrate-actors-wait
       restartPolicy: OnFailure
       securityContext:
         runAsNonRoot: true
@@ -88,11 +88,11 @@ spec:
             - name: HOME
               value: /tmp
             - name: WAIT_CRDS
-              value: "clustersecretstores.external-secrets.io"
+              value: "workerpools.ate.dev[[ if .ImagePullSecret ]] externalsecrets.external-secrets.io[[ end ]]"
             - name: WAIT_SERVICES
-              value: "external-secrets/external-secrets-webhook"
+              value: "ate-system/api ate-system/atenet-router registry/zot"
             - name: WAIT_STORES
-              value: ""
+              value: "[[ if .ImagePullSecret ]]infrared-platform[[ end ]]"
           command:
             - /bin/sh
             - -ec
@@ -136,6 +136,7 @@ spec:
         - name: tmp
           emptyDir: {}
 [[- else -]]
-# The platform's tokens are copied only for the edge when it is a Gateway and
-# for the stores' backups: nothing to wait for.
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: nothing to wait for.
 [[- end ]]

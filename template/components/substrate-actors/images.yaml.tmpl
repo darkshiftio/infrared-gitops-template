@@ -1,0 +1,233 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# The actor images, copied into the registry inside the cluster.
+# =============================================================================
+# atelet pulls an actor's image itself, without a login and without the nodes'
+# registry mirrors, so it cannot pull the private images on ghcr. This Sync
+# hook copies the two the platform's templates run (templates.yaml) from ghcr
+# into [[ .Registry ]], under platform/substrate/, as the registry's user platform
+# (the operator's Secret registry/platform-push), with crane:
+#
+#   counter  Substrate's counter demo: one counter in memory, one on disk
+#   sandbox  Substrate's sandbox demo, the test actor: runs the command it is
+#            sent, which the fence check uses to call out from inside an actor
+#
+# Each copy keeps the image's digest, which the templates name. Copying an
+# image that is there already changes nothing, so the hook is safe to run at
+# every sync. It waits first for registry/platform-push, which the operator
+# writes, then checks that each image pulls by digest without a login, as
+# atelet pulls it. Wave 1, after the WorkerPool (0) and before the templates (2).
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-images
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+# Read the two registry credentials it copies with: nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: substrate-images
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["platform-push"[[ if .ImagePullSecret ]], [[ .ImagePullSecret | quote ]][[ end ]]]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: substrate-images
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: substrate-images
+subjects:
+  - kind: ServiceAccount
+    name: substrate-images
+    namespace: registry
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: substrate-images
+  namespace: registry
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, copying again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: substrate-images
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # The credentials crane copies with, in one Docker config, in memory.
+        - name: auth
+          # alpine/k8s 1.37.0: kubectl, jq and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: SECRETS
+              value: "platform-push[[ if .ImagePullSecret ]] [[ .ImagePullSecret ]][[ end ]]"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              for s in $SECRETS; do
+                until kubectl get secret "$s" -o name >/dev/null 2>&1; do
+                  echo "waiting for the Secret registry/$s"
+                  sleep 5
+                done
+              done
+              # Nothing prints a credential: only the registries' names.
+              for s in $SECRETS; do
+                kubectl get secret "$s" -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
+              done | jq -s '{auths: (map(.auths) | add)}' >/docker/config.json
+              echo "credentials for $(jq -r '.auths | keys | join(" and ")' /docker/config.json)"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: docker
+              mountPath: /docker
+            - name: tmp
+              mountPath: /tmp
+        - name: counter
+          # crane v0.22.1 (go-containerregistry): it speaks plain HTTP to a
+          # registry at a private address by itself.
+          image: gcr.io/go-containerregistry/crane:v0.22.1@sha256:1f968817b95790bed063f71175aa6b8ff879fa17064020415f3e18bb6e6a36e1
+          args:
+            - copy
+            - ghcr.io/darkshiftio/substrate/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698
+            - "[[ .Registry ]]/platform/substrate/counter:one-install-ce05e5d-7e86cab"
+          env:
+            - name: DOCKER_CONFIG
+              value: /docker
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: docker
+              mountPath: /docker
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+        - name: sandbox
+          image: gcr.io/go-containerregistry/crane:v0.22.1@sha256:1f968817b95790bed063f71175aa6b8ff879fa17064020415f3e18bb6e6a36e1
+          args:
+            - copy
+            - ghcr.io/darkshiftio/substrate/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481
+            - "[[ .Registry ]]/platform/substrate/sandbox:one-install-ce05e5d-7e86cab"
+          env:
+            - name: DOCKER_CONFIG
+              value: /docker
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: docker
+              mountPath: /docker
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        # Each image pulls by digest without a login, as atelet pulls it.
+        - name: check
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: REGISTRY
+              value: "[[ .Registry ]]"
+            - name: IMAGES
+              value: >-
+                counter@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698
+                sandbox@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              for image in $IMAGES; do
+                ref="$REGISTRY/platform/substrate/${image%@*}@${image#*@}"
+                code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 \
+                  -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json' \
+                  "http://$REGISTRY/v2/platform/substrate/${image%@*}/manifests/${image#*@}")"
+                [ "$code" = 200 ] || { echo "$ref: HTTP $code without a login, want 200" >&2; exit 1; }
+                echo "$ref pulls without a login"
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: docker
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no images to copy.
+[[- end ]]

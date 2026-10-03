@@ -32,6 +32,13 @@ FORGE_URL ?=
 # push their builder to it. E.g.
 # make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000
 REGISTRY ?=
+# SUBSTRATE_CAPABLE: the operator's preflight; true, with STORES=true and a
+# REGISTRY, runs Agent Substrate. E.g.
+# make render STORES=true REGISTRY=10.43.0.50:5000 SUBSTRATE_CAPABLE=true PULL_SECRET=ghcr-pull
+SUBSTRATE_CAPABLE ?= false
+# PULL_SECRET: the install's image pull Secret in the infrared namespace, which
+# Substrate's namespaces copy; empty for none.
+PULL_SECRET ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -41,7 +48,8 @@ render:
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
 		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" \
 		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
-		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)"
+		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
+		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)"
 
 ## verify: the gate CI runs
 verify:

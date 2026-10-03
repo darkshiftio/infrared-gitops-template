@@ -11,6 +11,12 @@
 #
 #   Secret                  copied to
 #   seaweedfs-s3-registry   registry/zot-s3 (the registry's S3 keys)
+[[- if .SubstrateCapable ]]
+#   seaweedfs-s3-ate-snapshots  ate-system/ate-s3-credentials (Agent Substrate's
+#                           snapshots, the S3 identity ate-snapshots)
+#   postgres-substrate      ate-system/ate-api-server-secret-envvars (Substrate's
+#                           records: its API's Postgres DSN)
+[[- end ]]
 #
 # `conditions` limits the store to those namespaces: any other namespace, a
 # product's zone included, cannot read a credential through it. A new consumer
@@ -31,7 +37,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["seaweedfs-s3-registry"]
+    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots", "postgres-substrate"[[ end ]]]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -59,6 +65,9 @@ spec:
   conditions:
     - namespaces:
         - registry
+[[- if .SubstrateCapable ]]
+        - ate-system
+[[- end ]]
   provider:
     kubernetes:
       remoteNamespace: stores

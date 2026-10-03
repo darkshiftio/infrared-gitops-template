@@ -1,0 +1,121 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# Only Infrared's operator reaches Substrate's API and its router.
+# =============================================================================
+# Substrate's API accepts any ServiceAccount token issued for its audience
+# (api.ate-system.svc) and authorizes nothing: whoever reaches it administers
+# every atespace. Its router authenticates nothing: whoever reaches it wakes,
+# and talks to, any actor. So these two policies admit to the API's pods and
+# the router's only:
+#
+#   Infrared's operator  in [[ .InfraredNamespace ]], the pods labelled
+#                        app.kubernetes.io/name=infrared and
+#                        app.kubernetes.io/component=operator
+#   Substrate itself     to the API: atelet, the router (which resumes an actor
+#                        for a request), the egress gateway and the controller
+#   the platform's jobs  in ate-system, the pods labelled
+#                        infrared.darkshift.io/substrate-client=true: the hook
+#                        that makes the ActorTemplates, the counter test and the
+#                        fence check (scripts/substrate-*.sh in the template)
+#
+# and the namespace monitoring on the metrics port, 9090, alone. Nothing else:
+# no organization's namespace, no zone, no worker pod, and so no actor. An
+# actor's own traffic leaves its sandbox only through the egress gateway, which
+# refuses any destination its EgressPolicy does not name, and the worker pod it
+# runs in is refused here. The router is reached on its Service's ports only,
+# never Envoy's admin port. The kubelet's probes come from the node, which
+# k3s's network policy controller always admits.
+#
+# Wave -3: before the pods they guard.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ate-api-server
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  podSelector:
+    matchLabels:
+      app: ate-api-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: infrared
+              app.kubernetes.io/component: operator
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [atelet, atenet-router, atenet-egress, ate-controller]
+        - podSelector:
+            matchLabels:
+              infrared.darkshift.io/substrate-client: "true"
+      ports:
+        - protocol: TCP
+          port: 443
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: atenet-router
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-router
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: infrared
+              app.kubernetes.io/component: operator
+        - podSelector:
+            matchLabels:
+              infrared.darkshift.io/substrate-client: "true"
+      # The Service atenet-router's ports: HTTP, HTTPS, CONNECT, CONNECT over
+      # TLS, and the status port.
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8444
+        - protocol: TCP
+          port: 4040
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: nothing to fence.
+[[- end ]]

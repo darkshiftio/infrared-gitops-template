@@ -1,0 +1,32 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# The platform's own actors on Agent Substrate (the `substrate-actors`
+# Application, wave 23):
+#
+#   wait.yaml          PreSync: Substrate's API and router, and the registry
+#                      inside the cluster, answer
+[[- if .ImagePullSecret ]]
+#   pull-secrets.yaml  the pull secret for the workers' image, and for the copy
+[[- end ]]
+#   workers.yaml       the WorkerPool platform: three warm gVisor workers in
+#                      the namespace ate-workers
+#   images.yaml        Sync hook, wave 1: the counter demo's image and the test
+#                      actor's, copied from ghcr into [[ .Registry ]]
+#   templates.yaml     Sync hook, wave 2: the atespace platform and its
+#                      ActorTemplates, each with its golden snapshot
+#
+# Every object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - wait.yaml
+[[- if .ImagePullSecret ]]
+  - pull-secrets.yaml
+[[- end ]]
+  - workers.yaml
+  - images.yaml
+  - templates.yaml
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster, so this component holds no objects and no Application points at it.
+[[- end ]]

@@ -1,0 +1,60 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "substrate-actors" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# substrate-actors is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Stores .SubstrateCapable .Registry -]]
+# The platform's own actors on Agent Substrate (components/substrate-actors):
+# the WorkerPool platform in the namespace ate-workers, three warm gVisor
+# workers; a Sync hook that copies the counter demo's image and the test
+# actor's into the registry inside the cluster ([[ .Registry ]], under
+# platform/substrate/), where atelet pulls them; and a Sync hook that makes the
+# atespace platform and its ActorTemplates, then waits for each one's golden
+# snapshot. Wave 23, after the control plane (22).
+#
+# The counter test and the fence check (scripts/substrate-*.sh in the template)
+# run against these.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: substrate-actors
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: agent-runtime
+  annotations:
+    argocd.argoproj.io/sync-wave: "23"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/substrate-actors
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ate-workers
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Worker pods run as root with the capabilities gVisor needs, unconfined,
+    # on the node's /run/ateom.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: privileged
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it (SubstrateCapable), with the platform's own stores (INFRARED_STORES)
+# and the registry inside the cluster (INFRARED_REGISTRY), so this file holds no
+# objects.
+[[- end ]]

@@ -1,0 +1,65 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "substrate" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# substrate is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Stores .SubstrateCapable .Registry -]]
+# Agent Substrate's control plane (components/substrate), in the namespace
+# ate-system: the API (ate-api-server), the controller, atelet on every node,
+# the router that wakes an actor for a request, and the egress gateway. Wave
+# 22, after the pod-certificate controller (21) whose certificates each of them
+# presents.
+#
+#   records    the database substrate on the platform's one Postgres
+#   snapshots  SeaweedFS's bucket ate-snapshots, as its S3 identity
+#   images     ghcr by digest; actor images from the registry inside the
+#              cluster ([[ .Registry ]]), which atelet pulls itself
+#   fence      only Infrared's operator, Substrate's own components and the
+#              platform's jobs here reach the API and the router
+#
+# A PreSync hook makes the actor-identity CA and JWT pools once, writes the
+# API's authentication settings, labels the nodes, and waits for the stores
+# and the pod-certificate controller's trust bundles.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: substrate
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: agent-runtime
+  annotations:
+    argocd.argoproj.io/sync-wave: "22"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/substrate
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ate-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # atelet mounts the node's /var/lib/ate and binds host ports.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: privileged
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it (SubstrateCapable), with the platform's own stores (INFRARED_STORES)
+# and the registry inside the cluster (INFRARED_REGISTRY), so this file holds no
+# objects.
+[[- end ]]

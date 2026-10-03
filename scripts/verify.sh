@@ -54,6 +54,18 @@
 #     builder as platform, by address, with kpack/infrared-builder; without
 #     both, no object of them; Registry alone changes only the infrared
 #     Application
+#   - Agent Substrate, with Stores, Registry and SubstrateCapable together and
+#     only then: four Applications, waves 20 to 23, labelled
+#     infrared.darkshift.io/layer: agent-runtime; every image by digest, its
+#     own the pins in scripts/substrate-images.json, nothing left to ko, no
+#     PodMonitoring; snapshots in SeaweedFS's ate-snapshots and records in the
+#     platform's Postgres, copied through infrared-stores; atelet pulling
+#     localhost images from the registry inside the cluster; the pull secret
+#     wherever Substrate pulls; the NetworkPolicies that admit only Infrared's
+#     operator, Substrate and the platform's jobs; the hooks that make the CAs,
+#     label the nodes, copy the actor images and make the ActorTemplates; and
+#     the preflight's yes alone, without the stores or the registry, changes no
+#     file
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys; without one, no backup object
@@ -61,7 +73,8 @@
 #     and nothing else changes but the repo's README.md and the infrared
 #     Application's components.disabled
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
-#     public CRDs-catalog schemas, and kinds it lacks are skipped)
+#     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
+#     and kinds neither has are skipped)
 #
 # Needs: go, kubectl, kubeconform, yq (mikefarah v4). Network for kubeconform's
 # schemas.
@@ -138,6 +151,13 @@ yq -p json -o json '. + {"Stores": true, "Disabled": ["infisical"],
 zot_registry=10.43.0.50:5000
 yq -p json -o json '. + {"Registry": "'"$zot_registry"'"}' "$work/stores.json" >"$work/registry.json"
 
+# The Substrate variant: the registry's Data with the preflight's yes, the shape
+# of the one install. Agent Substrate renders with Stores, Registry and
+# SubstrateCapable together, and only then. Its images are the pins in
+# scripts/substrate-images.json.
+yq -p json -o json '. + {"SubstrateCapable": true}' "$work/registry.json" >"$work/substrate.json"
+substrate_pins=scripts/substrate-images.json
+
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 variants=(
@@ -153,12 +173,26 @@ variants=(
   "gitea-builds demo-gb k3s 10.43.0.50:5000/demo-org -forge gitea -forge-url $gitea_url"
   "registry demo-rg k3s $zot_registry -data $work/registry.json"
   "registry-plain demo-rp k3s $zot_registry -stores -registry $zot_registry"
+  "substrate demo-su k3s $zot_registry -data $work/substrate.json"
+  "substrate-plain demo-ss k3s - -stores -registry $zot_registry -substrate-capable"
+  "substrate-pull demo-sl k3s - -stores -registry $zot_registry -substrate-capable -pull-secret ghcr-pull"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
   [ "$registry" = - ] && registry=""
   # shellcheck disable=SC2086
   "$work/render" -out "$work/$variant" -cluster "$cluster" -flavor "$flavor" -build-registry "$registry" $extra
+done
+
+# Agent Substrate's own kinds have no public schema: kubeconform checks them
+# against the vendored CRDs' (WorkerPool, SandboxConfig, CSIDriverConfig).
+mkdir -p "$work/schemas"
+kubectl kustomize "$work/substrate/components/substrate-crds" >"$work/substrate-crds.yaml"
+for kind in $(yq -N -r 'select(.kind == "CustomResourceDefinition") | .spec.names.kind' "$work/substrate-crds.yaml"); do
+  for version in $(yq -N -r "select(.spec.names.kind == \"$kind\") | .spec.versions[].name" "$work/substrate-crds.yaml"); do
+    yq -o json "select(.spec.names.kind == \"$kind\") | .spec.versions[] | select(.name == \"$version\") | .schema.openAPIV3Schema" \
+      "$work/substrate-crds.yaml" >"$work/schemas/$(tr '[:upper:]' '[:lower:]' <<<"$kind")_$version.json"
+  done
 done
 
 # holds_objects <file>: true when the YAML file has at least one object.
@@ -184,6 +218,8 @@ for v in "${variants[@]}"; do
   stores=false cloud="" backup="" endpoint="" region="" domain="" host="" disabled="[]"
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
+  capable=false
+  grep -qw -- -substrate-capable <<<"${extra:-}" && capable=true
   zot_addr="$(sed -n -E 's/.*-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
   backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
   if [ -n "$data_file" ]; then
@@ -198,7 +234,11 @@ for v in "${variants[@]}"; do
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
     forge="$(yq -p json -r '.Forge // ""' "$data_file")"
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
+    capable="$(yq -p json -r '.SubstrateCapable // false' "$data_file")"
   fi
+  # Agent Substrate: the stores, the registry and the preflight's yes.
+  substrate=false
+  [ "$stores" = true ] && [ -n "$zot_addr" ] && [ "$capable" = true ] && substrate=true
   # The infrared Application carries the install's backup bucket even without
   # the stores, but backups need the stores.
   carried_backup="$backup"
@@ -465,12 +505,18 @@ for v in "${variants[@]}"; do
       && [ "$(line "$dns" '.spec.sources[0].helm.valuesObject.extraArgs[]')" = "--gateway-name=$(sel "$e" 'select(.kind == "Gateway") | .metadata.name') --cloudflare-proxied --txt-wildcard-replacement=wildcard" ] \
       && [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.domainFilters // [] | length')" = 0 ] \
       && ok "$variant: external-dns publishes the edge's names, proxied, as owner $cluster" || bad "$variant: external-dns is not wired to the edge"
-    # The platform's tokens: one store, one Secret, two namespaces.
+    # The platform's tokens: one store, one Secret, two namespaces; with
+    # Substrate and a pull secret, that Secret too, for Substrate's namespaces.
     want_ns="external-dns envoy-gateway-system${backup:+ stores}"
+    want_names="infrared-platform-tokens:get"
+    if [ "$substrate" = true ] && [ -n "$pull_secret" ]; then
+      want_ns="$want_ns podcertificate-controller-system ate-system ate-workers registry"
+      want_names="$want_names $pull_secret:get"
+    fi
     [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
       && [ "$(sel "$t" 'select(.kind == "ClusterSecretStore") | .spec.provider.kubernetes.remoteNamespace')" = infrared ] \
-      && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "infrared-platform-tokens:get" ] \
-      && ok "$variant: ClusterSecretStore infrared-platform reads only infrared-platform-tokens, for $want_ns" || bad "$variant: ClusterSecretStore infrared-platform is wrong"
+      && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "$want_names" ] \
+      && ok "$variant: ClusterSecretStore infrared-platform reads only $want_names, for $want_ns" || bad "$variant: ClusterSecretStore infrared-platform is wrong"
     for es in "$x:external-dns" "$e:envoy-gateway-system"; do
       f="${es%%:*}" ns="${es#*:}"
       [ "$(line "$f" "select(.kind == \"ExternalSecret\" and .metadata.namespace == \"$ns\") | .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name + \" \" + .spec.data[0].remoteRef.key + \"/\" + .spec.data[0].remoteRef.property")" \
@@ -493,14 +539,22 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$app" '.spec.sources[0].helm.valuesObject.gitops.templateVersion')" = "$(yq -p json -r '.templateVersion' "$data_file")" ] \
       && ok "$variant: a commit SHA renders as a string" || bad "$variant: the template version SHA is not a YAML string"
   else
-    if [ -n "$backup" ]; then
-      # The platform's tokens, for the backups alone.
+    if [ -n "$backup" ] || { [ "$substrate" = true ] && [ -n "$pull_secret" ]; }; then
+      # The platform's tokens, for the backups alone, or for Substrate's pull
+      # secret alone.
       edge_files="$(grep -v platform-tokens <<<"$edge_files")"
       t="$work/$variant-built/platform-tokens.yaml"
+      want_ns="${backup:+stores}"
+      want_names="infrared-platform-tokens:get"
+      if [ "$substrate" = true ] && [ -n "$pull_secret" ]; then
+        want_ns="${want_ns:+$want_ns }podcertificate-controller-system ate-system ate-workers registry"
+        want_names="$want_names $pull_secret:get"
+      fi
       [ "$(sel "$reg/components/platform-tokens.yaml" '.metadata.name')" = platform-tokens ] \
-        && [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = stores ] \
-        && ok "$variant: ClusterSecretStore infrared-platform, for the backups' namespace stores alone" \
-        || bad "$variant: the platform's tokens are not there for the backups"
+        && [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
+        && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "$want_names" ] \
+        && ok "$variant: ClusterSecretStore infrared-platform reads $want_names, for $want_ns alone" \
+        || bad "$variant: the platform's tokens are not there for the backups or Substrate's pull secret"
     fi
     left="$(for f in $edge_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: the edge is not a Gateway, no edge objects" || bad "$variant: edge objects rendered without Edge gateway: $left"
@@ -636,14 +690,19 @@ for v in "${variants[@]}"; do
         && [ "$(sel "$f" '.spec.project')" = platform ] && [ "$(sel "$f" '.spec.destination.namespace')" = "$ns" ] \
         && ok "$variant: $name Application (wave $wave)" || bad "$variant: $name Application missing or wrong"
     done
-    # The store over stores: the registry's S3 keys alone, for registry alone.
+    # The store over stores: the registry's S3 keys alone, for registry alone;
+    # with Substrate, its S3 keys and its Postgres role too, for ate-system.
     # The namespace stores is the stores' own Applications'.
     c="$work/$variant-built/stores-credentials.yaml"
+    want_ns=registry want_names=seaweedfs-s3-registry
+    if [ "$substrate" = true ]; then
+      want_ns="registry ate-system" want_names="seaweedfs-s3-registry,seaweedfs-s3-ate-snapshots,postgres-substrate"
+    fi
     [ -z "$(sel "$reg/components/stores-credentials.yaml" '.spec.syncPolicy.syncOptions[] | select(. == "CreateNamespace=true")')" ] \
-      && [ "$(line "$c" 'select(.kind == "ClusterSecretStore" and .metadata.name == "infrared-stores") | .spec.conditions[].namespaces[]')" = registry ] \
+      && [ "$(line "$c" 'select(.kind == "ClusterSecretStore" and .metadata.name == "infrared-stores") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
       && [ "$(sel "$c" 'select(.kind == "ClusterSecretStore") | .spec.provider.kubernetes.remoteNamespace')" = stores ] \
-      && [ "$(line "$c" 'select(.kind == "Role") | .metadata.namespace + " " + (.rules[] | (.resourceNames | join(",")) + ":" + (.verbs | join(",")))')" = "stores seaweedfs-s3-registry:get" ] \
-      && ok "$variant: ClusterSecretStore infrared-stores reads only stores/seaweedfs-s3-registry, for registry" \
+      && [ "$(line "$c" 'select(.kind == "Role") | .metadata.namespace + " " + (.rules[] | (.resourceNames | join(",")) + ":" + (.verbs | join(",")))')" = "stores $want_names:get" ] \
+      && ok "$variant: ClusterSecretStore infrared-stores reads only stores/{$want_names}, for $want_ns" \
       || bad "$variant: ClusterSecretStore infrared-stores is wrong"
     # Zot: chart and image by digest, one replica replaced and never rolled,
     # its Service a ClusterIP at the registry's address.
@@ -710,6 +769,160 @@ for v in "${variants[@]}"; do
     [ -z "$left" ] && ok "$variant: no registry inside the cluster, no objects of it" || bad "$variant: registry objects rendered without Registry and Stores: $left"
   fi
 
+  # Agent Substrate: all of it with Stores, Registry and SubstrateCapable, none
+  # of it without.
+  sub_files="$(for a in substrate-crds substrate-podcert substrate substrate-actors; do
+      echo "$reg/components/$a.yaml"; find "$out/components/$a" -name '*.yaml'; done)"
+  if [ "$substrate" = true ]; then
+    sb="$work/$variant-built"
+    sp="$sb/substrate-podcert.yaml" s="$sb/substrate.yaml" sa="$sb/substrate-actors.yaml"
+    # Four Applications, waves 20 to 23, each labelled for the agent runtime
+    # layer; the CRDs' carries no finalizer, so removing it leaves them.
+    for a in substrate-crds:20:ate-system:- substrate-podcert:21:podcertificate-controller-system:baseline \
+        substrate:22:ate-system:privileged substrate-actors:23:ate-workers:privileged; do
+      IFS=: read -r name wave ns pss <<<"$a"
+      f="$reg/components/$name.yaml"
+      fin="$(sel "$f" '.metadata.finalizers[]?')"
+      created="$(sel "$f" '.spec.syncPolicy.syncOptions[] | select(. == "CreateNamespace=true")')"
+      [ "$(sel "$f" '.metadata.name')" = "$name" ] && [ "$(sel "$f" '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "$wave" ] \
+        && [ "$(sel "$f" '.metadata.labels["infrared.darkshift.io/layer"]')" = agent-runtime ] \
+        && [ "$(sel "$f" '.spec.project')" = platform ] && [ "$(sel "$f" '.spec.destination.namespace')" = "$ns" ] \
+        && [ "$(sel "$f" '.spec.source.path')" = "components/$name" ] \
+        && if [ "$pss" = - ]; then [ -z "$fin$created" ]; else [ "$fin" = resources-finalizer.argocd.argoproj.io ] && [ -n "$created" ] \
+          && [ "$(sel "$f" '.spec.syncPolicy.managedNamespaceMetadata.labels["pod-security.kubernetes.io/enforce"]')" = "$pss" ]; fi \
+        && ok "$variant: $name Application (wave $wave, layer agent-runtime, namespace $ns$([ "$pss" = - ] || echo ", Pod Security $pss"))" \
+        || bad "$variant: $name Application missing or wrong"
+    done
+    layered="$(for f in "$reg"/components/*.yaml; do sel "$f" 'select(.metadata.labels["infrared.darkshift.io/layer"] == "agent-runtime") | .metadata.name'; done | sort | tr '\n' ' ')"
+    [ "$layered" = "substrate substrate-actors substrate-crds substrate-podcert " ] \
+      && ok "$variant: only Substrate's four Applications carry infrared.darkshift.io/layer: agent-runtime" \
+      || bad "$variant: infrared.darkshift.io/layer: agent-runtime is on $layered"
+    [ "$(line "$sb/substrate-crds.yaml" '.kind + "/" + .metadata.name' | tr ' ' '\n' | sort | tr '\n' ' ')" \
+        = "CustomResourceDefinition/csidriverconfigs.ate.dev CustomResourceDefinition/sandboxconfigs.ate.dev CustomResourceDefinition/workerpools.ate.dev ValidatingAdmissionPolicy/sandboxconfig-assets ValidatingAdmissionPolicyBinding/sandboxconfig-assets " ] \
+      && ok "$variant: substrate-crds holds the three CRDs and the SandboxConfig admission policy" || bad "$variant: substrate-crds holds the wrong objects"
+    # Every image by digest; Substrate's own are the pins, the router's Envoy
+    # and the hooks' tools are upstream's. Nothing is left to ko.
+    pins="$(jq -r '.images[].ref' "$substrate_pins" | sort -u)"
+    images="$(for b in "$sp" "$s" "$sa"; do
+        sel "$b" '(.spec.template.spec // .spec.jobTemplate.spec.template.spec // {}) | ((.initContainers // []) + (.containers // []))[] | .image'
+      done | sort -u)"
+    unpinned="$(grep -vE '@sha256:[0-9a-f]{64}$' <<<"$images" || true)"
+    strays="$(grep '^ghcr.io/darkshiftio/substrate/' <<<"$images" | grep -vxF "$pins" || true)"
+    worker="$(sel "$sa" 'select(.kind == "WorkerPool") | .spec.workerImage')"
+    [ -z "$unpinned" ] && [ -z "$strays" ] && grep -qxF -- "$worker" <<<"$pins" \
+      && [ -z "$(grep -rl 'ko://' "$out"/components/substrate* || true)" ] \
+      && ok "$variant: every Substrate image by digest, its own ($(grep -c '^ghcr.io/darkshiftio/substrate/' <<<"$images") and the workers') from scripts/substrate-images.json" \
+      || bad "$variant: Substrate's images: unpinned '$unpinned', not the pins '$strays', workers '$worker'"
+    # Upstream's base less its GKE-only PodMonitoring.
+    [ -z "$(grep -rlE '^kind: PodMonitoring|^apiVersion: monitoring.googleapis.com' "$out" "$sb" 2>/dev/null || true)" ] \
+      && ok "$variant: no PodMonitoring (GKE Managed Prometheus)" || bad "$variant: a PodMonitoring is rendered"
+    # Snapshots in SeaweedFS for the API and atelet; atelet pulls localhost
+    # images from the registry inside the cluster, without GCP credentials.
+    ds='select(.kind == "DaemonSet" and .metadata.labels.app == "atelet")'
+    api='select(.kind == "Deployment" and .metadata.name == "ate-api-server")'
+    s3env() { sel "$s" "$1 | .spec.template.spec.containers[0].env[] | select(.name | test(\"^(ATE_STORAGE_BACKEND|AWS_)\")) | .name + \"=\" + (.value // (.valueFrom.secretKeyRef.name + \"/\" + .valueFrom.secretKeyRef.key))" | sort | tr '\n' ' '; }
+    want_env="$(printf '%s\n' ATE_STORAGE_BACKEND=s3 AWS_REGION=us-east-1 AWS_ENDPOINT_URL=http://seaweedfs-s3.stores.svc:8333 AWS_S3_USE_PATH_STYLE=true \
+      AWS_ACCESS_KEY_ID=ate-s3-credentials/AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=ate-s3-credentials/AWS_SECRET_ACCESS_KEY | sort | tr '\n' ' ')"
+    args="$(line "$s" "$ds | .spec.template.spec.containers[0].args[]")"
+    [ "$(s3env "$ds")" = "$want_env" ] && [ "$(s3env "$api")" = "$want_env" ] \
+      && grep -qwF -- --gcp-auth-for-image-pulls=false <<<"$args" && ! grep -qF -- --gcp-auth-for-image-pulls=true <<<"$args" \
+      && grep -qwF -- "--localhost-registry-replacement=$zot_addr" <<<"$args" \
+      && ok "$variant: the API and atelet keep snapshots in ate-snapshots; atelet pulls localhost images from $zot_addr, without GCP credentials" \
+      || bad "$variant: the API's or atelet's snapshot or image settings are wrong (atelet: $args)"
+    # One version everywhere: atelet's nodes, the workers', the labels the hooks write.
+    version="$(jq -r .version "$substrate_pins")"
+    jenv() { sel "$1" "select(.kind == \"$2\" and .metadata.name == \"$3\") | (.spec.template.spec // .spec.jobTemplate.spec.template.spec).containers[0].env[] | select(.name == \"$4\") | .value"; }
+    [ "$(sel "$s" "$ds | .spec.template.spec.nodeSelector[\"ate.dev/substrate-version\"]")" = "$version" ] \
+      && [ "$(sel "$sa" 'select(.kind == "WorkerPool") | .spec.template.nodeSelector["ate.dev/substrate-version"]')" = "$version" ] \
+      && [ "$(jenv "$s" Job substrate-prepare SUBSTRATE_VERSION)" = "$version" ] \
+      && [ "$(jenv "$s" CronJob substrate-node-labels SUBSTRATE_VERSION)" = "$version" ] \
+      && ok "$variant: atelet, the workers and the node labels all say Substrate $version" \
+      || bad "$variant: Substrate's version differs between atelet, the workers and the node labels"
+    # Records on the platform's Postgres, snapshots as the S3 identity
+    # ate-snapshots, both copied through infrared-stores.
+    es() { sel "$s" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$1\") | .spec.secretStoreRef.name + \" \" + ([.spec.data[]? | .remoteRef.key + \"/\" + .remoteRef.property] | join(\",\"))"; }
+    dsn='select(.kind == "ExternalSecret" and .metadata.name == "ate-api-server-secret-envvars") | .spec.target.template.data'
+    [ "$(es ate-s3-credentials)" = "infrared-stores seaweedfs-s3-ate-snapshots/AWS_ACCESS_KEY_ID,seaweedfs-s3-ate-snapshots/AWS_SECRET_ACCESS_KEY" ] \
+      && [ "$(es ate-api-server-secret-envvars)" = "infrared-stores postgres-substrate/password" ] \
+      && [ "$(sel "$s" "$dsn | .ATE_API_POSTGRES_CONNECTION_STRING")" = 'postgresql://substrate:{{ .password }}@postgres-rw.stores.svc:5432/substrate?sslmode=require' ] \
+      && [ "$(sel "$s" "$dsn | .ATE_API_POSTGRES_SCHEMA")" = public ] \
+      && ok "$variant: Substrate's records in the database substrate on the platform's Postgres, its snapshots as ate-snapshots, through infrared-stores" \
+      || bad "$variant: Substrate's Postgres or S3 credentials are wrong"
+    # The pull secret: copied to each namespace that pulls, and on every pod.
+    if [ -n "$pull_secret" ]; then
+      copies="$(for b in "$sp" "$s" "$sa"; do sel "$b" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$pull_secret\") | .metadata.namespace + \":\" + .spec.secretStoreRef.name + \":\" + .spec.dataFrom[0].extract.key + \":\" + .spec.target.template.type"; done | sort | tr '\n' ' ')"
+      want_copies="$(for n in ate-system ate-workers podcertificate-controller-system registry; do echo "$n:infrared-platform:$pull_secret:kubernetes.io/dockerconfigjson"; done | tr '\n' ' ')"
+      nopull="$(for b in "$sp" "$s"; do sel "$b" "select(.kind == \"Deployment\" or .kind == \"DaemonSet\") | select((.spec.template.spec.imagePullSecrets // []) | map(.name) | contains([\"$pull_secret\"]) | not) | .metadata.name"; done)"
+      [ "$copies" = "$want_copies" ] && [ -z "$nopull" ] \
+        && [ "$(sel "$sa" 'select(.kind == "ServiceAccount" and .metadata.name == "default") | .imagePullSecrets[].name')" = "$pull_secret" ] \
+        && ok "$variant: $pull_secret copied to Substrate's four namespaces through infrared-platform, and every Substrate pod pulls with it" \
+        || bad "$variant: Substrate's pull secret is not everywhere it pulls (copies: $copies; without it: $nopull)"
+    else
+      [ -z "$(for b in "$sp" "$s" "$sa"; do sel "$b" 'select(.kind == "ExternalSecret" and .spec.secretStoreRef.name == "infrared-platform") | .metadata.name'; done)" ] \
+        && [ -z "$(for b in "$sp" "$s" "$sa"; do sel "$b" '(.spec.template.spec // {}).imagePullSecrets[]?.name, .imagePullSecrets[]?.name'; done)" ] \
+        && ok "$variant: the install names no pull secret: none copied, none used" || bad "$variant: a pull secret is used though the install names none"
+    fi
+    # The fence: only Infrared's operator, Substrate itself and the platform's
+    # jobs reach the API; only the operator and the jobs reach the router.
+    op='{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "infrared"}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "infrared", "app.kubernetes.io/component": "operator"}}}'
+    client='{"podSelector": {"matchLabels": {"infrared.darkshift.io/substrate-client": "true"}}}'
+    metrics='{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}], "ports": [{"protocol": "TCP", "port": 9090}]}'
+    want_api="{\"podSelector\": {\"matchLabels\": {\"app\": \"ate-api-server\"}}, \"policyTypes\": [\"Ingress\"], \"ingress\": [{\"from\": [$op, {\"podSelector\": {\"matchExpressions\": [{\"key\": \"app\", \"operator\": \"In\", \"values\": [\"atelet\", \"atenet-router\", \"atenet-egress\", \"ate-controller\"]}]}}, $client], \"ports\": [{\"protocol\": \"TCP\", \"port\": 443}]}, $metrics]}"
+    want_router="{\"podSelector\": {\"matchLabels\": {\"app\": \"atenet-router\"}}, \"policyTypes\": [\"Ingress\"], \"ingress\": [{\"from\": [$op, $client], \"ports\": [$(for p in 8080 8443 8081 8444 4040; do printf '{"protocol": "TCP", "port": %s},' "$p"; done | sed 's/,$//')]}, $metrics]}"
+    np() { sel "$s" "select(.kind == \"NetworkPolicy\" and .metadata.name == \"$1\") | .spec" | yq -p yaml -o json -I0 'sort_keys(..)'; }
+    [ "$(np ate-api-server)" = "$(yq -p json -o json -I0 'sort_keys(..)' <<<"$want_api")" ] \
+      && [ "$(np atenet-router)" = "$(yq -p json -o json -I0 'sort_keys(..)' <<<"$want_router")" ] \
+      && [ "$(line "$s" 'select(.kind == "NetworkPolicy") | .metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "-3 -3" ] \
+      && ok "$variant: NetworkPolicies admit only Infrared's operator, Substrate and the platform's jobs to the API, and only the operator and the jobs to the router" \
+      || bad "$variant: Substrate's NetworkPolicies are wrong"
+    # What Substrate's installer does by hand, in hooks, each safe to run again:
+    # the CAs and pools made once, the waits, the copy, the templates.
+    hook() { sel "$1" "select(.kind == \"Job\" and .metadata.name == \"$2\") | .metadata.annotations[\"argocd.argoproj.io/hook\"] + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"]"; }
+    openssl="$(for b in "$sp" "$s"; do sel "$b" 'select(.kind == "Job") | .spec.template.spec.initContainers[]? | select(.name == "generate") | .image'; done | sort -u)"
+    [ "$(hook "$sp" substrate-podcert-prepare)" = "PreSync -9" ] && [ "$(hook "$s" substrate-prepare)" = "PreSync -9" ] \
+      && [ "$(hook "$sa" substrate-actors-wait)" = "PreSync -9" ] && [ "$(hook "$sa" substrate-images)" = "Sync 1" ] \
+      && [ "$(hook "$sa" substrate-templates)" = "Sync 2" ] \
+      && grep -qE '^docker\.io/alpine/openssl:[0-9.]+@sha256:[0-9a-f]{64}$' <<<"$openssl" \
+      && [ "$(line "$sp" 'select(.kind == "Role" and .metadata.name == "substrate-podcert-prepare") | .rules[0].resourceNames[]')" = "service-dns-ca-pool pod-identity-ca-pool" ] \
+      && [ "$(line "$s" 'select(.kind == "Role" and .metadata.name == "substrate-prepare") | .rules[0].resourceNames[]')" = "actor-id-jwt-pool actor-id-ca-pool actor-id-ca-certs" ] \
+      && [ "$(jenv "$s" Job substrate-prepare WAIT_SERVICES)" = "stores/postgres-rw stores/seaweedfs-s3" ] \
+      && [ "$(jenv "$s" Job substrate-prepare WAIT_BUNDLES)" = "servicedns.podcert.ate.dev:identity:primary-bundle podidentity.podcert.ate.dev:identity:primary-bundle" ] \
+      && [ "$(jenv "$sa" Job substrate-actors-wait WAIT_SERVICES)" = "ate-system/api ate-system/atenet-router registry/zot" ] \
+      && ok "$variant: the CAs and pools made once before their consumers (PreSync), then the copy (Sync 1) and the templates (Sync 2), each after its waits" \
+      || bad "$variant: Substrate's hooks are wrong"
+    # The ActorTemplates: a version in each name, the atespace platform, the
+    # pool's label, a gVisor SandboxConfig that exists, snapshots under their
+    # own name in ate-snapshots, and a localhost image the copy puts in the
+    # registry by the same digest.
+    tcm='select(.kind == "ConfigMap" and .metadata.name == "substrate-actor-templates")'
+    copies="$(sel "$sa" 'select(.kind == "Job" and .metadata.name == "substrate-images") | .spec.template.spec.initContainers[] | select(.args[0] == "copy") | .args[1] + " " + .args[2]')"
+    pool="$(sel "$sa" 'select(.kind == "WorkerPool") | .metadata.labels | to_entries[] | .key + "=" + .value')"
+    tfail=""
+    for key in $(sel "$sa" "$tcm | .data | keys | .[]"); do
+      j="$(sel "$sa" "$tcm | .data[\"$key\"]")"
+      name="$(jq -r .actorTemplate.metadata.name <<<"$j")"
+      image="$(jq -r '.actorTemplate.containers[0].image' <<<"$j")"
+      rest="${image#localhost/platform/substrate/}" # <image>:<tag>@sha256:<digest>
+      [ "$key" = "$name.json" ] && [[ "$name" =~ -v[0-9]+$ ]] && [ "$(jq -r .actorTemplate.metadata.atespace <<<"$j")" = platform ] \
+        && [ "$(jq -r .actorTemplate.snapshotConfig.storageLocation <<<"$j")" = "s3://ate-snapshots/platform/$name/" ] \
+        && [ "$(jq -r '.actorTemplate.workerSelector.matchLabels | to_entries[] | .key + "=" + .value' <<<"$j")" = "$pool" ] \
+        && [ "$(jq -r '.actorTemplate.sandboxConfig | .sandboxClass + " " + .configName' <<<"$j")" \
+            = "SANDBOX_CLASS_GVISOR $(sel "$s" 'select(.kind == "SandboxConfig" and .spec.sandboxClass == "gvisor") | .metadata.name')" ] \
+        && [[ "$image" == localhost/platform/substrate/*:*@sha256:* ]] \
+        && grep -qxF -- "ghcr.io/darkshiftio/substrate/$rest" <<<"$pins" \
+        && grep -qxF -- "ghcr.io/darkshiftio/substrate/$rest $zot_addr/platform/substrate/${rest%@*}" <<<"$copies" \
+        || tfail="$tfail $name"
+    done
+    [ -z "$tfail" ] && [ -n "$copies" ] && [ "$(sel "$sa" 'select(.kind == "WorkerPool") | .metadata.name + " " + .spec.sandboxClass')" = "platform gvisor" ] \
+      && [ "$(sel "$sa" 'select(.kind == "Job" and .metadata.name == "substrate-templates") | .spec.template.metadata.labels["infrared.darkshift.io/substrate-client"]')" = true ] \
+      && [ "$(sel "$sa" 'select(.kind == "Job" and .metadata.name == "substrate-templates") | .spec.template.spec.volumes[] | select(.name == "ate-token") | .projected.sources[0].serviceAccountToken.audience')" = api.ate-system.svc ] \
+      && ok "$variant: ActorTemplates $(sel "$sa" "$tcm | .data | keys | .[]" | sed 's/\.json$//' | tr '\n' ' ')in the atespace platform, their images copied to $zot_addr/platform/substrate by digest" \
+      || bad "$variant: Substrate's ActorTemplates or the copy of their images are wrong:$tfail"
+  else
+    left="$(for f in $sub_files; do holds_objects "$f" && echo "$f"; done || true)"
+    [ -z "$left" ] && ok "$variant: Substrate is off, no objects of it" || bad "$variant: Substrate objects rendered without Stores, Registry and SubstrateCapable: $left"
+  fi
+
   # Each Linode volume is a service on a limited Linode account: only the
   # Postgres Cluster and, with Forge gitea, Gitea's volume (through the infrared
   # Application's values) name Linode's volume class, so each makes one volume.
@@ -762,6 +975,7 @@ for v in "${variants[@]}"; do
   # Schemas.
   if kubeconform -strict -ignore-missing-schemas -summary \
       -schema-location default \
+      -schema-location "$work/schemas/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
       -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
       "$reg" "$work/$variant-built"; then
     ok "$variant: kubeconform"
@@ -788,7 +1002,8 @@ for v in "traefik - -edge traefik" \
     "traefik-linode - -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
     "backup-alone $infrared_app -backup {\"bucket\":\"$backup_bucket\",\"endpoint\":\"$backup_endpoint\"}" \
     "gitea-alone components/builds/README.md,$infrared_app -forge gitea -forge-url $gitea_url -cloud linode" \
-    "registry-alone $infrared_app -registry $zot_registry"; do
+    "registry-alone $infrared_app -registry $zot_registry" \
+    "substrate-registry-alone $infrared_app -registry $zot_registry -substrate-capable"; do
   read -r variant changes extra <<<"$v"
   [ "$changes" = - ] && changes=""
   changes="${changes//,/ }"
@@ -813,6 +1028,41 @@ done
 [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.registry' "$work/registry-alone/$infrared_app")" = "{\"address\":\"$zot_registry\"}" ] \
   && ok "registry-alone: the infrared Application carries the registry's address without the stores" \
   || bad "registry-alone: the infrared Application does not carry the registry's address"
+
+# --- Agent Substrate needs the stores, the registry and the preflight's yes ---------
+# The preflight's yes with the stores but no registry renders exactly what the
+# stores alone render; with the registry and the stores but no yes, exactly what
+# they render (the registry-plain variant above); on Traefik with no stores, the
+# plain render (traefik-facts and substrate-registry-alone above). So a cluster
+# without the stores whose preflight says yes one day changes no file.
+"$work/render" -out "$work/substrate-no-registry" -cluster demo-sp -flavor k3s -build-registry "" -stores -substrate-capable >/dev/null
+changed="$({ diff -rq "$work/stores-plain" "$work/substrate-no-registry" || true; } | tr '\n' ' ')"
+[ -z "$changed" ] && ok "substrate-no-registry: the preflight's yes with the stores alone renders exactly what the stores do" \
+  || bad "substrate-no-registry: the preflight's yes changes files without a registry: $changed"
+"$work/render" -out "$work/substrate-not-capable" -cluster demo-ss -flavor k3s -build-registry "" -stores -registry "$zot_registry" >/dev/null
+"$work/render" -out "$work/substrate-capable" -cluster demo-ss -flavor k3s -build-registry "" -stores -registry "$zot_registry" -substrate-capable >/dev/null
+changed="$({ diff -rq "$work/substrate-not-capable" "$work/substrate-capable" || true; } \
+  | sed -E "s#^Files $work/substrate-not-capable/(.*) and .* differ\$#\\1#" | sort)"
+others="$(grep -vE '^(README\.md|components/stores-credentials/store\.yaml|components/substrate(-crds|-podcert|-actors)?/.*|registry/clusters/demo-ss/components/substrate(-crds|-podcert|-actors)?\.yaml)$' <<<"$changed" || true)"
+[ -z "$others" ] && grep -qx README.md <<<"$changed" && grep -qx components/stores-credentials/store.yaml <<<"$changed" \
+  && [ "$(grep -c '^registry/clusters/demo-ss/components/substrate' <<<"$changed")" = 4 ] \
+  && ok "substrate-plain: the preflight's yes changes only the README, the store infrared-stores and Substrate's own files ($(wc -l <<<"$changed" | tr -d ' '))" \
+  || bad "substrate-plain: the preflight's yes changes more than Substrate's files: $others"
+
+# --- Substrate's pins ---------------------------------------------------------------
+# Every vendored file is from the commit and the images in
+# scripts/substrate-images.json, and the test scripts use the hooks' tools.
+ref="$(jq -r .substrate.ref "$substrate_pins")" tag="$(jq -r .tag "$substrate_pins")"
+stale="$(grep -l 'GENERATED by scripts/vendor-substrate.sh' -r template/components/substrate* \
+  | while read -r f; do grep -qF "Agent Substrate ${ref:0:7}, manifests/ate-install, images $tag " "$f" || echo "$f"; done)"
+vendored="$(grep -l 'GENERATED by scripts/vendor-substrate.sh' -r template/components/substrate* | wc -l | tr -d ' ')"
+[ -z "$stale" ] && [ "$vendored" = 10 ] && ok "Substrate's $vendored vendored files are from ${ref:0:7} with images $tag" \
+  || bad "Substrate's vendored files are not all from ${ref:0:7} and $tag ($vendored files; stale: $stale)"
+for pin in SUBSTRATE_K8S_IMAGE SUBSTRATE_GRPCURL_IMAGE; do
+  image="$(sed -n -E "s/^$pin=//p" scripts/substrate-lib.sh)"
+  grep -qF -- "image: $image" template/components/substrate-actors/templates.yaml.tmpl \
+    && ok "scripts/substrate-lib.sh's $pin is the hooks' ($image)" || bad "scripts/substrate-lib.sh's $pin ($image) is not the hooks' pin"
+done
 
 # --- Disabled leaves a component out, and changes nothing else ----------------------
 # Each optional component, named in Disabled on a variant that renders it: its
@@ -840,7 +1090,8 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
     "gateway platform-tokens envoy-gateway origin-ca-issuer external-dns edge" \
     "stores-plain cloudnative-pg postgres seaweedfs" \
     "stores-backup platform-tokens" \
-    "registry-plain stores-credentials zot"; do
+    "registry-plain stores-credentials zot" \
+    "substrate-plain substrate-crds substrate-podcert substrate substrate-actors"; do
   read -r base names <<<"$v"
   for name in $names; do
     out="$work/disabled-$base-$name"

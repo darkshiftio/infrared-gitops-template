@@ -1,0 +1,16 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# Agent Substrate's CRDs (the `substrate-crds` Application, wave 20): WorkerPool,
+# SandboxConfig and CSIDriverConfig, and the ValidatingAdmissionPolicy that
+# every SandboxConfig passes, so the gVisor one the control plane applies
+# (wave 22) is checked too. Both files are upstream's, vendored from the pinned
+# commit by scripts/vendor-substrate.sh. All of it is cluster-scoped.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - crds.yaml
+  - sandboxconfig-validation.yaml
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster, so this component holds no objects and no Application points at it.
+[[- end ]]

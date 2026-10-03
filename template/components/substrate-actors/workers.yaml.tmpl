@@ -1,0 +1,56 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# The platform's warm capacity: the WorkerPool platform.
+# =============================================================================
+# Substrate's controller turns it into a Deployment of worker pods (ateom with
+# gVisor) in ate-workers, and each ready pod into a Worker record. A template
+# lands here by the pool's label, infrared.darkshift.io/worker-pool=platform,
+# which every ActorTemplate in templates.yaml selects. The controller also
+# writes a NetworkPolicy that admits only Substrate's router to the workers.
+#
+# Three workers, each a budget of one CPU and 1 GiB that its actors share: a
+# counter actor takes a whole one, a test actor half. The scheduler places a
+# worker by its requests, so the CPU request is a quarter of its limit; memory
+# cannot be lent, so its request is its limit. The workers run only on nodes
+# labelled with Substrate's version, where atelet runs.
+# =============================================================================
+[[- if .ImagePullSecret ]]
+# The worker image is private, and a WorkerPool cannot name a pull secret: the
+# workers run as the namespace's ServiceAccount default, which lists it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: ate-workers
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+imagePullSecrets:
+  - name: [[ .ImagePullSecret ]]
+---
+[[- end ]]
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: platform
+  namespace: ate-workers
+  labels:
+    infrared.darkshift.io/worker-pool: platform
+spec:
+  replicas: 3
+  sandboxClass: gvisor
+  workerImage: ghcr.io/darkshiftio/substrate/ateom-gvisor:one-install-ce05e5d-7e86cab@sha256:e463ac66c11ade2e3e5d7c2939dddcdb8d2e27273d75e650881e084011cfd190
+  template:
+    nodeSelector:
+      ate.dev/substrate-version: "one-install-ce05e5d-7e86cab"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no workers.
+[[- end ]]
