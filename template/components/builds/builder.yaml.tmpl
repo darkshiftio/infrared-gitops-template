@@ -14,10 +14,17 @@
 #                  This registry is not ECR: the org creates builds/registry-push
 #                  itself (README.md, "Registry credentials").
 [[- end ]]
+[[- if eq .Forge "gitea" ]]
+#   gitea-git      kubernetes.io/basic-auth (the bot user, and its read-only
+#                  token as the password), annotation kpack.io/git:
+#                  [[ .ForgeURL ]]. The operator writes it from the org's
+#                  GitProvider gitea once this namespace exists.
+[[- else ]]
 #   github-git     kubernetes.io/basic-auth (x-access-token), annotation
 #                  kpack.io/git: https://github.com. A 1-hour installation token
 #                  of Infrared's GitHub App for the org, refreshed every 45m by
 #                  builds/github-token (github-token.yaml).
+[[- end ]]
 # imagePullSecrets lets kpack (and the kubelet) read the builder it pushed.
 # =============================================================================
 apiVersion: v1
@@ -29,7 +36,11 @@ metadata:
   namespace: builds
 secrets:
   - name: registry-push
+[[- if eq .Forge "gitea" ]]
+  - name: gitea-git
+[[- else ]]
   - name: github-git
+[[- end ]]
 imagePullSecrets:
   - name: registry-push
 ---

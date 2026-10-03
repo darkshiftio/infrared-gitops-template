@@ -137,6 +137,7 @@ variants=(
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
   "gitea demo-gt k3s - -forge gitea -forge-url $gitea_url"
+  "gitea-builds demo-gb k3s 10.43.0.50:5000/demo-org -forge gitea -forge-url $gitea_url"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -333,19 +334,32 @@ for v in "${variants[@]}"; do
     b="$work/$variant-built/builds.yaml"
     if [ -s "$b" ]; then
       has() { [ -n "$(yq -N -r "select(.kind == \"$1\" and .metadata.name == \"$2\") | .metadata.name" "$b")" ]; }
-      for want in Namespace/builds Namespace/build-credentials ClusterStore/paketo ClusterStack/noble \
-          ClusterBuilder/infrared-builder ServiceAccount/builder CronJob/github-token Job/github-token-bootstrap \
-          CronJob/ecr-login Job/ecr-login-bootstrap Role/builds-github-token; do
+      # ECR's login job only for ECR; the GitHub App's token job only for
+      # GitHub. On Gitea kpack clones with builds/gitea-git, which the operator
+      # writes, so nothing of GitHub's is rendered.
+      wants="Namespace/builds ClusterStore/paketo ClusterStack/noble ClusterBuilder/infrared-builder ServiceAccount/builder"
+      case "$registry" in *.dkr.ecr.*) wants="$wants Namespace/build-credentials CronJob/ecr-login Job/ecr-login-bootstrap" ;; esac
+      source_secret=github-git
+      if [ "$forge" = gitea ]; then
+        source_secret=gitea-git
+        [ -z "$(sel "$b" 'select(.metadata.name | test("github")) | .kind + "/" + .metadata.name')" ] \
+          || bad "$variant: GitHub's token job or its scripts rendered for Gitea"
+      else
+        wants="$wants CronJob/github-token Job/github-token-bootstrap Role/builds-github-token"
+        [ "$(yq -N -r 'select(.kind == "Role" and .metadata.name == "builds-github-token") | .metadata.namespace' "$b")" = ir-org-demo-org ] \
+          || bad "$variant: github App Role is not in ir-org-demo-org"
+      fi
+      for want in $wants; do
         has "${want%%/*}" "${want#*/}" || bad "$variant: builds lacks $want"
       done
+      [ "$(line "$b" 'select(.kind == "ServiceAccount" and .metadata.name == "builder") | .secrets[].name')" = "registry-push $source_secret" ] \
+        || bad "$variant: ServiceAccount builder does not list registry-push and $source_secret"
       [ "$(yq -N -r 'select(.kind == "ClusterBuilder") | .spec.tag' "$b")" = "$registry/kpack-builder" ] \
         || bad "$variant: ClusterBuilder tag is not $registry/kpack-builder"
-      [ "$(yq -N -r 'select(.kind == "Role" and .metadata.name == "builds-github-token") | .metadata.namespace' "$b")" = ir-org-demo-org ] \
-        || bad "$variant: github App Role is not in ir-org-demo-org"
       [ "$(yq -N -r 'select(.kind == "Namespace" and .metadata.name == "builds") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$b")" = restricted ] \
         || bad "$variant: namespace builds is not restricted"
       if grep -nE '\| *kubectl apply' "$b" | grep -v -- '--server-side' | grep -q .; then bad "$variant: a client-side kubectl apply in builds"; fi
-      ok "$variant: builds component complete"
+      ok "$variant: builds component complete, kpack clones with $source_secret"
     else
       bad "$variant: components/builds built nothing"
     fi
@@ -635,15 +649,17 @@ done
 # such a cluster's gitops repo hydrates to the same files when this lands. A
 # backup bucket without the stores, and Gitea as the forge without a build
 # registry, change only the infrared Application, which carries them (checked
-# above for the gitea variant).
+# above for the gitea variant), and Gitea the builds component's README, which
+# describes the org's forge and holds no objects. Changes are comma-separated.
 infrared_app=registry/clusters/demo/components/infrared.yaml
 for v in "traefik - -edge traefik" \
     "traefik-facts - -platform-domain preprod.example.com -infrared-host infrared.example.com -cloud aws -substrate-capable" \
     "traefik-linode - -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
     "backup-alone $infrared_app -backup {\"bucket\":\"$backup_bucket\",\"endpoint\":\"$backup_endpoint\"}" \
-    "gitea-alone $infrared_app -forge gitea -forge-url $gitea_url -cloud linode"; do
+    "gitea-alone components/builds/README.md,$infrared_app -forge gitea -forge-url $gitea_url -cloud linode"; do
   read -r variant changes extra <<<"$v"
   [ "$changes" = - ] && changes=""
+  changes="${changes//,/ }"
   # shellcheck disable=SC2086
   "$work/render" -out "$work/$variant" -cluster demo -flavor k3s -build-registry "" $extra >/dev/null
   changed="$({ diff -rq "$work/k3s" "$work/$variant" || true; } | sed -E "s#^Files $work/k3s/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"

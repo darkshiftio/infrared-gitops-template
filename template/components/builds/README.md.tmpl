@@ -19,9 +19,14 @@ on the management cluster. The `builds` Application (sync wave 26, right after
 | ClusterStore `paketo` | Paketo `go`, `nodejs` and `web-servers` buildpacks, pinned by tag and digest. |
 | ClusterStack `noble` | Paketo's Ubuntu 24.04 build and run images, pinned. |
 | ClusterBuilder `infrared-builder` | Order `go`, `web-servers`, `nodejs`; pushed to `<build registry>/kpack-builder`. |
+[[- if eq .Forge "gitea" ]]
+| ServiceAccount `builds/builder` | What builds and the ClusterBuilder run as; lists `registry-push` and `gitea-git`. |
+| CronJob `build-credentials/ecr-login` | ECR only: every 6h (and once per sync) writes `builds/registry-push` from the node's IAM role. |
+[[- else ]]
 | ServiceAccount `builds/builder` | What builds and the ClusterBuilder run as; lists `registry-push` and `github-git`. |
 | CronJob `build-credentials/ecr-login` | ECR only: every 6h (and once per sync) writes `builds/registry-push` from the node's IAM role. |
 | CronJob `builds/github-token` | Every 45m (and once per sync) writes `builds/github-git` and `builds/git-credentials` from Infrared's GitHub App for the org. |
+[[- end ]]
 
 ## Registry credentials
 
@@ -48,7 +53,16 @@ on push. Create `<build registry>/kpack-builder` (the builder image) and one
 `<build registry>/<product>` per product.
 
 ## Source credentials
-
+[[ if eq .Forge "gitea" ]]
+The org's repos are on Gitea, at `[[ .ForgeURL ]]`. kpack clones with
+`builds/gitea-git`: `kubernetes.io/basic-auth`, the org's bot user with its
+read-only token as the password, annotation `kpack.io/git: [[ .ForgeURL ]]`.
+The operator writes it from the org's GitProvider `gitea` (Secret `gitea`,
+key `read-token`, in namespace `ir-org-[[ .OrgName ]]`) once this namespace
+exists, so nothing here makes a token, and there is no `github-token` job.
+A build that fetches private dependencies itself has no `git-credentials`
+binding on Gitea yet.
+[[- else ]]
 `github-token` signs a JWT for Infrared's own GitHub App for the org (App ID
 and installation ID from the GitProvider `github`, private key from Secret
 `github-app`, key `private-key.pem`, both in namespace
@@ -65,6 +79,7 @@ and installation ID from the GitProvider `github`, private key from Secret
 The App must be installed on the repositories a product builds from. Until
 the org's App is installed (no installation ID yet) the job logs a notice and
 succeeds; the next run picks it up.
+[[- end ]]
 
 ## What a product adds
 
@@ -86,7 +101,7 @@ spec:
     name: infrared-builder
   source:
     git:
-      url: https://github.com/<owner>/<repo>
+      url: [[ if eq .Forge "gitea" ]][[ .ForgeURL ]]/<owner>/<repo>.git[[ else ]]https://github.com/<owner>/<repo>[[ end ]]
       revision: main
   build:
     # Only when the build fetches private dependencies itself.

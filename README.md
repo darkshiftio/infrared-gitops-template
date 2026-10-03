@@ -76,9 +76,10 @@ The zero value of every newer field renders exactly the files the template
 rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled` and
 `.Forge` turn anything on or off: a Traefik cluster that carries
 `spec.previews` by hand, on any cloud, renders the same files as one without
-(`make verify` checks it). A `.Backup` without the stores, and `.Forge` `gitea`,
-change only what the `infrared` Application carries (see "The install's
-settings"). `.Cloud` only picks the StorageClass of the Postgres volume, when
+(`make verify` checks it). A `.Backup` without the stores changes only what the
+`infrared` Application carries (see "The install's settings"); `.Forge` `gitea`
+turns Gitea on there and, with builds on, swaps GitHub's token job for the
+operator's `gitea-git` (see "Builds"). `.Cloud` only picks the StorageClass of the Postgres volume, when
 `.Stores` is on, and of Gitea's, for `.Forge` `gitea` (Linode's Retain class on
 `linode`); `.SubstrateCapable` switches nothing yet, it is for Substrate.
 
@@ -218,6 +219,13 @@ only, node IAM role, every 6h) writes `builds/registry-push`, and
 org creates `builds/registry-push` itself. With `.BuildRegistry` empty, every
 file of the component and `builds.yaml` render to a comment only.
 `components/builds/README.md` is the operator's and org's reference.
+
+With `.Forge` `gitea` the org's repos are on Gitea: there is no `github-token`
+job and no ConfigMap of its scripts, and the builder lists `gitea-git` where it
+listed `github-git`. The operator writes `builds/gitea-git` once the namespace
+exists: `kubernetes.io/basic-auth`, the org's bot user with its read-only token
+as the password, annotation `kpack.io/git: <ForgeURL>`. A product's kpack Image
+clones `<ForgeURL>/<owner>/<repo>.git`.
 
 The `infrared` Application passes `builds.registry: .BuildRegistry` to the
 chart, so Argo CD's render keeps the operator's `INFRARED_BUILD_REGISTRY`.

@@ -10,17 +10,23 @@ kind: Kustomization
 resources:
   - namespaces.yaml
   - builder.yaml
+[[- if ne .Forge "gitea" ]]
   - github-token.yaml
+[[- end ]]
 [[- if contains ".dkr.ecr." .BuildRegistry ]]
   - ecr-login.yaml
 [[- end ]]
+[[- if or (ne .Forge "gitea") (contains ".dkr.ecr." .BuildRegistry) ]]
 configMapGenerator:
+[[- end ]]
+[[- if ne .Forge "gitea" ]]
   - name: github-token-scripts
     namespace: builds
     files:
       - scripts/github-app.sh
       - scripts/github-jwt.sh
       - scripts/github-token.sh
+[[- end ]]
 [[- if contains ".dkr.ecr." .BuildRegistry ]]
   - name: ecr-login-scripts
     namespace: build-credentials
