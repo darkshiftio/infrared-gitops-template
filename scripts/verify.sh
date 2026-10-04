@@ -80,12 +80,17 @@
 #     codeIndex.enabled: its Application (wave 41, layer infrared, namespace
 #     code-index under Pod Security restricted); one replica replaced not
 #     rolled, both containers not root on a read-only filesystem, the image the
-#     pin names, the cache on an emptyDir, the install's ConfigMap and Secret
+#     pin names, the cache on an emptyDir, its settings and credential Secrets
 #     optional; the Service code-index on 8080; a NetworkPolicy that admits
-#     infrared-api's pods alone; with a pull secret, its copy through
-#     infrared-platform, which then admits code-index, and the wait for that
-#     store; the infrared Application carrying codeIndex; and without both, no
-#     object of it, and the pin alone changes nothing
+#     infrared-api's pods alone; its record and its GitHub App copied from the
+#     install's infrared-platform-tokens through infrared-platform, which then
+#     admits code-index, after a wait for that store; with a pull secret, its
+#     copy too; the infrared Application carrying codeIndex and
+#     platformTokens.existingSecret; and without both, no object of it, and the
+#     pin alone changes nothing
+#   - metrics: on k3s VMSingle's data on an emptyDir of 10Gi and no claim (a
+#     request of no space), on EKS its 10Gi claim as before; and nothing else
+#     in the stack asks for a claim
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys; without one, no backup object
@@ -217,7 +222,8 @@ yq -p json -o json '.Disabled += ["substrate-test-actors"]' "$work/substrate.jso
 # Infrared's own (INFRARED_IMAGES, code-index), as the Infrared chart hands it
 # over with codeIndex.enabled, the one install's shape with the code index; the
 # gateway's Data with it and no pull secret; and below, on Traefik with a pull
-# secret and nothing else.
+# secret and nothing else, and with nothing else at all, where the code index
+# alone brings the store infrared-platform.
 ci_tag=one-install-0123456
 ci_digest=sha256:00000000000000000000000000000000000000000000000000000000000000c1
 ci_images="{\"code-index\":{\"tag\":\"$ci_tag\",\"digest\":\"$ci_digest\"}}"
@@ -255,6 +261,7 @@ variants=(
   "code-index demo-ci k3s $zot_registry -data $work/code-index.json"
   "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
   "code-index-pull demo-cq k3s - -image-registry ghcr.io/demo-org -pull-secret ghcr-pull -images $ci_images"
+  "code-index-nopull demo-cy k3s - -image-registry ghcr.io/demo-org -images $ci_images"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -442,6 +449,25 @@ for v in "${variants[@]}"; do
   else
     [ "$alb" = 0 ] && ok "$variant: aws-load-balancer-controller absent" || bad "$variant: aws-load-balancer-controller rendered"
   fi
+  # Metrics: on k3s VMSingle's data is on an emptyDir of 10Gi, named data, and
+  # its claim asks for no space, which the operator makes no claim for (a null
+  # would not survive an apply of the Application); on EKS its 10Gi claim of
+  # the default class, as before. Nothing else in the stack asks for a claim:
+  # Grafana's persistence, Alertmanager's storage and vmagent's stateful mode
+  # stay off.
+  vm="$reg/components/victoria-metrics-k8s-stack.yaml"
+  if holds_objects "$vm"; then
+    vmsingle="$(yq -o json -I0 '.spec.source.helm.valuesObject.vmsingle.spec | {"storage": .storage, "volumes": .volumes}' "$vm")"
+    if [ "$flavor" = k3s ]; then
+      want_vm='{"storage":{"resources":{"requests":{"storage":"0"}}},"volumes":[{"name":"data","emptyDir":{"sizeLimit":"10Gi"}}]}'
+    else
+      want_vm='{"storage":{"resources":{"requests":{"storage":"10Gi"}}},"volumes":null}'
+    fi
+    [ "$vmsingle" = "$want_vm" ] \
+      && [ "$(yq -r '.spec.source.helm.valuesObject | [(.grafana.persistence.enabled // false), (.alertmanager.spec.storage // "none"), (.vmagent.spec.statefulMode // false), (.vmagent.spec.statefulStorage // "none")] | join(" ")' "$vm")" = "false none false none" ] \
+      && ok "$variant: VMSingle's data $([ "$flavor" = k3s ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
+      || bad "$variant: VMSingle's storage is $vmsingle, want $want_vm, or another part of the stack asks for a claim"
+  fi
   if [ -n "$pull_secret" ]; then
     [ "$(yq -r '.spec.sources[0].helm.valuesObject.imagePullSecrets[0].name' "$reg/components/infrared.yaml")" = "$pull_secret" ] \
       || bad "$variant: imagePullSecrets not rendered into the infrared Application"
@@ -465,7 +491,7 @@ for v in "${variants[@]}"; do
     && want="${want}backup: {bucket: \"$carried_backup\"${endpoint:+, endpoint: \"$endpoint\"}${region:+, region: \"$region\"}}"$'\n'
   [ "$carried_disabled" != "[]" ] && want="${want}components: {disabled: $carried_disabled}"$'\n'
   [ "$stores" = true ] && [ -n "$zot_addr" ] && [ "$test_actors" = true ] && want="${want}substrate: {testActors: true}"$'\n'
-  [ "$code_index" = true ] && want="${want}codeIndex: {enabled: true, image: {tag: \"$pin_tag\", digest: \"$pin_digest\"}}"$'\n'
+  [ "$code_index" = true ] && want="${want}codeIndex: {enabled: true, image: {tag: \"$pin_tag\", digest: \"$pin_digest\"}}"$'\n'"platformTokens: {existingSecret: infrared-platform-tokens}"$'\n'
   if [ "$forge" = gitea ]; then
     gitea_class=""
     [ "$cloud" = linode ] && gitea_class=", persistence: {storageClass: linode-block-storage-retain}"
@@ -477,7 +503,7 @@ for v in "${variants[@]}"; do
   [ "$copies_app" != "{}" ] && want="${want}copies: $copies_app"$'\n'
   want="$(yq -o json -I0 'sort_keys(..)' <<<"${want:-"{}"}")"
   got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject
-      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|copies|substrate|codeIndex)$"))) | sort_keys(..)' \
+      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|copies|substrate|codeIndex|platformTokens)$"))) | sort_keys(..)' \
     "$reg/components/infrared.yaml")"
   [ "$got" = "$want" ] && ok "$variant: infrared Application carries the install's settings: $got" \
     || bad "$variant: infrared Application carries $got, want $want"
@@ -686,9 +712,10 @@ for v in "${variants[@]}"; do
       [ "$test_actors" = true ] && want_ns="$want_ns registry"
       want_names="$want_names $pull_secret:get"
     fi
-    # The code index's pull secret, for the namespace code-index.
+    # The code index's record and credential, and its pull secret, for the
+    # namespace code-index.
+    [ "$code_index" = true ] && want_ns="$want_ns code-index"
     if [ "$ci_pull" = true ]; then
-      want_ns="$want_ns code-index"
       grep -qw -- "$pull_secret:get" <<<"$want_names" || want_names="$want_names $pull_secret:get"
     fi
     [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
@@ -717,9 +744,9 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$app" '.spec.sources[0].helm.valuesObject.gitops.templateVersion')" = "$(yq -p json -r '.templateVersion' "$data_file")" ] \
       && ok "$variant: a commit SHA renders as a string" || bad "$variant: the template version SHA is not a YAML string"
   else
-    if [ -n "$backup" ] || { [ "$substrate" = true ] && [ -n "$pull_secret" ]; } || [ "$ci_pull" = true ]; then
-      # The platform's tokens, for the backups alone, or for Substrate's or the
-      # code index's pull secret alone.
+    if [ -n "$backup" ] || { [ "$substrate" = true ] && [ -n "$pull_secret" ]; } || [ "$code_index" = true ]; then
+      # The platform's tokens, for the backups alone, for Substrate's pull
+      # secret, or for the code index's record, credential and pull secret.
       edge_files="$(grep -v platform-tokens <<<"$edge_files")"
       t="$work/$variant-built/platform-tokens.yaml"
       want_ns="${backup:+stores}"
@@ -729,15 +756,15 @@ for v in "${variants[@]}"; do
         [ "$test_actors" = true ] && want_ns="$want_ns registry"
         want_names="$want_names $pull_secret:get"
       fi
+      [ "$code_index" = true ] && want_ns="${want_ns:+$want_ns }code-index"
       if [ "$ci_pull" = true ]; then
-        want_ns="${want_ns:+$want_ns }code-index"
         grep -qw -- "$pull_secret:get" <<<"$want_names" || want_names="$want_names $pull_secret:get"
       fi
       [ "$(sel "$reg/components/platform-tokens.yaml" '.metadata.name')" = platform-tokens ] \
         && [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
         && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "$want_names" ] \
         && ok "$variant: ClusterSecretStore infrared-platform reads $want_names, for $want_ns alone" \
-        || bad "$variant: the platform's tokens are not there for the backups or a pull secret"
+        || bad "$variant: the platform's tokens are not there for the backups, a pull secret or the code index"
     fi
     left="$(for f in $edge_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: the edge is not a Gateway, no edge objects" || bad "$variant: edge objects rendered without Edge gateway: $left"
@@ -1287,7 +1314,7 @@ for v in "${variants[@]}"; do
       && [ "$(line "$b" "$d | .spec.template.spec | (.securityContext.runAsNonRoot, .securityContext.seccompProfile.type, .automountServiceAccountToken)")" = "true RuntimeDefault false" ] \
       && [ "$(sel "$b" "$d | .spec.template.spec.containers[] | [.securityContext.readOnlyRootFilesystem, .securityContext.allowPrivilegeEscalation, .securityContext.capabilities.drop[0], (.resources.limits.memory != null)] | join(\" \")" | grep -v '^$' | sort -u)" = "true false ALL true" ] \
       && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"cache\") | .emptyDir.sizeLimit")" = 40Gi ] \
-      && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"settings\" or .name == \"credentials\") | (.configMap.name // .secret.secretName) + \":\" + ((.configMap.optional // .secret.optional) | tostring)")" = "code-index:true code-index-credentials:true" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"settings\" or .name == \"credentials\") | (.configMap.name // .secret.secretName) + \":\" + ((.configMap.optional // .secret.optional) | tostring)")" = "code-index-settings:true code-index-credentials:true" ] \
       && [ "$(sel "$b" "$d | .spec.template.spec.containers[] | select(.name == \"code\") | .readinessProbe.httpGet.path + \" \" + (.ports[0].containerPort | tostring)")" = "/readyz 8080" ] \
       && [ "$(line "$b" "$d | .spec.template.spec.containers[] | select(.name == \"zoekt\") | .args[]")" = "zoekt-webserver -index /cache/index -listen 127.0.0.1:6070" ] \
       && ok "$variant: the code index runs one replica, not root, read-only, from $want_image, its cache on an emptyDir, Zoekt on the pod's loopback" \
@@ -1299,17 +1326,29 @@ for v in "${variants[@]}"; do
         = "Ingress 1 infrared app.kubernetes.io/component=api,app.kubernetes.io/name=infrared 8080" ] \
       && ok "$variant: Service code-index on 8080, which only infrared-api's pods reach" \
       || bad "$variant: the code index's Service or NetworkPolicy is wrong"
+    # Its record and its GitHub App: copied from the install's
+    # infrared-platform-tokens, key for key, into the two Secrets the pod
+    # mounts, in wave -1 after a wait for the store.
+    es() { line "$b" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$1\") | (.metadata.namespace, .metadata.annotations[\"argocd.argoproj.io/sync-wave\"],
+        .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name, .spec.target.name, .spec.target.creationPolicy,
+        (.spec.data[] | .secretKey + \"<\" + .remoteRef.key + \"/\" + .remoteRef.property))"; }
+    [ "$(es code-index-settings)" = "code-index -1 ClusterSecretStore/infrared-platform code-index-settings Owner knowledge-url<infrared-platform-tokens/code-index-knowledge-url knowledge-ref<infrared-platform-tokens/code-index-knowledge-ref" ] \
+      && [ "$(es code-index-credentials)" = "code-index -1 ClusterSecretStore/infrared-platform code-index-credentials Owner github-app-id<infrared-platform-tokens/code-index-github-app-id github-app-installation-id<infrared-platform-tokens/code-index-github-app-installation-id github-app-private-key<infrared-platform-tokens/code-index-github-app-private-key" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.containers[] | select(.name == \"code\") | [(.env[] | select(.name == \"CODEINDEX_SETTINGS\" or .name == \"CODEINDEX_CREDENTIALS\") | .value), (.volumeMounts[] | select(.name == \"settings\" or .name == \"credentials\") | .mountPath)] | join(\" \")")" \
+        = "/etc/code-index/settings /etc/code-index/credentials /etc/code-index/settings /etc/code-index/credentials" ] \
+      && [ "$(sel "$b" 'select(.kind == "Job" and .metadata.name == "code-index-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_STORES") | .value)')" = "PreSync infrared-platform" ] \
+      && ok "$variant: the code index's record and GitHub App copied from infrared-platform-tokens into code-index-settings and code-index-credentials, after a wait for the store" \
+      || bad "$variant: the code index's record or credential is not copied from the install's Secret, or not mounted where it reads them"
     if [ "$ci_pull" = true ]; then
       [ "$(sel "$b" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$pull_secret\") | .metadata.namespace + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] + \" \" + .spec.secretStoreRef.name + \" \" + .spec.dataFrom[0].extract.key + \" \" + .spec.target.template.type")" \
           = "code-index -1 infrared-platform $pull_secret kubernetes.io/dockerconfigjson" ] \
         && [ "$(sel "$b" "$d | .spec.template.spec.imagePullSecrets[].name")" = "$pull_secret" ] \
-        && [ "$(sel "$b" 'select(.kind == "Job" and .metadata.name == "code-index-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_STORES") | .value)')" = "PreSync infrared-platform" ] \
-        && ok "$variant: the code index pulls with $pull_secret, copied through infrared-platform after a wait for it" \
+        && ok "$variant: the code index pulls with $pull_secret, copied through infrared-platform" \
         || bad "$variant: the code index's pull secret is not copied, or not used"
     else
-      [ -z "$(sel "$b" 'select(.kind == "ExternalSecret" or .kind == "Job") | .metadata.name')" ] \
+      [ "$(sel "$b" 'select(.kind == "ExternalSecret") | .metadata.name' | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ $//')" = "code-index-credentials code-index-settings" ] \
         && [ -z "$(sel "$b" "$d | .spec.template.spec.imagePullSecrets // \"\"")" ] \
-        && ok "$variant: no pull secret named, so none copied and no wait" || bad "$variant: a pull secret or a wait without a pull secret"
+        && ok "$variant: no pull secret named, so none copied" || bad "$variant: a pull secret copied or used without a pull secret named"
     fi
   else
     left="$(for f in $ci_files; do holds_objects "$f" && echo "$f"; done || true)"
