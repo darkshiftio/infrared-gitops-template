@@ -55,7 +55,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.PlatformDomain` | `` or `preprod.example.com` | the Installation's `spec.previews.domain`; in gateway mode zones answer at `<zone>.<PlatformDomain>` |
 | `.InfraredHost` | `` or `infrared.preprod.example.com` | the host of the Installation's `spec.previews.signInURL`, lowercase, no port; in gateway mode Infrared's own name |
 | `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
-| `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`; empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
+| `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`, and `code-index`, which the chart hands on only with `codeIndex.enabled` (see "The code index"); empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores") |
@@ -158,6 +158,7 @@ set, so a cluster without it renders the same file as before:
 | `.Registry` | `registry.address` |
 | `.Copies`, each field that is set | `copies` (`recipients`, and each of `postgres`, `mirror`, `objects`, `gitea` with its `schedule` and `retention`) |
 | `.RegistryRetention`, each field that is set | `registry.retention` (`untaggedAfter`, `keepTags`, `keepNewest`, `gcInterval`, `gcDelay`) |
+| `.Images` `code-index`, with `.ImageRegistry` | `codeIndex: {enabled: true, image: {tag, digest}}` (see "The code index") |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -225,6 +226,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
+| 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
 | 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
 
 Every component Application has a sync wave, `SkipDryRunOnMissingResource=true`
@@ -262,7 +264,7 @@ whose value is not a layer the API knows.
 
 | # | Layer (label value) | Applications, by wave | What else the API reads |
 |---|---|---|---|
-| 1 | Infrared (`infrared`) | `infrared` (40), sync only | the chart's operator, api, ui and mcp Deployments |
+| 1 | Infrared (`infrared`) | `infrared` (40), sync only; `code-index` (41) | the chart's operator, api, ui and mcp Deployments |
 | 2 | Version control (`version-control`) | none | Gitea's Deployment, from the chart (`gitea.enabled`) |
 | 3 | GitOps (`gitops`) | `registry-<cluster>`, `appprojects` (0), `argocd` (100) | Argo CD's application controller and repo server |
 | 4 | Secrets (`secrets`) | `external-secrets` (10), `platform-tokens` (11), `infisical` (15), `stores-credentials` (19) | |
@@ -295,7 +297,7 @@ layer:
 | 20 to 23 | the registry inside the cluster, and Agent Substrate |
 | 25 to 26 | builds |
 | 30 | observability |
-| 40 | Infrared adopting itself |
+| 40 to 41 | Infrared adopting itself, then its code index |
 | 100 | Argo CD managing itself |
 
 ### Builds
@@ -665,6 +667,36 @@ new atelet DaemonSet and a new node label; the hooks label only nodes without
 one, as `ate-setup` does, so an upgrade moves the nodes' label and the workers
 by hand until upgrades are a version bump. The API's two replicas aside, the
 router, the egress gateway and the pod-certificate controller are one pod each.
+
+### The code index
+
+With the code index's pin in `.Images` (key `code-index`) and `.ImageRegistry`
+set, the template runs Infrared's code index: Zoekt and the code service in one
+pod, in the namespace `code-index` (Pod Security restricted), behind
+infrared-api's code endpoints. The Infrared chart hands that pin to the operator
+only with its value `codeIndex.enabled`, so the code index is off unless the
+install turns it on, and without the pin every file of it renders to comments
+only. The `code-index` Application is wave 41, right after Infrared (40), in
+the layer `infrared`.
+
+| Object | What |
+|---|---|
+| Deployment `code-index` | One replica, replaced and never rolled (strategy `Recreate`), from `<ImageRegistry>/infrared-codeindex:<tag>@<digest>`. Two containers of that image, both not root on a read-only filesystem: the code service on 8080 and `zoekt-webserver` on the pod's loopback address. Ready once the first wave is indexed; `progressDeadlineSeconds` is an hour, so the first index never reads as stuck |
+| Service `code-index` | `http://code-index.code-index.svc:8080`, the address infrared-api calls by default |
+| NetworkPolicy `code-index` | Admits only infrared-api's pods (namespace `.InfraredNamespace`, `app.kubernetes.io/name: infrared`, `app.kubernetes.io/component: api`), on 8080. The code service has no authentication of its own |
+| Its cache | An `emptyDir` of up to 40Gi: the mirrors and the shards, rebuilt from upstream whenever the pod starts, and never backed up |
+| ExternalSecret `<ImagePullSecret>` (wave -1) and the hook `code-index-wait` (PreSync) | With an `.ImagePullSecret`: its image is private, so it pulls with a copy of the install's pull secret through the store `infrared-platform`, which then admits `code-index`, after a wait for that store |
+
+Its settings are the install's, never this repo's, because they name a stack:
+the ConfigMap `code-index` names its record (`knowledge-url` and
+`knowledge-ref`, or the manifest and the repo cards themselves), and the
+Secret `code-index-credentials`, when there is one, holds the credential it
+reads private repositories with. Both are optional: the pod starts without
+them and says at `/readyz` what it lacks. The `infrared` Application carries
+`codeIndex: {enabled: true, image: ...}` while the pin is there, so adoption
+keeps the code index on (see "The install's settings"). Removing the
+Application, or naming `code-index` in `.Disabled`, removes the code index and
+nothing else.
 
 ### Order on a fresh cluster
 
