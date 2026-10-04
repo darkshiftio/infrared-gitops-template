@@ -58,7 +58,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`, and `code-index`, which the chart hands on only with `codeIndex.enabled` (see "The code index"); empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
-| `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores") |
+| `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores"), and on k3s keeps VMSingle's metrics on an `emptyDir` (see "Metrics with the stores") |
 | `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1"}` | the operator's `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty |
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"), and `substrate-test-actors`, Substrate's test actors (see "Agent Substrate"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 | `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
@@ -224,7 +224,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 23 | `substrate-actors` (the same) | `components/substrate-actors` | the same, images by digest |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
-| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; on k3s VMSingle keeps its data on an `emptyDir` of up to 10Gi, on EKS on a 10Gi claim of the default class (see "Metrics on k3s") | 0.95.0 (operator v0.75.0) |
+| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi (see "Metrics with the stores") | 0.95.0 (operator v0.75.0) |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
 | 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
@@ -711,13 +711,16 @@ of the chart never makes that Secret again, even with the record in the org's
 values file (see "The install's settings"). Removing the Application, or naming
 `code-index` in `.Disabled`, removes the code index and nothing else.
 
-### Metrics on k3s
+### Metrics with the stores
 
 The `victoria-metrics-k8s-stack` Application runs VictoriaMetrics' single node
-(VMSingle), with 30 days' retention. On k3s the default StorageClass,
-`local-path`, keeps a claim on one node's disk: once that node is lost, the pod
-stays Pending until a person deletes the claim. So on k3s VMSingle keeps its
-data on the pod's own disk instead, an `emptyDir` of up to 10Gi:
+(VMSingle), with 30 days' retention, on a 10Gi claim of the default class. With
+`.Stores` the cluster is several servers, each with its own disk, and is built
+to lose one: SeaweedFS keeps every file on two of them. There, on k3s, the
+default class, `local-path`, would keep VMSingle's claim on one server's disk,
+and once that server is lost the pod stays Pending until a person deletes the
+claim. So on k3s with the stores VMSingle keeps its data on the pod's own disk
+instead, an `emptyDir` of up to 10Gi:
 
 - `storage.resources.requests.storage: "0"`: the VictoriaMetrics operator
   (v0.75.0, from the chart) makes no claim for a request of no space. A `null`
@@ -728,10 +731,12 @@ data on the pod's own disk instead, an `emptyDir` of up to 10Gi:
 
 The metrics start empty after a node loss or a pod restart, and a pod that
 outgrows 10Gi is evicted and starts empty. Grafana, vmagent and Alertmanager
-keep nothing on a claim either. On EKS, whose default class is a volume that
-follows the pod within its zone, VMSingle keeps its 10Gi claim, as before. A
-k3s cluster hydrated from an older template keeps its old claim, which nothing
-uses once VMSingle has moved: the operator never deletes it, so a person does
+keep nothing on a claim either. Without the stores VMSingle keeps its claim, as
+before: on one k3s server, whose disk is the cluster's own, the claim keeps 30
+days of metrics across pod restarts, and on EKS the default class is a volume
+that follows the pod within its zone. A cluster with the stores hydrated from an
+older template keeps its old claim, which nothing uses once VMSingle has moved:
+the operator never deletes it, so a person does
 (`kubectl -n monitoring delete pvc vmsingle-victoria-metrics-k8s-stack`).
 
 ### Order on a fresh cluster

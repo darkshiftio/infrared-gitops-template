@@ -152,7 +152,7 @@ products/                  yours: one directory per product (see "Products")
 | 26 | `builds` | ClusterBuilder `infrared-builder` and build credentials; pushes to `[[ .BuildRegistry ]]` |
 [[- end ]]
 [[- if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
-| 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana[[ if eq .ClusterFlavor "k3s" ]]. The metrics are on the pod's own disk, so they start empty after a node loss or a pod restart[[ end ]] |
+| 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana[[ if and (eq .ClusterFlavor "k3s") .Stores ]]. The metrics are on the pod's own disk, so they start empty after a node loss or a pod restart[[ end ]] |
 [[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
 [[- if and $codeIndex (not (contains " code-index " $disabled)) ]]
