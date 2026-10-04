@@ -158,7 +158,7 @@ set, so a cluster without it renders the same file as before:
 | `.Registry` | `registry.address` |
 | `.Copies`, each field that is set | `copies` (`recipients`, and each of `postgres`, `mirror`, `objects`, `gitea` with its `schedule` and `retention`) |
 | `.RegistryRetention`, each field that is set | `registry.retention` (`untaggedAfter`, `keepTags`, `keepNewest`, `gcInterval`, `gcDelay`) |
-| `.Images` `code-index`, with `.ImageRegistry` | `codeIndex: {enabled: true, image: {tag, digest}}` (see "The code index") |
+| `.Images` `code-index`, with `.ImageRegistry` | `codeIndex: {enabled: true, image: {tag, digest}}`, and `platformTokens.existingSecret: infrared-platform-tokens` (see "The code index") |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -206,7 +206,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.2 |
 | 10 | `external-secrets` | https://charts.external-secrets.io `external-secrets` | 2.11.0 |
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
-| 11 | `platform-tokens` (gateway, or backups) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
+| 11 | `platform-tokens` (gateway, backups, Substrate's pull secret, or the code index) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
 | 11 | `envoy-gateway` (gateway only) | `docker.io/envoyproxy` `gateway-crds-helm` (its own CRDs) and `gateway-helm` | v1.9.2 |
 | 11 | `origin-ca-issuer` (gateway only) | `ghcr.io/cloudflare/origin-ca-issuer-charts` `origin-ca-issuer`, CRDs from https://github.com/cloudflare/origin-ca-issuer `deploy/crds` | chart 0.6.10, v0.15.0 |
 | 12 | `external-dns` (gateway only) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
@@ -224,7 +224,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 23 | `substrate-actors` (the same) | `components/substrate-actors` | the same, images by digest |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
-| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/ | 0.95.0 |
+| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; on k3s VMSingle keeps its data on an `emptyDir` of up to 10Gi, on EKS on a 10Gi claim of the default class (see "Metrics on k3s") | 0.95.0 (operator v0.75.0) |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
 | 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
@@ -355,7 +355,7 @@ it renders to a comment only otherwise.
 
 | Application | What |
 |---|---|
-| `platform-tokens` | ClusterSecretStore `infrared-platform` (Kubernetes provider) reading the Secret `infrared-platform-tokens` in `.InfraredNamespace`, which the Infrared chart keeps, as ServiceAccount `platform-tokens-reader` (get on that one Secret). `conditions` limit it to the namespaces below. With Agent Substrate and an `.ImagePullSecret`, it also reads that Secret, for Substrate's namespaces (see "Agent Substrate"), and renders even without a Gateway. |
+| `platform-tokens` | ClusterSecretStore `infrared-platform` (Kubernetes provider) reading the Secret `infrared-platform-tokens` in `.InfraredNamespace`, which the Infrared chart keeps, as ServiceAccount `platform-tokens-reader` (get on that one Secret). `conditions` limit it to the namespaces below. With Agent Substrate and an `.ImagePullSecret`, it also reads that Secret, for Substrate's namespaces (see "Agent Substrate"), and renders even without a Gateway; so it does with the code index, for whose namespace it copies the install's record and credential (see "The code index"). |
 | `envoy-gateway` | Envoy Gateway's CRDs and controller. The Gateway API CRDs are the cluster's (k3s ships them) and are never installed here. |
 | `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. |
 | `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. |
@@ -685,18 +685,54 @@ the layer `infrared`.
 | Service `code-index` | `http://code-index.code-index.svc:8080`, the address infrared-api calls by default |
 | NetworkPolicy `code-index` | Admits only infrared-api's pods (namespace `.InfraredNamespace`, `app.kubernetes.io/name: infrared`, `app.kubernetes.io/component: api`), on 8080. The code service has no authentication of its own |
 | Its cache | An `emptyDir` of up to 40Gi: the mirrors and the shards, rebuilt from upstream whenever the pod starts, and never backed up |
-| ExternalSecret `<ImagePullSecret>` (wave -1) and the hook `code-index-wait` (PreSync) | With an `.ImagePullSecret`: its image is private, so it pulls with a copy of the install's pull secret through the store `infrared-platform`, which then admits `code-index`, after a wait for that store |
+| ExternalSecrets `code-index-settings` and `code-index-credentials` (wave -1) and the hook `code-index-wait` (PreSync) | Its record and its credential, copied from the install's Secret `infrared-platform-tokens` through the store `infrared-platform`, which then admits `code-index`, after a wait for that store (below) |
+| ExternalSecret `<ImagePullSecret>` (wave -1) | With an `.ImagePullSecret`: its image is private, so it pulls with a copy of the install's pull secret through the same store |
 
-Its settings are the install's, never this repo's, because they name a stack:
-the ConfigMap `code-index` names its record (`knowledge-url` and
-`knowledge-ref`, or the manifest and the repo cards themselves), and the
-Secret `code-index-credentials`, when there is one, holds the credential it
-reads private repositories with. Both are optional: the pod starts without
-them and says at `/readyz` what it lacks. The `infrared` Application carries
-`codeIndex: {enabled: true, image: ...}` while the pin is there, so adoption
-keeps the code index on (see "The install's settings"). Removing the
-Application, or naming `code-index` in `.Disabled`, removes the code index and
-nothing else.
+Its settings are the install's, never this repo's, because they name a stack.
+The Infrared chart writes them into the install's Secret
+`infrared-platform-tokens` (`codeIndex.knowledge`, and the GitHub App in
+`platformTokens`), and the two ExternalSecrets copy them into `code-index`:
+
+| Key in `infrared-platform-tokens` | Copied to | Mounted at |
+|---|---|---|
+| `code-index-knowledge-url`, `code-index-knowledge-ref` | Secret `code-index-settings`, keys `knowledge-url` and `knowledge-ref`: the knowledge repository the record is read from, and its ref | `/etc/code-index/settings` (`CODEINDEX_SETTINGS`) |
+| `code-index-github-app-id`, `code-index-github-app-installation-id`, `code-index-github-app-private-key` | Secret `code-index-credentials`, keys `github-app-id`, `github-app-installation-id` and `github-app-private-key`: the GitHub App it mints read-only installation tokens from for private repositories | `/etc/code-index/credentials` (`CODEINDEX_CREDENTIALS`) |
+
+With the code index on, the chart always writes all five keys; without an App
+the App's three are empty, which the code index reads as no credential (public
+repositories only). Both mounts are optional: the pod starts without them and
+says at `/readyz` what it lacks. A change to the install's Secret arrives
+within the hour (`refreshInterval`), and the code index reads its record again
+every hour and its credential at every use, so neither needs a restart. The
+`infrared` Application carries `codeIndex: {enabled: true, image: ...}` while
+the pin is there, so adoption keeps the code index on, and
+`platformTokens.existingSecret: infrared-platform-tokens`, so Argo CD's render
+of the chart never makes that Secret again, even with the record in the org's
+values file (see "The install's settings"). Removing the Application, or naming
+`code-index` in `.Disabled`, removes the code index and nothing else.
+
+### Metrics on k3s
+
+The `victoria-metrics-k8s-stack` Application runs VictoriaMetrics' single node
+(VMSingle), with 30 days' retention. On k3s the default StorageClass,
+`local-path`, keeps a claim on one node's disk: once that node is lost, the pod
+stays Pending until a person deletes the claim. So on k3s VMSingle keeps its
+data on the pod's own disk instead, an `emptyDir` of up to 10Gi:
+
+- `storage.resources.requests.storage: "0"`: the VictoriaMetrics operator
+  (v0.75.0, from the chart) makes no claim for a request of no space. A `null`
+  would not do: an apply of the Application deletes a key set to null, and the
+  chart's own 20Gi claim would come back.
+- `volumes: [{name: data, emptyDir: {sizeLimit: 10Gi}}]`: the operator mounts
+  the volume named `data` where VictoriaMetrics keeps its data.
+
+The metrics start empty after a node loss or a pod restart, and a pod that
+outgrows 10Gi is evicted and starts empty. Grafana, vmagent and Alertmanager
+keep nothing on a claim either. On EKS, whose default class is a volume that
+follows the pod within its zone, VMSingle keeps its 10Gi claim, as before. A
+k3s cluster hydrated from an older template keeps its old claim, which nothing
+uses once VMSingle has moved: the operator never deletes it, so a person does
+(`kubectl -n monitoring delete pvc vmsingle-victoria-metrics-k8s-stack`).
 
 ### Order on a fresh cluster
 

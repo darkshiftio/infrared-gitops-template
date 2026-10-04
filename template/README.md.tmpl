@@ -152,11 +152,11 @@ products/                  yours: one directory per product (see "Products")
 | 26 | `builds` | ClusterBuilder `infrared-builder` and build credentials; pushes to `[[ .BuildRegistry ]]` |
 [[- end ]]
 [[- if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
-| 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana |
+| 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana[[ if eq .ClusterFlavor "k3s" ]]. The metrics are on the pod's own disk, so they start empty after a node loss or a pod restart[[ end ]] |
 [[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
 [[- if and $codeIndex (not (contains " code-index " $disabled)) ]]
-| 41 | `code-index` | Infrared's code index (namespace `code-index`): the repositories its record names, at their pinned commits, searchable by infrared-api alone. Its record comes from the ConfigMap `code-index`, its credential for private repositories from the Secret `code-index-credentials`, both the install's |
+| 41 | `code-index` | Infrared's code index (namespace `code-index`): the repositories its record names, at their pinned commits, searchable by infrared-api alone. Its record (the Secret `code-index-settings`) and its credential for private repositories (the Secret `code-index-credentials`) are the install's, copied from `[[ .InfraredNamespace ]]/infrared-platform-tokens` |
 [[- end ]]
 | 100 | `argocd` | Argo CD, managing itself |
 [[- $left := "" ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ if $left ]][[ $left = printf "%s, `%s`" $left . ]][[ else ]][[ $left = printf "`%s`" . ]][[ end ]][[ end ]][[ end ]]
