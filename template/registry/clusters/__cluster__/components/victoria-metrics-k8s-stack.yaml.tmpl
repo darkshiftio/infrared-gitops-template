@@ -42,10 +42,32 @@ spec:
                 memory: 256Mi
               limits:
                 memory: 1Gi
+[[- if eq .ClusterFlavor "k3s" ]]
+            # On k3s the default StorageClass, local-path, would keep the data
+            # on one node's disk, and after that node is lost the pod would
+            # stay Pending until a person deleted the claim. So the data is on
+            # the pod's own disk instead, an emptyDir of up to 10Gi, which the
+            # operator mounts where VictoriaMetrics keeps its data because it
+            # is named data. A request for no space turns off the chart's
+            # claim: the operator makes none for a zero request. (A null would
+            # not do: an apply of this file deletes the key, and the chart's
+            # 20Gi claim comes back.) The metrics start empty after a node loss
+            # or a pod restart, and a pod that outgrows the limit is evicted
+            # and starts empty.
+            storage:
+              resources:
+                requests:
+                  storage: "0"
+            volumes:
+              - name: data
+                emptyDir:
+                  sizeLimit: 10Gi
+[[- else ]]
             storage:
               resources:
                 requests:
                   storage: 10Gi
+[[- end ]]
         vmagent:
           spec:
             externalLabels:
