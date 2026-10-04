@@ -42,11 +42,14 @@ spec:
                 memory: 256Mi
               limits:
                 memory: 1Gi
-[[- if eq .ClusterFlavor "k3s" ]]
-            # On k3s the default StorageClass, local-path, would keep the data
-            # on one node's disk, and after that node is lost the pod would
-            # stay Pending until a person deleted the claim. So the data is on
-            # the pod's own disk instead, an emptyDir of up to 10Gi, which the
+[[- if and (eq .ClusterFlavor "k3s") .Stores ]]
+            # With the stores the cluster is several servers, each with its own
+            # disk, and is built to lose one: SeaweedFS keeps every file on two
+            # of them. On k3s the default StorageClass, local-path, would keep
+            # VMSingle's data on one server's disk, and after that server is
+            # lost the pod would stay Pending until a person deleted the claim.
+            # So the data is on the pod's own disk instead, an emptyDir of up
+            # to 10Gi, which the
             # operator mounts where VictoriaMetrics keeps its data because it
             # is named data. A request for no space turns off the chart's
             # claim: the operator makes none for a zero request. (A null would
