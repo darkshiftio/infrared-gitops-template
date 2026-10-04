@@ -1,0 +1,87 @@
+[[- $ci := index .Images "code-index" ]]
+[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
+# =============================================================================
+# The code index's record and credential, from the install.
+# =============================================================================
+# The Infrared chart writes both into the install's Secret
+# infrared-platform-tokens in [[ .InfraredNamespace ]] (codeIndex.knowledge and the
+# GitHub App in platformTokens), and these copy them through the ClusterSecretStore
+# infrared-platform (components/platform-tokens), whose conditions admit the
+# namespace code-index:
+#
+#   key in infrared-platform-tokens          copied to
+#   code-index-knowledge-url                 code-index-settings, knowledge-url
+#   code-index-knowledge-ref                 code-index-settings, knowledge-ref
+#   code-index-github-app-id                 code-index-credentials, github-app-id
+#   code-index-github-app-installation-id    code-index-credentials, github-app-installation-id
+#   code-index-github-app-private-key        code-index-credentials, github-app-private-key
+#
+# With the code index on, the chart always writes all five; without an App its
+# three are empty, which the code index reads as no credential (public
+# repositories only). A change to the install's Secret arrives here within the
+# hour, and the code index reads its record again every hour and its
+# credential at every use, so neither needs a restart.
+#
+# Wave -1, alone with the other copies: External Secrets' webhook admits them,
+# so they are applied, and synced, before the pod (0) that mounts their Secrets.
+# The values the API server would fill in are written out, so Argo CD compares
+# like with like.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: code-index-settings
+  namespace: code-index
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: code-index-settings
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: knowledge-url
+      remoteRef:
+        key: infrared-platform-tokens
+        property: code-index-knowledge-url
+    - secretKey: knowledge-ref
+      remoteRef:
+        key: infrared-platform-tokens
+        property: code-index-knowledge-ref
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: code-index-credentials
+  namespace: code-index
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: code-index-credentials
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: github-app-id
+      remoteRef:
+        key: infrared-platform-tokens
+        property: code-index-github-app-id
+    - secretKey: github-app-installation-id
+      remoteRef:
+        key: infrared-platform-tokens
+        property: code-index-github-app-installation-id
+    - secretKey: github-app-private-key
+      remoteRef:
+        key: infrared-platform-tokens
+        property: code-index-github-app-private-key
+[[- else -]]
+# The code index's record and credential are copied only where it runs: not
+# here, so this file holds no objects.
+[[- end ]]

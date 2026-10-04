@@ -1,5 +1,5 @@
-[[- $ci := index .Images "code-index" ]][[ $codeIndexPull := and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret ]]
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull) -]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) ]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndex) -]]
 # The platform's tokens (the `platform-tokens` Application, wave 11). See
 # store.yaml; wait.yaml holds the sync until External Secrets answers. Every
 # object names its own namespace.
@@ -9,7 +9,7 @@ resources:
   - wait.yaml
   - store.yaml
 [[- else -]]
-# The platform's tokens are copied only for the edge when it is a Gateway and
-# for the stores' backups, so this component holds no objects and no
-# Application points at it.
+# The platform's tokens are copied only for the edge when it is a Gateway, for
+# the stores' backups, for Agent Substrate's pull secret and for the code index,
+# so this component holds no objects and no Application points at it.
 [[- end ]]

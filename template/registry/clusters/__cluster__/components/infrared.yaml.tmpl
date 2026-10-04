@@ -245,6 +245,13 @@ spec:
             image:
               tag: [[ $ci.Tag | quote ]]
               digest: [[ $ci.Digest | quote ]]
+          # Its record and its GitHub App are in the install's Secret
+          # infrared-platform-tokens, which the chart writes at the install
+          # alone (codeIndex.knowledge and platformTokens). This keeps Argo CD's
+          # render from making that Secret again, whatever the org's values
+          # file says, so it never replaces the install's tokens.
+          platformTokens:
+            existingSecret: infrared-platform-tokens
 [[- end ]]
 [[- if eq .Forge "gitea" ]]
           # Gitea, the install's forge, which the chart runs. The install made

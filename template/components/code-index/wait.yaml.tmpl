@@ -1,12 +1,13 @@
 [[- $ci := index .Images "code-index" ]]
-[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret -]]
+[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 # =============================================================================
-# Before the code index: the store that copies its pull secret.
+# Before the code index: the store that copies its record and credential.
 # =============================================================================
 # On a fresh cluster every Application syncs at once (README, "Order on a fresh
 # cluster"). This PreSync hook holds the sync, for up to half an hour, until
 # External Secrets' CRDs are established and the ClusterSecretStore
-# infrared-platform is Ready: it copies the pull secret (wave -1).
+# infrared-platform is Ready: it copies the code index's record and credential
+# (settings.yaml)[[ if .ImagePullSecret ]] and its pull secret (pull-secret.yaml)[[ end ]], wave -1.
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
@@ -123,6 +124,6 @@ spec:
         - name: tmp
           emptyDir: {}
 [[- else -]]
-# The code index waits for the store that copies its pull secret only where it
-# runs with one: no wait here.
+# The code index waits for the store that copies its record and credential only
+# where it runs: no wait here.
 [[- end ]]

@@ -2,14 +2,16 @@
 [[- if and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 # Infrared's code index (the `code-index` Application, wave 41), in the
 # namespace code-index: Zoekt and the code service in one pod, its cache on the
-# pod's own disk (code-index.yaml)[[ if .ImagePullSecret ]], the pull secret for its image on the
-# install's registry (pull-secret.yaml), and the wait for the store that copies
-# it (wait.yaml)[[ end ]]. Every object names its own namespace.
+# pod's own disk (code-index.yaml); its record and its credential, copied from
+# the install's infrared-platform-tokens (settings.yaml)[[ if .ImagePullSecret ]], and the pull secret for its
+# image on the install's registry (pull-secret.yaml)[[ end ]]; and the wait for the
+# store that copies them (wait.yaml). Every object names its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-[[- if .ImagePullSecret ]]
   - wait.yaml
+  - settings.yaml
+[[- if .ImagePullSecret ]]
   - pull-secret.yaml
 [[- end ]]
   - code-index.yaml

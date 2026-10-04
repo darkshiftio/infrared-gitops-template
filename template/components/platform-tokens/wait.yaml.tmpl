@@ -1,5 +1,5 @@
-[[- $ci := index .Images "code-index" ]][[ $codeIndexPull := and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret ]]
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull) -]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) ]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndex) -]]
 # =============================================================================
 # Before the store: External Secrets' webhook answers.
 # =============================================================================
@@ -137,6 +137,7 @@ spec:
         - name: tmp
           emptyDir: {}
 [[- else -]]
-# The platform's tokens are copied only for the edge when it is a Gateway and
-# for the stores' backups: nothing to wait for.
+# The platform's tokens are copied only for the edge when it is a Gateway, for
+# the stores' backups, for Agent Substrate's pull secret and for the code index:
+# nothing to wait for.
 [[- end ]]

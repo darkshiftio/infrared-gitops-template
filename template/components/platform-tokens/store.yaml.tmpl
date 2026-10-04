@@ -1,6 +1,6 @@
 [[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
-[[- $ci := index .Images "code-index" ]][[ $codeIndexPull := and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret ]]
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull) -]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) ]][[ $codeIndexPull := and $codeIndex .ImagePullSecret ]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndex) -]]
 # =============================================================================
 # infrared-platform: the one place the platform's tokens are read from.
 # =============================================================================
@@ -19,6 +19,15 @@
 [[- if and .Stores .Backup.Bucket ]]
 #   backup-access-key-id   stores/postgres-backup (Postgres's backups) and
 #   backup-secret-access-key  stores/seaweedfs-backup (the buckets' copies)
+[[- end ]]
+[[- if $codeIndex ]]
+#   code-index-knowledge-url, code-index-knowledge-ref
+#                          code-index/code-index-settings (the code index's
+#                          record)
+#   code-index-github-app-id, code-index-github-app-installation-id,
+#   code-index-github-app-private-key
+#                          code-index/code-index-credentials (its GitHub App;
+#                          empty without one)
 [[- end ]]
 [[- if and .Stores .SubstrateCapable .Registry .ImagePullSecret ]]
 #
@@ -95,7 +104,7 @@ spec:
         - registry
 [[- end ]]
 [[- end ]]
-[[- if $codeIndexPull ]]
+[[- if $codeIndex ]]
         - code-index
 [[- end ]]
   provider:
@@ -113,6 +122,7 @@ spec:
           name: platform-tokens-reader
           namespace: [[ .InfraredNamespace ]]
 [[- else -]]
-# The platform's tokens are copied only for the edge when it is a Gateway and
-# for the stores' backups: no store.
+# The platform's tokens are copied only for the edge when it is a Gateway, for
+# the stores' backups, for Agent Substrate's pull secret and for the code index:
+# no store.
 [[- end ]]

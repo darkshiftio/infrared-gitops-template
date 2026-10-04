@@ -17,12 +17,13 @@
 # ready once the whole first wave is indexed; until then the Service has no
 # endpoint and infrared-api answers that the index is building.
 #
-# Its settings are the install's, never this repo's: the ConfigMap code-index
-# names its record (knowledge-url and knowledge-ref, or the manifest and the
-# cards themselves), and the Secret code-index-credentials, when there is one,
-# the credential it reads internal repositories with. Without the Secret it
-# reads public repositories only. Both are optional, so the pod starts without
-# them and says, at /readyz, what it lacks.
+# Its settings are the install's, never this repo's: the Secret
+# code-index-settings names its record (knowledge-url and knowledge-ref), and
+# the Secret code-index-credentials holds the credential it reads internal
+# repositories with, a GitHub App, or nothing, and then it reads public
+# repositories only. External Secrets copies both from the install's
+# infrared-platform-tokens (settings.yaml). Both mounts are optional, so the pod
+# starts without them and says, at /readyz, what it lacks.
 #
 # One replica, replaced and never rolled (strategy Recreate): a second pod would
 # build a second cache for nothing.
@@ -184,9 +185,10 @@ spec:
           emptyDir:
             sizeLimit: 1Gi
         - name: settings
-          configMap:
-            name: code-index
+          secret:
+            secretName: code-index-settings
             optional: true
+            defaultMode: 0400
         - name: credentials
           secret:
             secretName: code-index-credentials
