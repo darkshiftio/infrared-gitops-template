@@ -88,9 +88,9 @@
 #     copy too; the infrared Application carrying codeIndex and
 #     platformTokens.existingSecret; and without both, no object of it, and the
 #     pin alone changes nothing
-#   - metrics: on k3s VMSingle's data on an emptyDir of 10Gi and no claim (a
-#     request of no space), on EKS its 10Gi claim as before; and nothing else
-#     in the stack asks for a claim
+#   - metrics: on k3s with the stores VMSingle's data on an emptyDir of 10Gi
+#     and no claim (a request of no space), otherwise its 10Gi claim as before;
+#     and nothing else in the stack asks for a claim
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys; without one, no backup object
@@ -449,23 +449,25 @@ for v in "${variants[@]}"; do
   else
     [ "$alb" = 0 ] && ok "$variant: aws-load-balancer-controller absent" || bad "$variant: aws-load-balancer-controller rendered"
   fi
-  # Metrics: on k3s VMSingle's data is on an emptyDir of 10Gi, named data, and
-  # its claim asks for no space, which the operator makes no claim for (a null
-  # would not survive an apply of the Application); on EKS its 10Gi claim of
-  # the default class, as before. Nothing else in the stack asks for a claim:
-  # Grafana's persistence, Alertmanager's storage and vmagent's stateful mode
-  # stay off.
+  # Metrics: on k3s with the stores VMSingle's data is on an emptyDir of 10Gi,
+  # named data, and its claim asks for no space, which the operator makes no
+  # claim for (a null would not survive an apply of the Application); without
+  # the stores, and on EKS, its 10Gi claim of the default class, as before.
+  # Nothing else in the stack asks for a claim: Grafana's persistence,
+  # Alertmanager's storage and vmagent's stateful mode stay off.
   vm="$reg/components/victoria-metrics-k8s-stack.yaml"
   if holds_objects "$vm"; then
     vmsingle="$(yq -o json -I0 '.spec.source.helm.valuesObject.vmsingle.spec | {"storage": .storage, "volumes": .volumes}' "$vm")"
-    if [ "$flavor" = k3s ]; then
+    vm_empty=false
+    [ "$flavor" = k3s ] && [ "$stores" = true ] && vm_empty=true
+    if [ "$vm_empty" = true ]; then
       want_vm='{"storage":{"resources":{"requests":{"storage":"0"}}},"volumes":[{"name":"data","emptyDir":{"sizeLimit":"10Gi"}}]}'
     else
       want_vm='{"storage":{"resources":{"requests":{"storage":"10Gi"}}},"volumes":null}'
     fi
     [ "$vmsingle" = "$want_vm" ] \
       && [ "$(yq -r '.spec.source.helm.valuesObject | [(.grafana.persistence.enabled // false), (.alertmanager.spec.storage // "none"), (.vmagent.spec.statefulMode // false), (.vmagent.spec.statefulStorage // "none")] | join(" ")' "$vm")" = "false none false none" ] \
-      && ok "$variant: VMSingle's data $([ "$flavor" = k3s ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
+      && ok "$variant: VMSingle's data $([ "$vm_empty" = true ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
       || bad "$variant: VMSingle's storage is $vmsingle, want $want_vm, or another part of the stack asks for a claim"
   fi
   if [ -n "$pull_secret" ]; then
