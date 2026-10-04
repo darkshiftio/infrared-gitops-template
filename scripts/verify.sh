@@ -75,6 +75,17 @@
 #     them and the infrared Application, which never carries the name and
 #     carries substrate.testActors: true with the stores and a registry exactly
 #     when the name is absent
+#   - Infrared's code index, with the image registry and its pin among the
+#     images (INFRARED_IMAGES, code-index), as the chart hands it over with
+#     codeIndex.enabled: its Application (wave 41, layer infrared, namespace
+#     code-index under Pod Security restricted); one replica replaced not
+#     rolled, both containers not root on a read-only filesystem, the image the
+#     pin names, the cache on an emptyDir, the install's ConfigMap and Secret
+#     optional; the Service code-index on 8080; a NetworkPolicy that admits
+#     infrared-api's pods alone; with a pull secret, its copy through
+#     infrared-platform, which then admits code-index, and the wait for that
+#     store; the infrared Application carrying codeIndex; and without both, no
+#     object of it, and the pin alone changes nothing
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys; without one, no backup object
@@ -202,6 +213,17 @@ yq -p json -o json '. + {
 # The test actors off: Substrate's Data with substrate-test-actors among the
 # components left out, as the Infrared chart hands it over by default.
 yq -p json -o json '.Disabled += ["substrate-test-actors"]' "$work/substrate.json" >"$work/substrate-off.json"
+# The code index on: Substrate's Data with the code index's image among
+# Infrared's own (INFRARED_IMAGES, code-index), as the Infrared chart hands it
+# over with codeIndex.enabled, the one install's shape with the code index; the
+# gateway's Data with it and no pull secret; and below, on Traefik with a pull
+# secret and nothing else.
+ci_tag=one-install-0123456
+ci_digest=sha256:00000000000000000000000000000000000000000000000000000000000000c1
+ci_images="{\"code-index\":{\"tag\":\"$ci_tag\",\"digest\":\"$ci_digest\"}}"
+yq -p json -o json '.Images["code-index"] = {"tag": "'"$ci_tag"'", "digest": "'"$ci_digest"'"}' "$work/substrate.json" >"$work/code-index.json"
+yq -p json -o json '.Images["code-index"] = {"tag": "'"$ci_tag"'", "digest": "'"$ci_digest"'"} | .imagePullSecret = ""' \
+  "$work/gateway.json" >"$work/code-index-plain.json"
 yq -p json -o json '. + {"Copies": {"Recipients": ["'"$age_recipient"'"]}}' "$work/stores.json" >"$work/copies-noreg.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Postgres": {"Source": "'"$restore_source"'", "TargetTime": "'"$restore_target"'"}}}' \
   "$work/copies.json" >"$work/restore.json"
@@ -230,6 +252,9 @@ variants=(
   "copies-noreg demo-cn k3s - -data $work/copies-noreg.json"
   "restore demo-rs k3s $zot_registry -data $work/restore.json"
   "restore-plain demo-rr k3s $zot_registry -data $work/restore-plain.json"
+  "code-index demo-ci k3s $zot_registry -data $work/code-index.json"
+  "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
+  "code-index-pull demo-cq k3s - -image-registry ghcr.io/demo-org -pull-secret ghcr-pull -images $ci_images"
 )
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -287,7 +312,7 @@ for v in "${variants[@]}"; do
   # the -data variants set them. *_app is what the infrared Application carries.
   copies_recipients="[]" pg_schedule="" pg_retention="" mirror_schedule="" mirror_retention=""
   pg_server="" restoring_point="" restoring_source="" restoring_target="" copies_app="{}" retention_app="{}"
-  zot_addr="$(sed -n -E 's/.*-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
+  zot_addr="$(sed -n -E 's/(^|.* )-registry ([^ ]+).*/\2/p' <<<"${extra:-}")"
   backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
   if [ -n "$data_file" ]; then
     edge="$(yq -p json -r '.Edge // ""' "$data_file")"
@@ -338,6 +363,21 @@ for v in "${variants[@]}"; do
   carried_disabled="$(jq -c 'map(select(. != "substrate-test-actors"))' <<<"$disabled")"
   [ -n "$backup" ] && [ "$copies_recipients" != "[]" ] && copies_on=true
   [ -n "$backup" ] && [ -n "$restoring_point" ] && restoring=true
+  # The code index: on with the image registry and its pin among the images,
+  # by flag or in the -data file; with a pull secret, copied through
+  # infrared-platform.
+  image_registry="$(sed -n -E 's/.*-image-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
+  var_images="$(sed -n -E 's/.*-images ([^ ]+).*/\1/p' <<<"${extra:-}")"
+  if [ -n "$data_file" ]; then
+    image_registry="$(yq -p json -r '.ImageRegistry // ""' "$data_file")"
+    var_images="$(yq -p json -o json -I0 '.Images // {}' "$data_file")"
+  fi
+  [ -n "$var_images" ] || var_images='{}'
+  pin_tag="$(jq -r '(.["code-index"] // {}) | (.tag // .Tag // "")' <<<"$var_images")"
+  pin_digest="$(jq -r '(.["code-index"] // {}) | (.digest // .Digest // "")' <<<"$var_images")"
+  code_index=false ci_pull=false
+  if [ -n "$image_registry" ] && { [ -n "$pin_tag" ] || [ -n "$pin_digest" ]; }; then code_index=true; fi
+  [ "$code_index" = true ] && [ -n "$pull_secret" ] && ci_pull=true
 
   # Leftover template syntax, only in files that came from a .tmpl (vendored
   # upstream files are copied verbatim and are none of our business).
@@ -425,6 +465,7 @@ for v in "${variants[@]}"; do
     && want="${want}backup: {bucket: \"$carried_backup\"${endpoint:+, endpoint: \"$endpoint\"}${region:+, region: \"$region\"}}"$'\n'
   [ "$carried_disabled" != "[]" ] && want="${want}components: {disabled: $carried_disabled}"$'\n'
   [ "$stores" = true ] && [ -n "$zot_addr" ] && [ "$test_actors" = true ] && want="${want}substrate: {testActors: true}"$'\n'
+  [ "$code_index" = true ] && want="${want}codeIndex: {enabled: true, image: {tag: \"$pin_tag\", digest: \"$pin_digest\"}}"$'\n'
   if [ "$forge" = gitea ]; then
     gitea_class=""
     [ "$cloud" = linode ] && gitea_class=", persistence: {storageClass: linode-block-storage-retain}"
@@ -436,7 +477,7 @@ for v in "${variants[@]}"; do
   [ "$copies_app" != "{}" ] && want="${want}copies: $copies_app"$'\n'
   want="$(yq -o json -I0 'sort_keys(..)' <<<"${want:-"{}"}")"
   got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject
-      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|copies|substrate)$"))) | sort_keys(..)' \
+      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|copies|substrate|codeIndex)$"))) | sort_keys(..)' \
     "$reg/components/infrared.yaml")"
   [ "$got" = "$want" ] && ok "$variant: infrared Application carries the install's settings: $got" \
     || bad "$variant: infrared Application carries $got, want $want"
@@ -645,6 +686,11 @@ for v in "${variants[@]}"; do
       [ "$test_actors" = true ] && want_ns="$want_ns registry"
       want_names="$want_names $pull_secret:get"
     fi
+    # The code index's pull secret, for the namespace code-index.
+    if [ "$ci_pull" = true ]; then
+      want_ns="$want_ns code-index"
+      grep -qw -- "$pull_secret:get" <<<"$want_names" || want_names="$want_names $pull_secret:get"
+    fi
     [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
       && [ "$(sel "$t" 'select(.kind == "ClusterSecretStore") | .spec.provider.kubernetes.remoteNamespace')" = infrared ] \
       && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "$want_names" ] \
@@ -671,9 +717,9 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$app" '.spec.sources[0].helm.valuesObject.gitops.templateVersion')" = "$(yq -p json -r '.templateVersion' "$data_file")" ] \
       && ok "$variant: a commit SHA renders as a string" || bad "$variant: the template version SHA is not a YAML string"
   else
-    if [ -n "$backup" ] || { [ "$substrate" = true ] && [ -n "$pull_secret" ]; }; then
-      # The platform's tokens, for the backups alone, or for Substrate's pull
-      # secret alone.
+    if [ -n "$backup" ] || { [ "$substrate" = true ] && [ -n "$pull_secret" ]; } || [ "$ci_pull" = true ]; then
+      # The platform's tokens, for the backups alone, or for Substrate's or the
+      # code index's pull secret alone.
       edge_files="$(grep -v platform-tokens <<<"$edge_files")"
       t="$work/$variant-built/platform-tokens.yaml"
       want_ns="${backup:+stores}"
@@ -683,16 +729,22 @@ for v in "${variants[@]}"; do
         [ "$test_actors" = true ] && want_ns="$want_ns registry"
         want_names="$want_names $pull_secret:get"
       fi
+      if [ "$ci_pull" = true ]; then
+        want_ns="${want_ns:+$want_ns }code-index"
+        grep -qw -- "$pull_secret:get" <<<"$want_names" || want_names="$want_names $pull_secret:get"
+      fi
       [ "$(sel "$reg/components/platform-tokens.yaml" '.metadata.name')" = platform-tokens ] \
         && [ "$(line "$t" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
         && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "$want_names" ] \
         && ok "$variant: ClusterSecretStore infrared-platform reads $want_names, for $want_ns alone" \
-        || bad "$variant: the platform's tokens are not there for the backups or Substrate's pull secret"
+        || bad "$variant: the platform's tokens are not there for the backups or a pull secret"
     fi
     left="$(for f in $edge_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: the edge is not a Gateway, no edge objects" || bad "$variant: edge objects rendered without Edge gateway: $left"
-    [ -z "$(sel "$reg/components/infrared.yaml" '.spec.sources[0].helm.valuesObject | (.image, .operator, .api, .ui, .runner, .mcp.image) | select(. != null) | key')" ] \
-      || bad "$variant: image values rendered without the operator's image registry"
+    if [ -z "$image_registry" ]; then
+      [ -z "$(sel "$reg/components/infrared.yaml" '.spec.sources[0].helm.valuesObject | (.image, .operator, .api, .ui, .runner, .mcp.image) | select(. != null) | key')" ] \
+        || bad "$variant: image values rendered without the operator's image registry"
+    fi
   fi
 
   # The stores: all of them with Stores, none of them without.
@@ -1216,6 +1268,54 @@ for v in "${variants[@]}"; do
     [ -z "$left" ] && ok "$variant: Substrate is off, no objects of it" || bad "$variant: Substrate objects rendered without Stores, Registry and SubstrateCapable: $left"
   fi
 
+  # Infrared's code index: all of it with the image registry and its pin, none
+  # of it without.
+  ci_files="$(printf '%s\n' "$reg/components/code-index.yaml"; find "$out/components/code-index" -name '*.yaml')"
+  if [ "$code_index" = true ]; then
+    a="$reg/components/code-index.yaml" b="$work/$variant-built/code-index.yaml"
+    d='select(.kind == "Deployment" and .metadata.name == "code-index")'
+    want_image="$image_registry/infrared-codeindex${pin_tag:+:$pin_tag}${pin_digest:+@$pin_digest}"
+    [ "$(sel "$a" '[.metadata.name, .metadata.annotations["argocd.argoproj.io/sync-wave"], .metadata.labels["infrared.darkshift.io/layer"],
+          .spec.project, .spec.source.path, .spec.destination.namespace,
+          .spec.syncPolicy.managedNamespaceMetadata.labels["pod-security.kubernetes.io/enforce"]] | join(" ")')" \
+        = "code-index 41 infrared platform components/code-index code-index restricted" ] \
+      && yq -N -e '.spec.syncPolicy.syncOptions[] | select(. == "CreateNamespace=true")' "$a" >/dev/null \
+      && ok "$variant: code-index Application (wave 41, layer infrared, namespace code-index, Pod Security restricted)" \
+      || bad "$variant: the code-index Application is wrong"
+    [ "$(line "$b" "$d | (.spec.replicas, .spec.strategy.type, (.spec.template.spec.containers[].name))")" = "1 Recreate code zoekt" ] \
+      && [ "$(sel "$b" "$d | .spec.template.spec.containers[].image" | grep -v '^$' | sort -u)" = "$want_image" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec | (.securityContext.runAsNonRoot, .securityContext.seccompProfile.type, .automountServiceAccountToken)")" = "true RuntimeDefault false" ] \
+      && [ "$(sel "$b" "$d | .spec.template.spec.containers[] | [.securityContext.readOnlyRootFilesystem, .securityContext.allowPrivilegeEscalation, .securityContext.capabilities.drop[0], (.resources.limits.memory != null)] | join(\" \")" | grep -v '^$' | sort -u)" = "true false ALL true" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"cache\") | .emptyDir.sizeLimit")" = 40Gi ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"settings\" or .name == \"credentials\") | (.configMap.name // .secret.secretName) + \":\" + ((.configMap.optional // .secret.optional) | tostring)")" = "code-index:true code-index-credentials:true" ] \
+      && [ "$(sel "$b" "$d | .spec.template.spec.containers[] | select(.name == \"code\") | .readinessProbe.httpGet.path + \" \" + (.ports[0].containerPort | tostring)")" = "/readyz 8080" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.containers[] | select(.name == \"zoekt\") | .args[]")" = "zoekt-webserver -index /cache/index -listen 127.0.0.1:6070" ] \
+      && ok "$variant: the code index runs one replica, not root, read-only, from $want_image, its cache on an emptyDir, Zoekt on the pod's loopback" \
+      || bad "$variant: the code index's Deployment is wrong"
+    [ "$(line "$b" 'select(.kind == "Service" and .metadata.name == "code-index") | (.spec.type, (.spec.ports[] | (.port | tostring) + ">" + .targetPort), .spec.selector["app.kubernetes.io/name"])')" = "ClusterIP 8080>http code-index" ] \
+      && [ "$(line "$b" 'select(.kind == "NetworkPolicy" and .metadata.name == "code-index") | (.spec.policyTypes[], (.spec.ingress | length | tostring),
+          (.spec.ingress[0].from[] | (.namespaceSelector.matchLabels["kubernetes.io/metadata.name"]) + " " + (.podSelector.matchLabels | to_entries | map(.key + "=" + .value) | join(","))),
+          (.spec.ingress[0].ports[] | .port | tostring))')" \
+        = "Ingress 1 infrared app.kubernetes.io/component=api,app.kubernetes.io/name=infrared 8080" ] \
+      && ok "$variant: Service code-index on 8080, which only infrared-api's pods reach" \
+      || bad "$variant: the code index's Service or NetworkPolicy is wrong"
+    if [ "$ci_pull" = true ]; then
+      [ "$(sel "$b" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$pull_secret\") | .metadata.namespace + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] + \" \" + .spec.secretStoreRef.name + \" \" + .spec.dataFrom[0].extract.key + \" \" + .spec.target.template.type")" \
+          = "code-index -1 infrared-platform $pull_secret kubernetes.io/dockerconfigjson" ] \
+        && [ "$(sel "$b" "$d | .spec.template.spec.imagePullSecrets[].name")" = "$pull_secret" ] \
+        && [ "$(sel "$b" 'select(.kind == "Job" and .metadata.name == "code-index-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_STORES") | .value)')" = "PreSync infrared-platform" ] \
+        && ok "$variant: the code index pulls with $pull_secret, copied through infrared-platform after a wait for it" \
+        || bad "$variant: the code index's pull secret is not copied, or not used"
+    else
+      [ -z "$(sel "$b" 'select(.kind == "ExternalSecret" or .kind == "Job") | .metadata.name')" ] \
+        && [ -z "$(sel "$b" "$d | .spec.template.spec.imagePullSecrets // \"\"")" ] \
+        && ok "$variant: no pull secret named, so none copied and no wait" || bad "$variant: a pull secret or a wait without a pull secret"
+    fi
+  else
+    left="$(for f in $ci_files; do holds_objects "$f" && echo "$f"; done || true)"
+    [ -z "$left" ] && ok "$variant: the code index is off, no objects of it" || bad "$variant: code-index objects rendered without its image and registry: $left"
+  fi
+
   # Each Linode volume is a service on a limited Linode account: only the
   # Postgres Cluster and, with Forge gitea, Gitea's volume (through the infrared
   # Application's values) name Linode's volume class, so each makes one volume.
@@ -1300,7 +1400,8 @@ for v in "traefik - -edge traefik" \
     "substrate-registry-alone $infrared_app -registry $zot_registry -substrate-capable" \
     "copies-alone $infrared_app -copies {\"recipients\":[\"$age_recipient\"],\"mirror\":{\"retention\":\"10d\"}}" \
     "retention-alone $infrared_app -registry-retention {\"keepNewest\":20,\"gcDelay\":\"30m\"}" \
-    "server-name-alone - -postgres-server-name $server_name"; do
+    "server-name-alone - -postgres-server-name $server_name" \
+    "code-index-alone - -images $ci_images"; do
   read -r variant changes extra <<<"$v"
   [ "$changes" = - ] && changes=""
   changes="${changes//,/ }"
@@ -1426,7 +1527,8 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
     "stores-plain cloudnative-pg postgres seaweedfs" \
     "stores-backup platform-tokens" \
     "registry-plain stores-credentials zot" \
-    "substrate-plain substrate-crds substrate-podcert substrate substrate-actors"; do
+    "substrate-plain substrate-crds substrate-podcert substrate substrate-actors" \
+    "code-index-pull code-index"; do
   read -r base names <<<"$v"
   for name in $names; do
     out="$work/disabled-$base-$name"
