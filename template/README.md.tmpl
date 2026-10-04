@@ -2,6 +2,7 @@
 [[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -25,6 +26,9 @@ components/
   appprojects/             AppProjects platform and infrared
   argocd/                  Argo CD, vendored and pinned; Argo CD manages itself from here
   builds/                  kpack builder and build credentials[[ if not .BuildRegistry ]] (off: no build registry)[[ end ]]
+[[- if $codeIndex ]]
+  code-index/              Infrared's code index: Zoekt and the code service, the cache on the pod's own disk
+[[- end ]]
 [[- if eq .Edge "gateway" ]]
   edge/                    the Gateway, its origin certificate and the edge's routes
   external-dns/            external-dns's Cloudflare token, copied from the platform's tokens
@@ -151,6 +155,9 @@ products/                  yours: one directory per product (see "Products")
 | 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana |
 [[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
+[[- if and $codeIndex (not (contains " code-index " $disabled)) ]]
+| 41 | `code-index` | Infrared's code index (namespace `code-index`): the repositories its record names, at their pinned commits, searchable by infrared-api alone. Its record comes from the ConfigMap `code-index`, its credential for private repositories from the Secret `code-index-credentials`, both the install's |
+[[- end ]]
 | 100 | `argocd` | Argo CD, managing itself |
 [[- $left := "" ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ if $left ]][[ $left = printf "%s, `%s`" $left . ]][[ else ]][[ $left = printf "`%s`" . ]][[ end ]][[ end ]][[ end ]]
 [[- if $left ]]

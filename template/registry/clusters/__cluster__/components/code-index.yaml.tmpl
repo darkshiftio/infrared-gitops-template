@@ -1,0 +1,59 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "code-index" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $ci := index .Images "code-index" ]]
+[[- if not $on -]]
+# code-index is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
+# Infrared's code index (components/code-index), in the namespace code-index:
+# Zoekt and the code service behind infrared-api's code endpoints, at
+# http://code-index.code-index.svc:8080, which only infrared-api's pods reach.
+# The install turned it on with the Infrared chart's codeIndex.enabled, which
+# hands its image to the operator among Infrared's own (INFRARED_IMAGES,
+# code-index). Wave 41, right after Infrared itself (40), in its layer.
+#
+# Its cache is on the pod's own disk, rebuilt from upstream when the pod starts,
+# and never backed up. Removing this Application removes the code index and
+# nothing else: its record lives in a knowledge repository, never here.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: code-index
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: infrared
+  annotations:
+    argocd.argoproj.io/sync-wave: "41"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/code-index
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: code-index
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# Infrared's code index runs only when the install turns it on: the Infrared
+# chart's codeIndex.enabled, which hands its image to the operator among
+# Infrared's own (INFRARED_IMAGES, code-index) with the image registry. This
+# cluster has neither, so this file holds no objects.
+[[- end ]]

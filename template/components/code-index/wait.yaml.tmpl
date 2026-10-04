@@ -1,30 +1,28 @@
-[[- $ci := index .Images "code-index" ]][[ $codeIndexPull := and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret ]]
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull) -]]
+[[- $ci := index .Images "code-index" ]]
+[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret -]]
 # =============================================================================
-# Before the store: External Secrets' webhook answers.
+# Before the code index: the store that copies its pull secret.
 # =============================================================================
-# On a fresh cluster every Application starts at once, and this one can reach
-# the API server before External Secrets' admission webhook has an endpoint:
-# the ClusterSecretStore is then refused. This PreSync hook waits, up to half
-# an hour, until the store's CRD is established and the webhook's Service has
-# a ready endpoint, so the sync starts when the store can be admitted and
-# spends none of its retries on the race.
+# On a fresh cluster every Application syncs at once (README, "Order on a fresh
+# cluster"). This PreSync hook holds the sync, for up to half an hour, until
+# External Secrets' CRDs are established and the ClusterSecretStore
+# infrared-platform is Ready: it copies the pull secret (wave -1).
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: platform-tokens-wait
-  namespace: [[ .InfraredNamespace ]]
+  name: code-index-wait
+  namespace: code-index
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
     argocd.argoproj.io/sync-wave: "-10"
 ---
-# Read only: CRDs, EndpointSlices and ClusterSecretStores, nothing else.
+# Read only: CRDs and ClusterSecretStores, nothing else.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: infrared-wait-platform-tokens
+  name: infrared-wait-code-index
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -33,9 +31,6 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get"]
-  - apiGroups: ["discovery.k8s.io"]
-    resources: ["endpointslices"]
-    verbs: ["list"]
   - apiGroups: ["external-secrets.io"]
     resources: ["clustersecretstores"]
     verbs: ["get"]
@@ -43,7 +38,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: infrared-wait-platform-tokens
+  name: infrared-wait-code-index
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -51,17 +46,17 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: infrared-wait-platform-tokens
+  name: infrared-wait-code-index
 subjects:
   - kind: ServiceAccount
-    name: platform-tokens-wait
-    namespace: [[ .InfraredNamespace ]]
+    name: code-index-wait
+    namespace: code-index
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: platform-tokens-wait
-  namespace: [[ .InfraredNamespace ]]
+  name: code-index-wait
+  namespace: code-index
   annotations:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
@@ -73,7 +68,7 @@ spec:
   ttlSecondsAfterFinished: 3600
   template:
     spec:
-      serviceAccountName: platform-tokens-wait
+      serviceAccountName: code-index-wait
       restartPolicy: OnFailure
       securityContext:
         runAsNonRoot: true
@@ -89,11 +84,9 @@ spec:
             - name: HOME
               value: /tmp
             - name: WAIT_CRDS
-              value: "clustersecretstores.external-secrets.io"
-            - name: WAIT_SERVICES
-              value: "external-secrets/external-secrets-webhook"
+              value: "externalsecrets.external-secrets.io"
             - name: WAIT_STORES
-              value: ""
+              value: "infrared-platform"
           command:
             - /bin/sh
             - -ec
@@ -102,18 +95,11 @@ spec:
               established() {
                 [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
               }
-              answering() {
-                kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \
-                  -o jsonpath='{.items[*].endpoints[*].conditions.ready}' 2>/dev/null | grep -qw true
-              }
               store_ready() {
                 [ "$(kubectl get clustersecretstore "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
               }
               for crd in $WAIT_CRDS; do
                 until established "$crd"; do echo "waiting for the CRD $crd"; sleep 5; done
-              done
-              for svc in $WAIT_SERVICES; do
-                until answering "$svc"; do echo "waiting for a ready endpoint of the Service $svc"; sleep 5; done
               done
               for store in $WAIT_STORES; do
                 until store_ready "$store"; do echo "waiting for the ClusterSecretStore $store to be Ready"; sleep 5; done
@@ -137,6 +123,6 @@ spec:
         - name: tmp
           emptyDir: {}
 [[- else -]]
-# The platform's tokens are copied only for the edge when it is a Gateway and
-# for the stores' backups: nothing to wait for.
+# The code index waits for the store that copies its pull secret only where it
+# runs with one: no wait here.
 [[- end ]]

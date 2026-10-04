@@ -234,6 +234,18 @@ spec:
           substrate:
             testActors: true
 [[- end ]]
+[[- $ci := index .Images "code-index" ]]
+[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) ]]
+          # Infrared's code index is on (codeIndex.enabled), at the image the
+          # install pinned. The chart hands that image to the operator among
+          # Infrared's own (INFRARED_IMAGES, code-index) only while it is on, so
+          # adoption keeps it on only with this.
+          codeIndex:
+            enabled: true
+            image:
+              tag: [[ $ci.Tag | quote ]]
+              digest: [[ $ci.Digest | quote ]]
+[[- end ]]
 [[- if eq .Forge "gitea" ]]
           # Gitea, the install's forge, which the chart runs. The install made
           # its site admin's Secret, and like the Secrets above it is never

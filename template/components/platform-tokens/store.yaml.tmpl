@@ -1,5 +1,6 @@
 [[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
-[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret)) -]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndexPull := and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret ]]
+[[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull) -]]
 # =============================================================================
 # infrared-platform: the one place the platform's tokens are read from.
 # =============================================================================
@@ -27,6 +28,12 @@
 # the actor images into the registry inside the cluster reads them with it in
 # registry[[ end ]] (components/substrate*).
 [[- end ]]
+[[- if $codeIndexPull ]]
+#
+# It also reads the install's pull secret, [[ .ImagePullSecret ]], which the code
+# index's namespace, code-index, copies whole: its image is private
+# (components/code-index).
+[[- end ]]
 #
 # `conditions` limits the store to those namespaces: any other namespace,
 # a product's zone included, cannot read a token through it.
@@ -37,7 +44,7 @@ metadata:
   name: platform-tokens-reader
   namespace: [[ .InfraredNamespace ]]
 ---
-# get on the one Secret[[ if and .Stores .SubstrateCapable .Registry .ImagePullSecret ]] and the pull secret[[ end ]], nothing else.
+# get on the one Secret[[ if or (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull ]] and the pull secret[[ end ]], nothing else.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -46,7 +53,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["infrared-platform-tokens"[[ if and .Stores .SubstrateCapable .Registry .ImagePullSecret ]], [[ .ImagePullSecret | quote ]][[ end ]]]
+    resourceNames: ["infrared-platform-tokens"[[ if or (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull ]], [[ .ImagePullSecret | quote ]][[ end ]]]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -87,6 +94,9 @@ spec:
 [[- if $testActors ]]
         - registry
 [[- end ]]
+[[- end ]]
+[[- if $codeIndexPull ]]
+        - code-index
 [[- end ]]
   provider:
     kubernetes:

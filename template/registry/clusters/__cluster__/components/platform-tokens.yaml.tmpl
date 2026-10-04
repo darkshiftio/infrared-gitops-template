@@ -1,8 +1,9 @@
 [[- $on := true ]][[ range .Disabled ]][[ if eq . "platform-tokens" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndexPull := and .ImageRegistry (or $ci.Tag $ci.Digest) .ImagePullSecret ]]
 [[- if not $on -]]
 # platform-tokens is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
-[[- else if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret)) -]]
+[[- else if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndexPull) -]]
 # The platform's tokens (components/platform-tokens): the ClusterSecretStore
 # `infrared-platform`, which reads the Secret `infrared-platform-tokens` that
 # the Infrared chart keeps in [[ .InfraredNamespace ]], and the account it reads

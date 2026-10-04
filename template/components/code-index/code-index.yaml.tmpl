@@ -1,0 +1,246 @@
+[[- $ci := index .Images "code-index" ]]
+[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
+[[- $image := printf "%s/infrared-codeindex" (trimSuffix "/" .ImageRegistry) ]]
+[[- if $ci.Tag ]][[ $image = printf "%s:%s" $image $ci.Tag ]][[ end ]]
+[[- if $ci.Digest ]][[ $image = printf "%s@%s" $image $ci.Digest ]][[ end -]]
+# =============================================================================
+# Infrared's code index: Zoekt and the code service, in one pod.
+# =============================================================================
+# The code service reads its record (the manifest of repositories, each at its
+# pinned commits, and the repo cards), keeps a mirror of each repository it may
+# read, builds Zoekt's shards, and answers infrared-api at
+# http://code-index.code-index.svc:8080. zoekt-webserver serves the shards to it
+# on the pod's loopback address only.
+#
+# Its cache, the mirrors and the shards, is on the pod's own disk (an emptyDir):
+# never backed up, and rebuilt from upstream whenever the pod starts. The pod is
+# ready once the whole first wave is indexed; until then the Service has no
+# endpoint and infrared-api answers that the index is building.
+#
+# Its settings are the install's, never this repo's: the ConfigMap code-index
+# names its record (knowledge-url and knowledge-ref, or the manifest and the
+# cards themselves), and the Secret code-index-credentials, when there is one,
+# the credential it reads internal repositories with. Without the Secret it
+# reads public repositories only. Both are optional, so the pod starts without
+# them and says, at /readyz, what it lacks.
+#
+# One replica, replaced and never rolled (strategy Recreate): a second pod would
+# build a second cache for nothing.
+#
+# Sized from a measurement of the public first wave on kind (32 repositories at
+# two refs each, 2026-10-03): ready 90 seconds after the pod starts, the build
+# at most 534 MiB of anonymous memory and 53 CPU-seconds, the cache 1.5 GiB on
+# disk (the shards 1.07 GiB), and Zoekt answering in 5 to 40 ms. The code
+# container's other memory is page cache from writing the shards, which the
+# kernel reclaims before a limit is reached; Zoekt maps the shards, so its
+# limit leaves room for the whole index.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: code-index
+  namespace: code-index
+  labels:
+    app.kubernetes.io/name: code-index
+    app.kubernetes.io/part-of: infrared
+# It reads nothing from the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-index
+  namespace: code-index
+  labels:
+    app.kubernetes.io/name: code-index
+    app.kubernetes.io/part-of: infrared
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  # The first wave indexes before the pod is ready: an hour before the
+  # Deployment, and Argo CD with it, calls it stuck.
+  progressDeadlineSeconds: 3600
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: code-index
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: code-index
+        app.kubernetes.io/part-of: infrared
+    spec:
+      serviceAccountName: code-index
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+[[- if .ImagePullSecret ]]
+      # Its image is private: it pulls with [[ .ImagePullSecret ]], copied from
+      # [[ .InfraredNamespace ]] (pull-secret.yaml).
+      imagePullSecrets:
+        - name: [[ .ImagePullSecret ]]
+[[- end ]]
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: code
+          image: [[ $image ]]
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CODEINDEX_LISTEN
+              value: ":8080"
+            - name: CODEINDEX_CACHE
+              value: /cache
+            - name: CODEINDEX_SETTINGS
+              value: /etc/code-index/settings
+            - name: CODEINDEX_CREDENTIALS
+              value: /etc/code-index/credentials
+            - name: CODEINDEX_ZOEKT
+              value: "127.0.0.1:6070"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: code
+                  resource: limits.memory
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          # Ready once the first wave is indexed and Zoekt serves it.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+              ephemeral-storage: 4Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: tmp
+              mountPath: /tmp
+            - name: settings
+              mountPath: /etc/code-index/settings
+              readOnly: true
+            - name: credentials
+              mountPath: /etc/code-index/credentials
+              readOnly: true
+        - name: zoekt
+          image: [[ $image ]]
+          imagePullPolicy: IfNotPresent
+          args: ["zoekt-webserver", "-index", "/cache/index", "-listen", "127.0.0.1:6070"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The mirrors and the shards: rebuilt from upstream on every start.
+        - name: cache
+          emptyDir:
+            sizeLimit: 40Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: settings
+          configMap:
+            name: code-index
+            optional: true
+        - name: credentials
+          secret:
+            secretName: code-index-credentials
+            optional: true
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-index
+  namespace: code-index
+  labels:
+    app.kubernetes.io/name: code-index
+    app.kubernetes.io/part-of: infrared
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: code-index
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+# Only infrared-api reaches the code service: it has no authentication of its
+# own, and infrared-api decides who may read what. zoekt-webserver listens on
+# the pod's loopback address, which nothing outside the pod reaches.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: code-index
+  namespace: code-index
+  labels:
+    app.kubernetes.io/name: code-index
+    app.kubernetes.io/part-of: infrared
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: code-index
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: infrared
+              app.kubernetes.io/component: api
+      ports:
+        - port: 8080
+          protocol: TCP
+[[- else -]]
+# Infrared's code index runs only when the install turns it on (the Infrared
+# chart's codeIndex.enabled): not here, so this file holds no objects.
+[[- end ]]
