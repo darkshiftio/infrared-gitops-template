@@ -1,4 +1,4 @@
-[[- if and .Stores .Backup.Bucket -]]
+[[- if and .Stores .Backup.Bucket .PostgresArchive.Enabled -]]
 # =============================================================================
 # Before the plugin: cert-manager's webhook, which admits its certificates.
 # =============================================================================
@@ -132,6 +132,9 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+[[- else if and .Stores .Backup.Bucket -]]
+# No WAL archive (spec.backup.postgres.archive, off by default), so the plugin
+# and its wait are not here.
 [[- else -]]
 # Backups are off (INFRARED_BACKUP), so the plugin and its wait are not here.
 [[- end ]]

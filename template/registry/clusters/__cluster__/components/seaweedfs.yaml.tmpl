@@ -27,9 +27,9 @@
 [[- if $restore ]]
 #
 # A restore, from [[ .Restore.Point ]], is in progress: a PreSync hook holds this sync
-# until the restored Postgres's file index is reset (components/seaweedfs/
-# restore-wait.yaml), and the identity restore may write every bucket while
-# the stores-restore Application copies them back.
+# until the Infrared chart's restore has brought Postgres's records back
+# (components/seaweedfs/restore-wait.yaml), and the identity restore may write
+# every bucket while the stores-restore Application copies them back.
 [[- end ]]
 #
 # No resources finalizer: removing this Application leaves SeaweedFS running,

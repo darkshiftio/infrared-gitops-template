@@ -1,4 +1,4 @@
-[[- if and .Stores .Backup.Bucket -]]
+[[- if and .Stores .Backup.Bucket .PostgresArchive.Enabled -]]
 # The second source of the `cloudnative-pg` Application (wave 16) when backups
 # are on: the wait for cert-manager, and the Barman Cloud plugin's certificates.
 # Every object names its own namespace.
@@ -7,6 +7,9 @@ kind: Kustomization
 resources:
   - wait.yaml
   - certificates.yaml
+[[- else if and .Stores .Backup.Bucket -]]
+# No WAL archive (spec.backup.postgres.archive, off by default), so this
+# component holds no objects and no Application points at it.
 [[- else -]]
 # Backups are off (INFRARED_BACKUP), so this component holds no objects and no
 # Application points at it.

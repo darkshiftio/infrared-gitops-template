@@ -65,7 +65,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.ForgeURL` | `` or `http://gitea-http.infrared.svc.cluster.local:3000` | the forge's root as the cluster reaches it, without a trailing slash: repos are `<ForgeURL>/<owner>/<repo>`. Empty for GitHub |
 | `.Registry` | `` or `10.43.0.50:5000` | the operator's `INFRARED_REGISTRY` (chart value `registry.address`): the address of the registry inside the cluster, a private IPv4 address and a port. With `.Stores` the template runs Zot there, its Service's pinned ClusterIP and port, and builds push the builder to it (see "The registry"). Empty: no registry inside the cluster |
 | `.Copies` | `{"Recipients": ["age1..."], "Mirror": {"Schedule": "17 * * * *", "Retention": "7d"}}` | the rest of the Installation's `spec.backup` that the template renders (the operator seeds it from its `INFRARED_COPIES`, chart values `backup.*`): the buckets' mirror, its schedule (five cron fields) and how long what a run replaced or deleted is kept (whole days, `spec.backup.retention`), and the age recipients the backups are encrypted to. With the stores, a backup bucket and `.Copies.Recipients`, backups are on: the mirror's run mark names the newest complete backup, and the Postgres roles the backup dumps as reach `.InfraredNamespace` (see "Backups"). Every empty field keeps today's literal |
-| `.PostgresArchive` | `{"Enabled": false, "Schedule": "0 0 3 * * *", "Retention": "7d"}` | Barman's WAL archive of the platform's Postgres: `Enabled` is `spec.backup.postgres.archive`, which the `infrared` Application carries; `Schedule` is the base backup's (six cron fields, seconds first) and `Retention` the archive's (whole days). Every empty field keeps today's literal |
+| `.PostgresArchive` | `{"Enabled": false, "Schedule": "0 0 3 * * *", "Retention": "7d"}` | Barman's WAL archive of the platform's Postgres: `Enabled` is `spec.backup.postgres.archive`, which the `infrared` Application carries, and turns the archive on with the stores and a backup bucket (see "Backups"); `false`, the default, renders no archive, since each backup carries a dump of every consumer database and a restore reads that. `Schedule` is the base backup's (six cron fields, seconds first) and `Retention` the archive's (whole days); each empty one keeps today's literal |
 | `.RegistryRetention` | `{"UntaggedAfter": "24h", "KeepTags": ["^v[0-9]"], "KeepNewest": 10, "GCInterval": "1h", "GCDelay": "1h"}` | the operator's `INFRARED_REGISTRY_RETENTION` (chart value `registry.retention`): Zot's garbage collection and retention (see "The registry"). Every zero field keeps today's literal, shown here |
 | `.Restore` | `{"Point": "20261006T010500Z", "Artifact": "20261006T010500Z.irbackup", "MirrorRun": "20261006T011700Z"}` | the restore in progress, which the operator reads from the ConfigMap `infrared/infrared-restore` while its phase is `ObjectsRestored` or `Failed`, and zero otherwise: `Point` is the stamp of the backup restored, `Artifact` its object under `<prefix>/backups/`, `MirrorRun` the mirror run the buckets come back from, a run after the point. With the stores and a backup bucket it brings the stores back (see "Restore") |
 | `.PostgresServerName` | `` or `postgres-20261003T060000Z` | the server name the platform's Postgres archives under, `<Backup.Bucket>/<prefix>/postgres/<name>/`. The operator chooses one per install, and on a restore a new one: it must name an empty prefix, and it never changes for the life of the install. Empty archives under `postgres`, the Cluster's name, as before the field existed |
@@ -82,7 +82,11 @@ array, exactly as the operator's environment carries them, `-forge` with
 and `-postgres-server-name`.
 
 The zero value of every newer field renders exactly the files the template
-rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled`,
+rendered before the field existed, with one exception, decided on 2026-10-06:
+`.PostgresArchive.Enabled` `false` leaves Barman's WAL archive out, which a
+backup bucket turned on by itself before (the Barman Cloud plugin and its
+certificates, the Cluster's WAL archiver, `postgres/backup.yaml`, and the
+waits for them); with it `true`, those files render as they did. Only `.Edge`, `.Stores`, `.Disabled`,
 `.Forge`, `.Registry` and `.SubstrateCapable` turn anything on or off: a Traefik
 cluster that carries `spec.previews` by hand, on any cloud, renders the same
 files as one without (`make verify` checks it). A `.Backup` without the stores
@@ -217,10 +221,10 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 12 | `external-dns` (gateway only) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
 | 13 | `edge` (gateway, with a name) | `components/edge` | — |
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
-| 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg`, with a backup bucket also `plugin-barman-cloud` + `components/cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1), chart 0.8.1 (Barman Cloud plugin 0.15.1), by digest |
+| 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg`, with a backup bucket and the WAL archive (`.PostgresArchive.Enabled`) also `plugin-barman-cloud` + `components/cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1), chart 0.8.1 (Barman Cloud plugin 0.15.1), by digest |
 | 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
 | 18 | `seaweedfs` (Stores only) | https://seaweedfs.github.io/seaweedfs/helm `seaweedfs` + `components/seaweedfs` | chart 4.48.0 (SeaweedFS 4.48, by digest) |
-| 18 | `stores-restore` (Stores and a backup bucket, while a restore is in progress) | `components/stores-restore`: the file index's reset and the buckets' copy back | PostgreSQL 18.6, rclone 1.75.1, by digest |
+| 18 | `stores-restore` (Stores and a backup bucket, while a restore is in progress) | `components/stores-restore`: the buckets' copy back, once the restore has brought Postgres's records back | rclone 1.75.1, by digest |
 | 19 | `stores-credentials` (Stores, with Registry or the backups' recipients) | `components/stores-credentials`: ClusterSecretStore `infrared-stores` | — |
 | 20 | `zot` (Stores and Registry) | https://zotregistry.dev/helm-charts `zot` + `components/zot` | chart 0.1.125 (Zot v2.1.21, by digest) |
 | 20 | `substrate-crds` (Stores, Registry and SubstrateCapable) | `components/substrate-crds`, vendored from Agent Substrate | `ce05e5d` (see "Agent Substrate") |
@@ -281,7 +285,7 @@ whose value is not a layer the API knows.
 | 10 | Agent runtime (`agent-runtime`) | `substrate-crds` (20), `substrate-podcert` (21), `substrate` (22), `substrate-actors` (23) | |
 | 11 | Build runtime (`build-runtime`) | `kpack` (25), `builds` (26) | |
 | 12 | Observability (`observability`) | `victoria-metrics-k8s-stack` (30) | |
-| 13 | Backups (`backups`) | `stores-restore` (18), only while a restore is in progress | the WAL archive and the last base backup of `stores/postgres`, and the last run of the CronJob `stores/seaweedfs-backup` |
+| 13 | Backups (`backups`) | `stores-restore` (18), only while a restore is in progress | the last run of the Infrared operator's CronJob `infrared-backup` in `.InfraredNamespace` and of the CronJob `stores/seaweedfs-backup`; with the WAL archive, the archive and the last base backup of `stores/postgres` |
 
 Which members serve a layer and which only support it, the layers each one
 needs, and how a state is judged are the API's; this repo only places each
@@ -463,16 +467,21 @@ admit `stores` as well, and `platform-tokens` renders even without a Gateway.
 
 | What | How | Where | Kept |
 |---|---|---|---|
-| Postgres's WAL | continuously: CloudNativePG's Barman Cloud plugin archives each segment as it is written (the Cluster's plugin, `isWALArchiver`) | `s3://<Bucket>/<prefix>/postgres/` | seven days of point-in-time recovery (`retentionPolicy: 7d` on the ObjectStore `backup`) |
-| Postgres's base backup | every day at 03:00 UTC, and once at the first sync (ScheduledBackup `postgres-daily`, `method: plugin`) | the same | the same |
 | SeaweedFS's buckets `ate-snapshots` and `registry` | every hour at 17 past, CronJob `seaweedfs-backup`: rclone 1.75.1 makes `current/<bucket>/` match the bucket, and keeps what that run replaced or deleted under `archive/<run>/<bucket>/`; a mark `runs/<run>.json` says the run finished | `<Bucket>/<prefix>/seaweedfs/` | archives and marks for seven days, by the run's name |
+| Postgres's WAL, with `.PostgresArchive.Enabled` | continuously: CloudNativePG's Barman Cloud plugin archives each segment as it is written (the Cluster's plugin, `isWALArchiver`) | `s3://<Bucket>/<prefix>/postgres/` | seven days of point-in-time recovery (`retentionPolicy: 7d` on the ObjectStore `backup`) |
+| Postgres's base backup, with `.PostgresArchive.Enabled` | every day at 03:00 UTC, and once at the first sync (ScheduledBackup `postgres-daily`, `method: plugin`) | the same | the same |
 
 `.Copies.Mirror` sets the mirror's schedule and how long its archives and
-marks are kept, `.PostgresArchive` the base backup's schedule (six cron fields,
-seconds first) and the archive's retention. Each retention is whole days.
-Empty, each is the default above. `.PostgresServerName` is the archive's server
-name, `<server name>` below `postgres/`. Empty archives under `postgres`, the
-Cluster's own name.
+marks are kept. `.PostgresArchive.Enabled` (`spec.backup.postgres.archive`, off
+by default; decided on 2026-10-06) turns Barman's WAL archive on: off, nothing
+of Postgres leaves the cluster but the dump in each backup (below), and the
+Barman Cloud plugin, its certificates, the ObjectStore `backup`, the
+ScheduledBackup and the ExternalSecret `postgres-backup` are not rendered; on,
+`.PostgresArchive.Schedule` is the base backup's schedule (six cron fields,
+seconds first) and `.PostgresArchive.Retention` the archive's retention. Each
+retention is whole days. Empty, each is the default above. `.PostgresServerName`
+is the archive's server name, `<server name>` below `postgres/`. Empty archives
+under `postgres`, the Cluster's own name.
 
 With `.Copies.Recipients` as well, the install makes a backup every hour: the
 Infrared operator's CronJob, not this template, writes one artifact per backup
@@ -492,15 +501,15 @@ key.
 A copy of every object at every hour would take 168 times the buckets' size,
 so the buckets are kept as one mirror and the hourly changes to it. rclone reads
 SeaweedFS as the S3 identity `backup`, which may only read and list the two
-buckets. The plugin (chart 0.8.1, `plugin-barman-cloud` 0.15.1 and its sidecar,
-by digest) is a second chart of `cloudnative-pg`; its mTLS certificates come
-from `components/cloudnative-pg`, in waves of their own ahead of the charts,
-with the chart's own turned off.
+buckets. With the archive, the plugin (chart 0.8.1, `plugin-barman-cloud`
+0.15.1 and its sidecar, by digest) is a second chart of `cloudnative-pg`; its
+mTLS certificates come from `components/cloudnative-pg`, in waves of their own
+ahead of the charts, with the chart's own turned off.
 
-A Cluster built again from nothing writes its WAL to the same prefix, which
-Barman refuses while an older server's archive is there. So each install
-archives under a server name of its own, `.PostgresServerName`, and a restore
-under a new one.
+With the archive, a Cluster built again from nothing writes its WAL to the same
+prefix, which Barman refuses while an older server's archive is there. So each
+install archives under a server name of its own, `.PostgresServerName`, and a
+restore under a new one.
 
 ### Restore
 
@@ -512,16 +521,16 @@ operator's; the template does not render them.
 
 | What | How |
 |---|---|
-| Postgres | the Cluster bootstraps empty, with `initdb`, as on any install, and no archive is recovered: the Infrared chart's restore brings each consumer database's records back from the backup's dump. With an archive, the new Cluster archives under a new `.PostgresServerName` |
-| SeaweedFS's file index | the Job `stores/stores-index-reset` drops what the role `seaweedfs` owns, once per point, so no index of a lost cluster's names data that went with its nodes: a comment on the database `seaweedfs`, written in the same transaction, makes a second run do nothing |
-| SeaweedFS's buckets | the Job `stores/stores-restore` copies each bucket back from `<prefix>/seaweedfs/current/` of the copy outside, as the S3 identity `restore` (Read, Write, List on every bucket, only during a restore), and never overwrites an object that is there. A bucket whose copy lists empty is skipped; a listing that fails (a key, the network, a missing bucket) fails the Job, which runs again, so it never marks a bucket it did not copy |
-| The order | each Job marks the ConfigMap `stores/restore-stores` (`point`, then `postgres`, then `buckets`, each a UTC time). SeaweedFS's sync waits for `postgres`; Zot's and Agent Substrate's for `buckets`, each in a PreSync hook that reads that ConfigMap alone; the hourly mirror copies nothing and fails until `buckets`, so it never makes the copy outside match empty buckets |
+| Postgres | the Cluster bootstraps empty, with `initdb`, as on any install, and no archive is recovered: the Infrared chart's restore Job brings each consumer database's records back from the backup's dump, into the empty Postgres, and then marks `postgres` in the ConfigMap `stores/restore-stores`. With an archive, the new Cluster archives under a new `.PostgresServerName` |
+| SeaweedFS's file index | nothing to reset: the filers keep it in Postgres, which started empty, so no entry names data that went with the lost nodes, and the copy back makes the index again. (The Job `stores-index-reset` that dropped a recovered index went with the archive's recovery) |
+| SeaweedFS's buckets | the Job `stores/stores-restore` waits for the mark `postgres`, then copies each bucket back from `<prefix>/seaweedfs/current/` of the copy outside, as the S3 identity `restore` (Read, Write, List on every bucket, only during a restore), and never overwrites an object that is there. A bucket whose copy lists empty is skipped; a listing that fails (a key, the network, a missing bucket) fails the Job, which runs again, so it never marks a bucket it did not copy |
+| The order | the marks in the ConfigMap `stores/restore-stores`, each a UTC time: `point`, then `postgres` by the Infrared chart's restore Job, then `buckets` by `stores-restore`. SeaweedFS's sync waits for `postgres`; Zot's and Agent Substrate's for `buckets`, each in a PreSync hook that reads that ConfigMap alone; the hourly mirror copies nothing and fails until `buckets`, so it never makes the copy outside match empty buckets |
 | The end | the operator marks the restore Complete once `buckets` is marked, and stops passing `.Restore`: the next render drops the `stores-restore` Application, the identity `restore` and the waits |
 
-`stores-restore` (wave 18, layer `backups`) holds the two Jobs. A PreSync hook
+`stores-restore` (wave 18, layer `backups`) holds the one Job. A PreSync hook
 in `.InfraredNamespace` first waits for Postgres's Service `postgres-rw` to have
-a ready endpoint, which is when Postgres has started. Neither Job is ever
-deleted by a timer: Argo CD would make a deleted one again, and run it again.
+a ready endpoint, which is when Postgres has started. The Job is never deleted
+by a timer: Argo CD would make a deleted one again, and run it again.
 
 ### The registry
 

@@ -1,4 +1,4 @@
-[[- if and .Stores .Backup.Bucket -]]
+[[- if and .Stores .Backup.Bucket .PostgresArchive.Enabled -]]
 # =============================================================================
 # The Barman Cloud plugin's certificates.
 # =============================================================================
@@ -64,6 +64,9 @@ spec:
     - client auth
   privateKey:
     rotationPolicy: Always
+[[- else if and .Stores .Backup.Bucket -]]
+# No WAL archive (spec.backup.postgres.archive, off by default): no plugin, no
+# certificates.
 [[- else -]]
 # Backups are off (INFRARED_BACKUP): no plugin, no certificates.
 [[- end ]]

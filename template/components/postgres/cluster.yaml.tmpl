@@ -57,7 +57,7 @@ spec:
       memory: 512Mi
     limits:
       memory: 2Gi
-[[- if .Backup.Bucket ]]
+[[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
   # Every WAL segment to the bucket outside the cluster, as it is written
   # (backup.yaml).
 [[- if .PostgresServerName ]]

@@ -5,9 +5,9 @@
 # This PreSync hook makes the Secret postgres-<role> (kubernetes.io/basic-auth)
 # of each role below, once, if it is absent, and never replaces one. Then it
 # waits, up to half an hour, until CloudNativePG's CRDs are established and its
-# webhook has a ready endpoint, so the Cluster is admitted when it is applied;
+# webhook has a ready endpoint, so the Cluster is admitted when it is applied[[ if or (not .Backup.Bucket) .PostgresArchive.Enabled ]];
 # with backups, also until the Barman Cloud plugin answers and the store
-# infrared-platform, which copies the backup keys, is Ready.
+# infrared-platform, which copies the backup keys, is Ready[[ end ]].
 # On a fresh cluster every Application syncs at once (README, "Order on a fresh
 # cluster").
 # =============================================================================
@@ -127,11 +127,11 @@ spec:
             - name: HOME
               value: /tmp
             - name: WAIT_CRDS
-              value: "clusters.postgresql.cnpg.io databaseroles.postgresql.cnpg.io databases.postgresql.cnpg.io[[ if .Backup.Bucket ]] scheduledbackups.postgresql.cnpg.io objectstores.barmancloud.cnpg.io externalsecrets.external-secrets.io[[ end ]]"
+              value: "clusters.postgresql.cnpg.io databaseroles.postgresql.cnpg.io databases.postgresql.cnpg.io[[ if and .Backup.Bucket .PostgresArchive.Enabled ]] scheduledbackups.postgresql.cnpg.io objectstores.barmancloud.cnpg.io externalsecrets.external-secrets.io[[ end ]]"
             - name: WAIT_SERVICES
-              value: "cnpg-system/cnpg-webhook-service[[ if .Backup.Bucket ]] cnpg-system/barman-cloud[[ end ]]"
+              value: "cnpg-system/cnpg-webhook-service[[ if and .Backup.Bucket .PostgresArchive.Enabled ]] cnpg-system/barman-cloud[[ end ]]"
             - name: WAIT_STORES
-              value: "[[ if .Backup.Bucket ]]infrared-platform[[ end ]]"
+              value: "[[ if and .Backup.Bucket .PostgresArchive.Enabled ]]infrared-platform[[ end ]]"
           command:
             - /bin/sh
             - -ec

@@ -1,13 +1,14 @@
 [[- if and .Stores .Backup.Bucket .Restore.Point -]]
 # =============================================================================
-# A restore, from [[ .Restore.Point ]]: SeaweedFS waits for its file index to be reset.
+# A restore, from [[ .Restore.Point ]]: SeaweedFS waits for Postgres's records.
 # =============================================================================
-# SeaweedFS's filers keep their file index in the platform's Postgres. The
-# stores-restore Application resets it once Postgres answers, so no entry names
-# data that went with the lost nodes, then marks the ConfigMap
-# stores/restore-stores (key postgres, for this point). This PreSync hook holds
-# SeaweedFS's sync until then, half an hour at a time, so no filer starts on the
-# old index. It reads that one ConfigMap, nothing else.
+# SeaweedFS's filers keep their file index in the platform's Postgres, which
+# started empty, so no entry names data that went with the lost nodes. The
+# Infrared chart's restore Job brings each consumer database's records back
+# from the backup's dump, then marks the ConfigMap stores/restore-stores (key
+# postgres, for this point). This PreSync hook holds SeaweedFS's sync until
+# then, half an hour at a time, so the restore keeps one order: Postgres, then
+# the buckets, then what reads them. It reads that one ConfigMap, nothing else.
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount

@@ -11,7 +11,7 @@ resources:
   - cluster.yaml
   - seaweedfs.yaml
   - substrate.yaml
-[[- if .Backup.Bucket ]]
+[[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
   - backup.yaml
 [[- end ]]
 [[- else -]]

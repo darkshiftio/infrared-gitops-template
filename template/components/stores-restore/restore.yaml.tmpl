@@ -4,26 +4,25 @@
 # A restore, from [[ .Restore.Point ]]: the stores come back.
 # =============================================================================
 # The Infrared operator restored its own objects from the backup [[ .Restore.Point ]], and
-# Postgres started empty (components/postgres). SeaweedFS's data was on the
-# lost nodes' disks, so two Jobs, in order, bring the stores back, and mark the
-# ConfigMap stores/restore-stores after each, for this point:
+# Postgres started empty (components/postgres). The Infrared chart's restore
+# Job brings each consumer database's records back into it from the backup's
+# dump, then marks the ConfigMap stores/restore-stores (key postgres, for this
+# point), which SeaweedFS waits for (components/seaweedfs). SeaweedFS's file
+# index started empty with Postgres, so nothing of the lost cluster's is there
+# to reset: the copy back makes it again. SeaweedFS's data was on the lost
+# nodes' disks, so one Job brings the buckets back:
 #
-#   stores-index-reset  As the role seaweedfs, drops everything that role
-#                       owns, once, so no file index of a lost cluster's
-#                       makes a copy back skip objects as present: it notes
-#                       the point on the database seaweedfs in the same
-#                       transaction, and does nothing when the note is there.
-#                       Then it marks postgres, which SeaweedFS waits for
-#                       (components/seaweedfs).
-#   stores-restore      Copies every bucket back from the copy outside the
-#                       cluster, [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/current/<bucket>,
+#   stores-restore      Waits for the mark postgres, then copies every bucket
+#                       back from the copy outside the cluster,
+#                       [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/current/<bucket>,
 #                       as the S3 identity restore, skipping any object
 #                       already there, so a second run never overwrites one.
 #                       Then it marks buckets, which Zot, Agent Substrate and
-#                       the hourly mirror wait for.
+#                       the hourly mirror wait for: buckets comes after
+#                       postgres, so whatever waits for it finds both back.
 #
 # The operator marks the restore Complete once buckets is marked, and stops
-# rendering this. Neither Job is ever deleted by a timer: Argo CD would make a
+# rendering this. The Job is never deleted by a timer: Argo CD would make a
 # deleted one again, and run it again.
 # =============================================================================
 apiVersion: v1
@@ -70,146 +69,11 @@ subjects:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: stores-index-reset
-  namespace: stores
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
-spec:
-  backoffLimit: 6
-  activeDeadlineSeconds: 7200
-  template:
-    spec:
-      serviceAccountName: stores-restore
-      restartPolicy: OnFailure
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        seccompProfile:
-          type: RuntimeDefault
-      initContainers:
-        - name: reset
-          # The platform's Postgres image, by digest, for psql.
-          image: ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie@sha256:f89a40f4d74aa6e0900917eaf6299b125a6382eb02fd4ee5d46f55bcbf7e5726
-          env:
-            - name: HOME
-              value: /tmp
-            - name: POINT
-              value: [[ .Restore.Point | quote ]]
-            - name: PGHOST
-              value: postgres-rw.stores.svc
-            - name: PGPORT
-              value: "5432"
-            - name: PGDATABASE
-              value: seaweedfs
-            - name: PGSSLMODE
-              value: require
-            - name: PGCONNECT_TIMEOUT
-              value: "10"
-            - name: PGUSER
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-seaweedfs
-                  key: username
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-seaweedfs
-                  key: password
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              # The role's password reaches Postgres a moment after it has
-              # started (its DatabaseRole): sign in until it works.
-              until psql -X -q -c 'SELECT 1' >/dev/null 2>&1; do
-                echo "waiting to sign in to Postgres as seaweedfs"
-                sleep 10
-              done
-              # The block is quoted $reset$, not $$: Kubernetes reads $$ in a
-              # container's command as an escaped $, so $$ would reach psql as $.
-              psql -X -v ON_ERROR_STOP=1 -v point="$POINT" <<'SQL'
-              SET infrared.restore_point = :'point';
-              DO $reset$
-              DECLARE
-                want text := 'infrared-restore ' || current_setting('infrared.restore_point') || ': file index reset';
-                have text;
-              BEGIN
-                SELECT coalesce(shobj_description(oid, 'pg_database'), '') INTO have
-                  FROM pg_database WHERE datname = current_database();
-                IF have = want THEN
-                  RAISE NOTICE 'the file index was reset for this restore already: nothing done';
-                ELSE
-                  DROP OWNED BY seaweedfs;
-                  EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), want);
-                  RAISE NOTICE 'dropped what seaweedfs owned: the lost cluster''s file index';
-                END IF;
-              END $reset$;
-              SQL
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 256Mi
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-      containers:
-        - name: mark
-          # alpine/k8s 1.37.0: kubectl and a busybox shell.
-          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
-          env:
-            - name: HOME
-              value: /tmp
-            - name: POINT
-              value: [[ .Restore.Point | quote ]]
-            - name: MARKER
-              value: postgres
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              kubectl -n stores create configmap restore-stores --from-literal=point="$POINT" >/dev/null 2>&1 || true
-              have="$(kubectl -n stores get configmap restore-stores -o jsonpath='{.data.point}')"
-              if [ "$have" != "$POINT" ]; then
-                echo "stores/restore-stores belongs to the restore from $have, not $POINT: nothing marked" >&2
-                exit 1
-              fi
-              kubectl -n stores patch configmap restore-stores --type merge \
-                -p "{\"data\":{\"$MARKER\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" >/dev/null
-              echo "marked $MARKER for the restore from $POINT"
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 128Mi
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-      volumes:
-        - name: tmp
-          emptyDir: {}
----
-apiVersion: batch/v1
-kind: Job
-metadata:
   name: stores-restore
   namespace: stores
   annotations:
-    # After the file index is reset (0).
-    argocd.argoproj.io/sync-wave: "1"
+    # After its account and Role (-1).
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   backoffLimit: 6
   activeDeadlineSeconds: 14400
@@ -224,6 +88,45 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
+        - name: wait
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: POINT
+              value: [[ .Restore.Point | quote ]]
+            - name: MARKER
+              value: postgres
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # The Infrared chart's restore Job marks postgres once every
+              # consumer database's records are back from the backup's dump.
+              marked() {
+                [ "$(kubectl -n stores get configmap restore-stores -o jsonpath='{.data.point}' 2>/dev/null)" = "$POINT" ] &&
+                  [ -n "$(kubectl -n stores get configmap restore-stores -o jsonpath="{.data.$MARKER}" 2>/dev/null)" ]
+              }
+              until marked; do
+                echo "waiting for the restore from $POINT to mark $MARKER in stores/restore-stores"
+                sleep 10
+              done
+              echo "the restore from $POINT marked $MARKER"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
         - name: copy
           # The hourly mirror's rclone, by digest.
           image: docker.io/rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
@@ -282,7 +185,7 @@ spec:
             - -ec
             - |
               # SeaweedFS's chart makes the buckets after its first sync, which
-              # waits for the file index's reset.
+              # waits for the mark postgres too.
               for bucket in $BUCKETS; do
                 until rclone lsf --max-depth 1 "seaweedfs:$bucket" >/dev/null 2>&1; do
                   echo "waiting for the bucket $bucket in SeaweedFS"

@@ -91,10 +91,12 @@
 #   - metrics: on k3s with the stores VMSingle's data on an emptyDir of 10Gi
 #     and no claim (a request of no space), otherwise its 10Gi claim as before;
 #     and nothing else in the stack asks for a claim
-#   - backups, with a backup bucket: Postgres's WAL and a daily base backup
-#     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
+#   - backups, with a backup bucket: the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys, under the install's name or
-#     .Backup.Prefix; without one, no backup object
+#     .Backup.Prefix; with .PostgresArchive.Enabled as well, Postgres's WAL
+#     and a daily base backup through the Barman Cloud plugin, and without it
+#     (the default) nothing of the plugin, the ObjectStore, the ScheduledBackup
+#     or Postgres's key copy; without a bucket, no backup object
 #   - the backups' settings (.Copies, .PostgresArchive): the mirror's and
 #     Postgres's schedules and retentions as set, today's when not; with
 #     recipients, no bucket or identity of their own: the mirror's run mark
@@ -106,12 +108,14 @@
 #     server name (.PostgresServerName); and the backup key's Secret and keys
 #     (.Backup.Credentials), whose defaults sent explicitly render the same
 #     files as none
-#   - a restore (.Restore): Postgres starts empty; the stores-restore
-#     Application resets the file index once and copies every bucket back
-#     without overwriting, marking stores/restore-stores; SeaweedFS waits for
-#     the index, Zot and Substrate for the buckets, and the mirror copies
-#     nothing until they are back; a restore changes only those files, and
-#     the infrared Application never carries it
+#   - a restore (.Restore): Postgres starts empty, with no index reset; the
+#     stores-restore Application's one Job waits for the mark postgres, which
+#     the Infrared chart's restore Job sets once the backup's dumps are back,
+#     then copies every bucket back without overwriting and marks buckets in
+#     stores/restore-stores; SeaweedFS waits for postgres, Zot and Substrate
+#     for the buckets, and the mirror copies nothing until they are back; a
+#     restore changes only those files, and the infrared Application never
+#     carries it
 #   - each of the new settings without the stores changes only the infrared
 #     Application, or nothing
 #   - a component named in Disabled renders its Application to comments only,
@@ -326,7 +330,7 @@ for v in "${variants[@]}"; do
   # The backups' settings, Zot's retention, the archive's server name and a
   # restore: only the -data variants set them. *_app is what the infrared
   # Application carries.
-  copies_recipients="[]" pg_schedule="" pg_retention="" mirror_schedule="" mirror_retention=""
+  copies_recipients="[]" pg_archive=false pg_schedule="" pg_retention="" mirror_schedule="" mirror_retention=""
   pg_server="" restoring_point="" prefix="" backup_app="{}" retention_app="{}"
   zot_addr="$(sed -n -E 's/(^|.* )-registry ([^ ]+).*/\2/p' <<<"${extra:-}")"
   backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
@@ -344,6 +348,7 @@ for v in "${variants[@]}"; do
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
     capable="$(yq -p json -r '.SubstrateCapable // false' "$data_file")"
     copies_recipients="$(jq -c '.Copies.Recipients // []' "$data_file")"
+    pg_archive="$(jq -r '.PostgresArchive.Enabled // false' "$data_file")"
     pg_schedule="$(jq -r '.PostgresArchive.Schedule // ""' "$data_file")"
     pg_retention="$(jq -r '.PostgresArchive.Retention // ""' "$data_file")"
     mirror_schedule="$(jq -r '.Copies.Mirror.Schedule // ""' "$data_file")"
@@ -371,8 +376,9 @@ for v in "${variants[@]}"; do
   carried_backup="$backup"
   [ "$stores" = true ] || backup=""
   # The copies' buckets need the stores, a backup bucket and a recipient; a
-  # restore the stores and a backup bucket.
-  copies_on=false restoring=false
+  # restore the stores and a backup bucket; the WAL archive the stores, a
+  # backup bucket and .PostgresArchive.Enabled.
+  copies_on=false restoring=false archive_on=false
   # Substrate's test actors: on unless substrate-test-actors is left out. The
   # infrared Application never carries that name, and carries
   # substrate.testActors: true with the stores and a registry when it is absent.
@@ -381,6 +387,7 @@ for v in "${variants[@]}"; do
   carried_disabled="$(jq -c 'map(select(. != "substrate-test-actors"))' <<<"$disabled")"
   [ -n "$backup" ] && [ "$copies_recipients" != "[]" ] && copies_on=true
   [ -n "$backup" ] && [ -n "$restoring_point" ] && restoring=true
+  [ -n "$backup" ] && [ "$pg_archive" = true ] && archive_on=true
   # The code index: on with the image registry and its pin among the images,
   # by flag or in the -data file; with a pull secret, copied through
   # infrared-platform.
@@ -866,7 +873,21 @@ for v in "${variants[@]}"; do
       && ok "$variant: buckets ${want_buckets% }, each with an identity that reaches it alone, no key in the repo" \
       || bad "$variant: SeaweedFS's buckets or S3 identities are wrong"
     cn="$reg/components/cloudnative-pg.yaml"
+    if [ -n "$backup" ] && [ "$archive_on" != true ]; then
+      # No WAL archive (.PostgresArchive.Enabled false, the default): nothing of
+      # the Barman Cloud plugin, its certificates, the ObjectStore, the
+      # ScheduledBackup or Postgres's copy of the keys, and the Cluster has no
+      # plugin; the dump in each backup is what a restore reads.
+      [ -z "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .chart')" ] \
+        && ! holds_objects "$out/components/cloudnative-pg/certificates.yaml" && ! holds_objects "$out/components/cloudnative-pg/wait.yaml" \
+        && [ -z "$(sel "$p" 'select(.kind == "ObjectStore" or .kind == "ScheduledBackup" or .kind == "ExternalSecret") | .kind')" ] \
+        && [ -z "$(sel "$p" "$c | .spec.plugins // \"\"")" ] \
+        && ! grep -q 'barman' "$out/components/postgres/prepare.yaml" \
+        && ok "$variant: no WAL archive by default: no Barman plugin, certificates, ObjectStore, ScheduledBackup or key copy for Postgres" \
+        || bad "$variant: the WAL archive renders without .PostgresArchive.Enabled"
+    fi
     if [ -n "$backup" ]; then
+      if [ "$archive_on" = true ]; then
       # Postgres: every WAL segment and a daily base backup to the outside
       # bucket, kept seven days, through CloudNativePG's Barman Cloud plugin.
       [ "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .targetRevision')" = 0.8.1 ] \
@@ -887,6 +908,7 @@ for v in "${variants[@]}"; do
         && [ "$(sel "$p" "$sb | .spec.schedule + \" \" + (.spec.immediate | tostring) + \" \" + .spec.method + \" \" + .spec.pluginConfiguration.name")" = "${pg_schedule:-0 0 3 * * *} true plugin barman-cloud.cloudnative-pg.io" ] \
         && ok "$variant: Postgres's WAL continuously and a base backup (${pg_schedule:-0 0 3 * * *}) to s3://$backup/${prefix:-$cluster}/postgres/${pg_server:-postgres}, kept ${pg_retention:-7d}" \
         || bad "$variant: Postgres's backups are wrong"
+      fi
       # The buckets: copied every hour, what a copy replaces kept seven days.
       cj='select(.kind == "CronJob" and .metadata.name == "seaweedfs-backup")'
       env() { sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == \"$1\") | (.value // .valueFrom.secretKeyRef.name)"; }
@@ -934,10 +956,13 @@ for v in "${variants[@]}"; do
         ! grep -q restore-stores <<<"$(sel "$sw" "$cj")" \
           && ok "$variant: no restore, so the mirror waits for nothing" || bad "$variant: the mirror reads the restore's markers without a restore"
       fi
-      # Both copy the platform's backup keys, and nothing else, from the store.
-      [ "$(sel "$work/$variant-built/postgres.yaml" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "backup-access-key-id backup-secret-access-key " ] \
+      # The mirror, and with the archive Postgres, copy the platform's backup
+      # keys, and nothing else, from the store.
+      pg_keys=""
+      [ "$archive_on" != true ] || pg_keys="backup-access-key-id backup-secret-access-key "
+      [ "$(sel "$work/$variant-built/postgres.yaml" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "$pg_keys" ] \
         && [ "$(sel "$sw" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "backup-access-key-id backup-secret-access-key " ] \
-        && ok "$variant: the backup keys come from infrared-platform-tokens" || bad "$variant: the backup keys are copied wrong"
+        && ok "$variant: the backup keys come from infrared-platform-tokens${pg_keys:+, for the WAL archive too}" || bad "$variant: the backup keys are copied wrong"
     else
       [ -z "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .chart')" ] \
         && [ -z "$(sel "$p" 'select(.kind == "ObjectStore" or .kind == "ScheduledBackup" or .kind == "ExternalSecret") | .kind')" ] \
@@ -1081,10 +1106,11 @@ for v in "${variants[@]}"; do
   fi
 
   # A restore: with the stores, a backup bucket and a restore point, and only
-  # then. Postgres starts empty, as on any install (the backup's dump restores
-  # its records); the stores-restore Application resets the file index once
-  # and copies the buckets back without overwriting; SeaweedFS waits for the
-  # index, Zot and Substrate for the buckets.
+  # then. Postgres starts empty, as on any install (the Infrared chart's
+  # restore Job brings the backup's dumps back and marks postgres); the
+  # stores-restore Application's one Job waits for that mark, then copies the
+  # buckets back without overwriting and marks buckets; SeaweedFS waits for
+  # postgres, Zot and Substrate for the buckets.
   restore_files="$(printf '%s\n' "$reg/components/stores-restore.yaml" "$out/components/seaweedfs/restore-wait.yaml" \
       "$out/components/zot/restore-wait.yaml" "$out/components/substrate/restore-wait.yaml"
     find "$out/components/stores-restore" -name '*.yaml')"
@@ -1103,15 +1129,17 @@ for v in "${variants[@]}"; do
     r="$work/$variant-built/stores-restore.yaml"
     job() { sel "$r" "select(.kind == \"Job\" and .metadata.name == \"$1\") | $2"; }
     jenv() { job "$1" ".spec.template.spec.$2[] | .env[] | select(.name == \"$3\") | (.value // .valueFrom.secretKeyRef.name)"; }
-    reset_sql="$(job stores-index-reset '.spec.template.spec.initContainers[0].command[2]')"
-    copy_sh="$(job stores-restore '.spec.template.spec.initContainers[0].command[2]')"
-    [ "$(job stores-index-reset '.metadata.annotations["argocd.argoproj.io/sync-wave"]') $(job stores-restore '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "0 1" ] \
+    wait_sh="$(job stores-restore '.spec.template.spec.initContainers[0].command[2]')"
+    copy_sh="$(job stores-restore '.spec.template.spec.initContainers[1].command[2]')"
+    # shellcheck disable=SC2016 # the wait's own words, matched as they render
+    [ "$(sel "$r" 'select(.kind == "Job" and .metadata.annotations["argocd.argoproj.io/hook"] == null) | .metadata.name' | tr '\n' ' ')" = "stores-restore " ] \
+      && [ "$(job stores-restore '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = 0 ] \
       && [ -z "$(sel "$r" 'select(.kind == "Job" and .metadata.annotations["argocd.argoproj.io/hook"] == null) | .spec.ttlSecondsAfterFinished // ""')" ] \
-      && [ "$(job stores-index-reset '.spec.template.spec.initContainers[0].image')" = "$(sel "$p" "$c | .spec.imageName")" ] \
-      && [ "$(jenv stores-index-reset initContainers PGUSER) $(jenv stores-index-reset initContainers PGHOST) $(jenv stores-index-reset initContainers PGDATABASE)" \
-          = "postgres-seaweedfs postgres-rw.stores.svc seaweedfs" ] \
-      && grep -q 'DROP OWNED BY seaweedfs;' <<<"$reset_sql" && grep -q "COMMENT ON DATABASE" <<<"$reset_sql" && grep -q 'IF have = want THEN' <<<"$reset_sql" \
-      && [ "$(jenv stores-index-reset containers POINT) $(jenv stores-index-reset containers MARKER)" = "$restoring_point postgres" ] \
+      && [ "$(job stores-restore '.spec.template.spec.initContainers[].name' | tr '\n' ' ')" = "wait copy " ] \
+      && [ "$(jenv stores-restore initContainers POINT) $(jenv stores-restore initContainers MARKER)" = "$restoring_point postgres" ] \
+      && grep -qF 'jsonpath='"'"'{.data.point}'"'"' 2>/dev/null)" = "$POINT" ]' <<<"$wait_sh" \
+      && grep -qF 'jsonpath="{.data.$MARKER}" 2>/dev/null)" ]' <<<"$wait_sh" && grep -q '^ *until marked; do$' <<<"$wait_sh" \
+      && ! grep -q 'psql\|DROP OWNED' <<<"$wait_sh" \
       && grep -q -- '--ignore-existing' <<<"$copy_sh" && ! grep -qE 'rclone (sync|move|delete|purge)' <<<"$copy_sh" \
       && grep -qF 'if ! listed="$(rclone lsf --max-depth 1 "$SOURCE/$bucket")"; then' <<<"$copy_sh" && ! grep -q '2>/dev/null' <<<"$copy_sh" \
       && [ "$(jenv stores-restore initContainers BUCKETS)" = "${want_buckets% }" ] \
@@ -1120,10 +1148,11 @@ for v in "${variants[@]}"; do
       && [ "$(jenv stores-restore containers POINT) $(jenv stores-restore containers MARKER)" = "$restoring_point buckets" ] \
       && [ "$(line "$r" 'select(.kind == "Role" and .metadata.name == "stores-restore") | .rules[] | (.resourceNames // [] | join(",")) + ":" + (.verbs | join(","))')" = ":create restore-stores:get,patch" ] \
       && [ "$(sel "$r" 'select(.kind == "Job" and .metadata.name == "stores-restore-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_SERVICES") | .value)')" = "PreSync stores/postgres-rw" ] \
-      && ok "$variant: the file index reset once (0), then every bucket copied back without overwriting (1), a failed listing failing the Job, each marking stores/restore-stores for $restoring_point" \
-      || bad "$variant: the stores' restore Jobs are wrong"
-    # The waits: SeaweedFS for the index, Zot and Substrate for the buckets,
-    # each a PreSync hook reading that one ConfigMap through a Role in stores.
+      && ok "$variant: one Job, no index reset: it waits for the mark postgres, then copies every bucket back without overwriting, a failed listing failing it, and marks buckets in stores/restore-stores for $restoring_point" \
+      || bad "$variant: the stores' restore Job is wrong"
+    # The waits: SeaweedFS for Postgres's records (the mark postgres), Zot and
+    # Substrate for the buckets, each a PreSync hook reading that one ConfigMap
+    # through a Role in stores.
     waits_want="seaweedfs:postgres" waits_got=""
     [ -n "$zot_addr" ] && waits_want="$waits_want zot:buckets"
     [ "$substrate" = true ] && waits_want="$waits_want substrate:buckets"
@@ -1139,7 +1168,7 @@ for v in "${variants[@]}"; do
       fi
     done
     [ "${waits_got# }" = "$waits_want" ] \
-      && ok "$variant: SeaweedFS waits for the reset index, and Zot and Substrate, where they run, for the buckets (${waits_got# })" \
+      && ok "$variant: SeaweedFS waits for Postgres's records, and Zot and Substrate, where they run, for the buckets (${waits_got# })" \
       || bad "$variant: the restore's waits are '${waits_got# }', want '$waits_want'"
   else
     left="$(for f in $restore_files; do [ -f "$f" ] && holds_objects "$f" && echo "$f"; done || true)"

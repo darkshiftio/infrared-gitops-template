@@ -116,8 +116,12 @@ type Data struct {
 	Copies Copies `json:"Copies"`
 	// PostgresArchive is Barman's WAL archiving of the platform's Postgres to
 	// the backup bucket: Enabled is spec.backup.postgres.archive, which the
-	// infrared Application carries; Schedule is the base backup's and
-	// Retention the archive's, each empty for today's literal.
+	// infrared Application carries, and renders the archive (the Barman Cloud
+	// plugin, the Cluster's WAL archiver, the ObjectStore and the base
+	// backups) with the stores and a backup bucket; off, the default, renders
+	// none of it, since each backup carries a dump of every consumer database.
+	// Schedule is the base backup's and Retention the archive's, each empty
+	// for today's literal.
 	PostgresArchive PostgresArchive `json:"PostgresArchive"`
 	// RegistryRetention is the operator's INFRARED_REGISTRY_RETENTION: Zot's
 	// garbage collection and retention. Each empty field renders today's
@@ -125,9 +129,10 @@ type Data struct {
 	RegistryRetention RegistryRetention `json:"RegistryRetention"`
 	// Restore is the restore in progress, which the operator reads from the
 	// ConfigMap infrared/infrared-restore while its phase is ObjectsRestored or
-	// Failed, and zero otherwise. With the stores and a backup bucket it
-	// starts Postgres empty, resets SeaweedFS's file index, copies the buckets
-	// back and holds what needs them until they are back.
+	// Failed, and zero otherwise. With the stores and a backup bucket it waits
+	// for the Infrared chart's restore Job to bring Postgres's records back
+	// into the empty Postgres (the mark postgres), copies the buckets back and
+	// holds what needs them until they are back.
 	Restore Restore `json:"Restore"`
 	// PostgresServerName is the server name the platform's Postgres archives
 	// under, s3://<Backup.Bucket>/<prefix>/postgres/<name>/: it must name an
@@ -151,9 +156,9 @@ type CopySchedule struct {
 }
 
 // PostgresArchive is Barman's archive of the platform's Postgres: Enabled is
-// spec.backup.postgres.archive; Schedule the base backup's (six cron fields,
-// seconds first) and Retention the archive's (whole days), each empty for the
-// default, 0 0 3 * * * and 7d.
+// spec.backup.postgres.archive, which turns it on (off by default); Schedule
+// the base backup's (six cron fields, seconds first) and Retention the
+// archive's (whole days), each empty for the default, 0 0 3 * * * and 7d.
 type PostgresArchive struct {
 	Enabled   bool   `json:"Enabled"`
 	Schedule  string `json:"Schedule"`
