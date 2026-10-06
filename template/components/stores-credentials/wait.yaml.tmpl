@@ -1,5 +1,5 @@
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
-[[- if and .Stores (or .Registry $copies) -]]
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- if and .Stores (or .Registry $backups) -]]
 # =============================================================================
 # Before the store: External Secrets' webhook, and SeaweedFS's S3 gateway.
 # =============================================================================

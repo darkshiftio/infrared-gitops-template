@@ -93,16 +93,20 @@
 #     and nothing else in the stack asks for a claim
 #   - backups, with a backup bucket: Postgres's WAL and a daily base backup
 #     through the Barman Cloud plugin, the buckets copied hourly, kept 7 days,
-#     with the platform's backup keys; without one, no backup object
-#   - the copies (.Copies): Postgres's and the mirror's schedules and
-#     retentions as set, today's when not; with recipients, the buckets
-#     infrared-objects and gitea-dumps, each with an identity that reaches it
-#     alone, read by the identity backup, mirrored last, and their keys copied
-#     into the Infrared namespace through infrared-stores, which then renders
-#     even without a registry; Zot's retention as set (.RegistryRetention); and
-#     the archive's server name (.PostgresServerName)
-#   - a restore (.Restore): Postgres recovers from the source archive to the
-#     target time and archives under a name of its own; the stores-restore
+#     with the platform's backup keys, under the install's name or
+#     .Backup.Prefix; without one, no backup object
+#   - the backups' settings (.Copies, .PostgresArchive): the mirror's and
+#     Postgres's schedules and retentions as set, today's when not; with
+#     recipients, no bucket or identity of their own: the mirror's run mark
+#     names the newest complete backup under <prefix>/backups/ (a run of the
+#     mark's script against a fake bucket proves which), and the Postgres role
+#     substrate's Secret is copied into the Infrared namespace for the backup's
+#     dump through infrared-stores, which then renders even without a
+#     registry; Zot's retention as set (.RegistryRetention); the archive's
+#     server name (.PostgresServerName); and the backup key's Secret and keys
+#     (.Backup.Credentials), whose defaults sent explicitly render the same
+#     files as none
+#   - a restore (.Restore): Postgres starts empty; the stores-restore
 #     Application resets the file index once and copies every bucket back
 #     without overwriting, marking stores/restore-stores; SeaweedFS waits for
 #     the index, Zot and Substrate for the buckets, and the mirror copies
@@ -199,22 +203,26 @@ yq -p json -o json '. + {"Registry": "'"$zot_registry"'"}' "$work/stores.json" >
 yq -p json -o json '. + {"SubstrateCapable": true}' "$work/registry.json" >"$work/substrate.json"
 substrate_pins=scripts/substrate-images.json
 
-# The copies variant: Substrate's Data with every copy's schedule and retention,
-# an age recipient (age's own example key), Zot's retention and the archive's
-# server name set: the one install with the copies on. copies-noreg: the
-# stores' Data with a recipient alone, no registry. The restore variants: a
-# restore in progress, with and without the copies.
+# The copies variant: Substrate's Data with backups on: an age recipient (age's
+# own example key), the mirror's and Postgres's schedules and retentions, the
+# archive on, a prefix of its own, the backup key's credentials as the operator
+# sends them (today's defaults, spelled out), Zot's retention and the archive's
+# server name: the one install with backups on. copies-noreg: the stores' Data
+# with a recipient alone, no registry. The restore variants: a restore in
+# progress, with and without backups.
 age_recipient=age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
 server_name=postgres-20261003T060000Z
-restore_point=20261003T050500Z
-restore_source=postgres
-restore_target=2026-10-03T05:17:00Z
+restore_point=20261006T010500Z
+restore_run=20261006T011700Z
+backup_prefix=acme-mgmt
 yq -p json -o json '. + {
-    "Copies": {"Recipients": ["'"$age_recipient"'"],
-      "Postgres": {"Schedule": "0 30 2 * * *", "Retention": "14d"}, "Mirror": {"Schedule": "47 * * * *", "Retention": "10d"},
-      "Objects": {"Schedule": "35 * * * *", "Retention": "9d"}, "Gitea": {"Schedule": "40 * * * *", "Retention": "8d"}},
+    "Copies": {"Recipients": ["'"$age_recipient"'"], "Mirror": {"Schedule": "47 * * * *", "Retention": "10d"}},
+    "PostgresArchive": {"Enabled": true, "Schedule": "0 30 2 * * *", "Retention": "14d"},
     "RegistryRetention": {"UntaggedAfter": "48h", "KeepTags": ["^v[0-9]", "^release-"], "KeepNewest": 20, "GCInterval": "2h", "GCDelay": "30m"},
-    "PostgresServerName": "'"$server_name"'"}' "$work/substrate.json" >"$work/copies.json"
+    "PostgresServerName": "'"$server_name"'"}
+  | .Backup.Prefix = "'"$backup_prefix"'"
+  | .Backup.Credentials = {"Secret": "infrared-platform-tokens", "AccessKeyIDKey": "backup-access-key-id",
+      "SecretKeyKey": "backup-secret-access-key", "Kind": "accessKey"}' "$work/substrate.json" >"$work/copies.json"
 # The test actors off: Substrate's Data with substrate-test-actors among the
 # components left out, as the Infrared chart hands it over by default.
 yq -p json -o json '.Disabled += ["substrate-test-actors"]' "$work/substrate.json" >"$work/substrate-off.json"
@@ -231,7 +239,7 @@ yq -p json -o json '.Images["code-index"] = {"tag": "'"$ci_tag"'", "digest": "'"
 yq -p json -o json '.Images["code-index"] = {"tag": "'"$ci_tag"'", "digest": "'"$ci_digest"'"} | .imagePullSecret = ""' \
   "$work/gateway.json" >"$work/code-index-plain.json"
 yq -p json -o json '. + {"Copies": {"Recipients": ["'"$age_recipient"'"]}}' "$work/stores.json" >"$work/copies-noreg.json"
-yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Postgres": {"Source": "'"$restore_source"'", "TargetTime": "'"$restore_target"'"}}}' \
+yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
   "$work/copies.json" >"$work/restore.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'"}, "PostgresServerName": "'"$server_name"'"}' "$work/substrate.json" >"$work/restore-plain.json"
 
@@ -315,10 +323,11 @@ for v in "${variants[@]}"; do
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
   grep -qw -- -substrate-capable <<<"${extra:-}" && capable=true
-  # The copies, Zot's retention, the archive's server name and a restore: only
-  # the -data variants set them. *_app is what the infrared Application carries.
+  # The backups' settings, Zot's retention, the archive's server name and a
+  # restore: only the -data variants set them. *_app is what the infrared
+  # Application carries.
   copies_recipients="[]" pg_schedule="" pg_retention="" mirror_schedule="" mirror_retention=""
-  pg_server="" restoring_point="" restoring_source="" restoring_target="" copies_app="{}" retention_app="{}"
+  pg_server="" restoring_point="" prefix="" backup_app="{}" retention_app="{}"
   zot_addr="$(sed -n -E 's/(^|.* )-registry ([^ ]+).*/\2/p' <<<"${extra:-}")"
   backup="$(sed -n -E 's/.*-backup [^ ]*"bucket":"([^"]*)".*/\1/p' <<<"${extra:-}")"
   if [ -n "$data_file" ]; then
@@ -335,19 +344,21 @@ for v in "${variants[@]}"; do
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
     capable="$(yq -p json -r '.SubstrateCapable // false' "$data_file")"
     copies_recipients="$(jq -c '.Copies.Recipients // []' "$data_file")"
-    pg_schedule="$(jq -r '.Copies.Postgres.Schedule // ""' "$data_file")"
-    pg_retention="$(jq -r '.Copies.Postgres.Retention // ""' "$data_file")"
+    pg_schedule="$(jq -r '.PostgresArchive.Schedule // ""' "$data_file")"
+    pg_retention="$(jq -r '.PostgresArchive.Retention // ""' "$data_file")"
     mirror_schedule="$(jq -r '.Copies.Mirror.Schedule // ""' "$data_file")"
     mirror_retention="$(jq -r '.Copies.Mirror.Retention // ""' "$data_file")"
     pg_server="$(jq -r '.PostgresServerName // ""' "$data_file")"
     restoring_point="$(jq -r '.Restore.Point // ""' "$data_file")"
-    restoring_source="$(jq -r '.Restore.Postgres.Source // ""' "$data_file")"
-    restoring_target="$(jq -r '.Restore.Postgres.TargetTime // ""' "$data_file")"
-    copies_app="$(jq -c '(.Copies // {}) as $c
-      | ({postgres: $c.Postgres, mirror: $c.Mirror, objects: $c.Objects, gitea: $c.Gitea}
-         | with_entries(.value |= ((. // {}) | {schedule: .Schedule, retention: .Retention} | with_entries(select((.value // "") != "")))))
-        + {recipients: ($c.Recipients // [])}
-      | with_entries(select(.value != {} and .value != []))' "$data_file")"
+    prefix="$(jq -r '.Backup.Prefix // ""' "$data_file")"
+    # The backups' settings that are set, as the chart's backup values name
+    # them: recipients, mirror.schedule, retention (the mirror's) and
+    # postgres.archive.
+    backup_app="$(jq -c '(.Copies // {}) as $c
+      | {recipients: ($c.Recipients // []), mirror: {schedule: ($c.Mirror.Schedule // "")},
+         retention: ($c.Mirror.Retention // ""), postgres: {archive: (.PostgresArchive.Enabled // false)}}
+      | .mirror |= with_entries(select(.value != "")) | .postgres |= with_entries(select(.value == true))
+      | with_entries(select(.value != {} and .value != [] and .value != ""))' "$data_file")"
     retention_app="$(jq -c '(.RegistryRetention // {})
       | {untaggedAfter: .UntaggedAfter, keepTags: .KeepTags, keepNewest: .KeepNewest, gcInterval: .GCInterval, gcDelay: .GCDelay}
       | with_entries(select(.value != null and .value != "" and .value != [] and .value != 0))' "$data_file")"
@@ -489,8 +500,12 @@ for v in "${variants[@]}"; do
     want="$want}"$'\n'
   fi
   [ "$stores" = true ] && want="${want}stores: {enabled: true}"$'\n'
-  [ -n "$carried_backup" ] \
-    && want="${want}backup: {bucket: \"$carried_backup\"${endpoint:+, endpoint: \"$endpoint\"}${region:+, region: \"$region\"}}"$'\n'
+  # backup: the bucket with its endpoint, region and prefix as set, and the
+  # backups' settings that are set.
+  carried="$(jq -cn --arg b "$carried_backup" --arg e "$endpoint" --arg r "$region" --arg p "$prefix" --argjson s "$backup_app" '
+    (if $b == "" then {} else {bucket: $b} + (if $e == "" then {} else {endpoint: $e} end)
+      + (if $r == "" then {} else {region: $r} end) + (if $p == "" then {} else {prefix: $p} end) end) + $s')"
+  [ "$carried" != "{}" ] && want="${want}backup: $carried"$'\n'
   [ "$carried_disabled" != "[]" ] && want="${want}components: {disabled: $carried_disabled}"$'\n'
   [ "$stores" = true ] && [ -n "$zot_addr" ] && [ "$test_actors" = true ] && want="${want}substrate: {testActors: true}"$'\n'
   [ "$code_index" = true ] && want="${want}codeIndex: {enabled: true, image: {tag: \"$pin_tag\", digest: \"$pin_digest\"}}"$'\n'"platformTokens: {existingSecret: infrared-platform-tokens}"$'\n'
@@ -502,7 +517,6 @@ for v in "${variants[@]}"; do
   if [ -n "$zot_addr" ] || [ "$retention_app" != "{}" ]; then
     want="${want}registry: $(jq -cn --arg a "$zot_addr" --argjson r "$retention_app" '{} + (if $a != "" then {address: $a} else {} end) + (if $r != {} then {retention: $r} else {} end)')"$'\n'
   fi
-  [ "$copies_app" != "{}" ] && want="${want}copies: $copies_app"$'\n'
   want="$(yq -o json -I0 'sort_keys(..)' <<<"${want:-"{}"}")"
   got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject
       | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|copies|substrate|codeIndex|platformTokens)$"))) | sort_keys(..)' \
@@ -833,20 +847,12 @@ for v in "${variants[@]}"; do
     ids="$(sel "$sw" 'select(.kind == "Secret" and .metadata.name == "seaweedfs-s3-identities") | .stringData.seaweedfs_s3_config')"
     want_ids="ate-snapshots:ate-snapshots registry:registry ${backup:+backup:ate-snapshots,registry }"
     want_secrets="seaweedfs-s3-ate-snapshots ${backup:+seaweedfs-s3-backup }seaweedfs-s3-registry "
+    # The same with backups on: they go straight outside, so no bucket or
+    # identity of their own.
     want_buckets="ate-snapshots registry "
-    if [ "$copies_on" = true ]; then
-      # The copies' buckets, each with its own identity, and backup reads them.
-      want_ids="ate-snapshots:ate-snapshots registry:registry backup:ate-snapshots,registry,infrared-objects,gitea-dumps objects-copy:infrared-objects gitea-dump:gitea-dumps "
-      want_secrets="seaweedfs-s3-ate-snapshots seaweedfs-s3-backup seaweedfs-s3-gitea-dump seaweedfs-s3-objects-copy seaweedfs-s3-registry "
-      want_buckets="ate-snapshots registry infrared-objects gitea-dumps "
-    fi
     if [ "$restoring" = true ]; then
       # A restore writes every bucket back as the identity restore.
-      if [ "$copies_on" = true ]; then
-        want_ids="${want_ids}restore:ate-snapshots,registry,infrared-objects,gitea-dumps "
-      else
-        want_ids="${want_ids}restore:ate-snapshots,registry "
-      fi
+      want_ids="${want_ids}restore:ate-snapshots,registry "
       want_secrets="$(printf '%s\n' $want_secrets seaweedfs-s3-restore | sort | tr '\n' ' ')"
     fi
     [ "$(sel "$f" "$v | .s3.createBuckets[].name" | tr '\n' ' ')" = "$want_buckets" ] \
@@ -871,7 +877,7 @@ for v in "${variants[@]}"; do
         || bad "$variant: the Barman Cloud plugin or its certificates are wrong"
       os='select(.kind == "ObjectStore" and .metadata.name == "backup")'
       sb='select(.kind == "ScheduledBackup")'
-      [ "$(sel "$p" "$os | .spec.configuration.destinationPath")" = "s3://$backup/$cluster/postgres" ] \
+      [ "$(sel "$p" "$os | .spec.configuration.destinationPath")" = "s3://$backup/${prefix:-$cluster}/postgres" ] \
         && [ "$(sel "$p" "$os | .spec.configuration.endpointURL // \"\"")" = "$endpoint" ] \
         && [ "$(sel "$p" "$os | .spec.retentionPolicy")" = "${pg_retention:-7d}" ] \
         && [ -z "$(sel "$p" "$os | .spec.configuration.serverName // \"\"")" ] \
@@ -879,24 +885,41 @@ for v in "${variants[@]}"; do
         && [ "$(sel "$p" "$c | .spec.plugins[] | .name + \" \" + (.isWALArchiver | tostring) + \" \" + .parameters.barmanObjectName")" = "barman-cloud.cloudnative-pg.io true backup" ] \
         && [ "$(sel "$p" "$c | .spec.plugins[0].parameters.serverName // \"\"")" = "$pg_server" ] \
         && [ "$(sel "$p" "$sb | .spec.schedule + \" \" + (.spec.immediate | tostring) + \" \" + .spec.method + \" \" + .spec.pluginConfiguration.name")" = "${pg_schedule:-0 0 3 * * *} true plugin barman-cloud.cloudnative-pg.io" ] \
-        && ok "$variant: Postgres's WAL continuously and a base backup (${pg_schedule:-0 0 3 * * *}) to s3://$backup/$cluster/postgres/${pg_server:-postgres}, kept ${pg_retention:-7d}" \
+        && ok "$variant: Postgres's WAL continuously and a base backup (${pg_schedule:-0 0 3 * * *}) to s3://$backup/${prefix:-$cluster}/postgres/${pg_server:-postgres}, kept ${pg_retention:-7d}" \
         || bad "$variant: Postgres's backups are wrong"
       # The buckets: copied every hour, what a copy replaces kept seven days.
       cj='select(.kind == "CronJob" and .metadata.name == "seaweedfs-backup")'
       env() { sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == \"$1\") | (.value // .valueFrom.secretKeyRef.name)"; }
       script="$(sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].command[2]")"
       backup_reads="Read:ate-snapshots List:ate-snapshots Read:registry List:registry"
-      [ "$copies_on" = true ] && backup_reads="$backup_reads Read:infrared-objects List:infrared-objects Read:gitea-dumps List:gitea-dumps"
       mirror_days="${mirror_retention:-7d}"
       [ "$(sel "$sw" "$cj | .spec.schedule")" = "${mirror_schedule:-17 * * * *}" ] \
         && sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].image" | grep -qE '^docker\.io/rclone/rclone:1\.75\.1@sha256:[0-9a-f]{64}$' \
-        && [ "$(env DESTINATION)" = "dst:$backup/$cluster/seaweedfs" ] && [ "$(env BUCKETS)" = "${want_buckets% }" ] \
+        && [ "$(env DESTINATION)" = "dst:$backup/${prefix:-$cluster}/seaweedfs" ] && [ "$(env BUCKETS)" = "${want_buckets% }" ] \
         && [ "$(env RCLONE_CONFIG_SRC_ACCESS_KEY_ID) $(env RCLONE_CONFIG_DST_ACCESS_KEY_ID)" = "seaweedfs-s3-backup seaweedfs-backup" ] \
         && [ "$(env RCLONE_CONFIG_DST_ENDPOINT)" = "$endpoint" ] \
         && grep -q -- '--backup-dir "$DESTINATION/archive/$run/$bucket"' <<<"$script" && grep -q "${mirror_days%d} \\* 24 \\* 3600" <<<"$script" \
         && [ "$(yq -p json -r '.identities[] | select(.name == "backup") | .actions | join(" ")' <<<"$ids")" = "$backup_reads" ] \
-        && ok "$variant: ${want_buckets% } copied (${mirror_schedule:-17 * * * *}) to $backup/$cluster/seaweedfs, replaced objects kept $mirror_days, read as the identity backup" \
+        && ok "$variant: ${want_buckets% } copied (${mirror_schedule:-17 * * * *}) to $backup/${prefix:-$cluster}/seaweedfs, replaced objects kept $mirror_days, read as the identity backup" \
         || bad "$variant: the buckets' hourly copy is wrong"
+      # The run's mark: with backups on it names the newest complete backup
+      # under <prefix>/backups/ (BACKUPS), found before any bucket is copied
+      # (a run against a fake bucket, below, proves which one); without,
+      # today's mark.
+      # shellcheck disable=SC2016 # the script's own words, matched as they render
+      if [ "$copies_on" = true ]; then
+        found="$(grep -n 'backup="$stamp"' <<<"$script" | cut -d: -f1)" copied="$(grep -n 'for bucket in $BUCKETS' <<<"$script" | cut -d: -f1)"
+        [ "$(env BACKUPS)" = "dst:$backup/${prefix:-$cluster}/backups" ] \
+          && grep -qF "printf '{\"run\": \"%s\", \"finished\": \"%s\", \"buckets\": \"%s\", \"backup\": \"%s\"}\\n'" <<<"$script" \
+          && [ -n "$found" ] && [ -n "$copied" ] && [ "$found" -lt "$copied" ] \
+          && ok "$variant: each run's mark names the newest complete backup in $backup/${prefix:-$cluster}/backups, looked for before any bucket is copied" \
+          || bad "$variant: the mirror's mark does not name the newest backup before the run copies"
+      else
+        [ -z "$(env BACKUPS)" ] && ! grep -q '"backup"' <<<"$script" \
+          && grep -qF "printf '{\"run\": \"%s\", \"finished\": \"%s\", \"buckets\": \"%s\"}\\n'" <<<"$script" \
+          && ok "$variant: no recipient, no backups: the mark is today's" \
+          || bad "$variant: the mirror's mark names a backup without recipients"
+      fi
       # During a restore, and only then, a run copies nothing until the
       # restore marks buckets for its point: the new, empty buckets would
       # otherwise empty the copy outside, which the restore reads.
@@ -941,7 +964,8 @@ for v in "${variants[@]}"; do
         && ok "$variant: $name Application (wave $wave)" || bad "$variant: $name Application missing or wrong"
     done
     # The store over stores: the registry's S3 keys alone, for registry alone;
-    # with Substrate, its S3 keys and its Postgres role too, for ate-system.
+    # with Substrate, its S3 keys and its Postgres role too, for ate-system;
+    # with backups, the Postgres role substrate, for the Infrared namespace.
     # The namespace stores is the stores' own Applications'.
     c="$work/$variant-built/stores-credentials.yaml"
     want_ns=registry want_names=seaweedfs-s3-registry
@@ -949,7 +973,8 @@ for v in "${variants[@]}"; do
       want_ns="registry ate-system" want_names="seaweedfs-s3-registry,seaweedfs-s3-ate-snapshots,postgres-substrate"
     fi
     if [ "$copies_on" = true ]; then
-      want_ns="$want_ns infrared" want_names="$want_names,seaweedfs-s3-objects-copy,seaweedfs-s3-gitea-dump"
+      want_ns="$want_ns infrared"
+      [ "$substrate" = true ] || want_names="$want_names,postgres-substrate"
     fi
     [ -z "$(sel "$reg/components/stores-credentials.yaml" '.spec.syncPolicy.syncOptions[] | select(. == "CreateNamespace=true")')" ] \
       && [ "$(line "$c" 'select(.kind == "ClusterSecretStore" and .metadata.name == "infrared-stores") | .spec.conditions[].namespaces[]')" = "$want_ns" ] \
@@ -1022,9 +1047,14 @@ for v in "${variants[@]}"; do
     [ -z "$left" ] && ok "$variant: no registry inside the cluster, no objects of it" || bad "$variant: registry objects rendered without Registry and Stores: $left"
   fi
 
-  # The copies' keys: with the copies, the store infrared-stores admits the
-  # Infrared namespace for the two identities' Secrets alone, and two
-  # ExternalSecrets copy them there, after the store; without, nothing of it.
+  # The backups' Postgres role: with backups on, the store infrared-stores
+  # admits the Infrared namespace for postgres-substrate, and one
+  # ExternalSecret copies it there under its own name, after the store, for
+  # the operator's backup Job to dump Substrate's records as the role
+  # substrate; without, nothing of it. The staging copies' keys are gone.
+  [ ! -e "$out/components/stores-credentials/copies.yaml" ] && ! grep -rqE 'objects-copy|gitea-dump|infrared-objects' "$out" \
+    && ok "$variant: no staging bucket, identity or key of the copies" \
+    || bad "$variant: the staging copies' buckets, identities or keys are still rendered"
   if [ "$copies_on" = true ]; then
     c="$work/$variant-built/stores-credentials.yaml"
     sc="$reg/components/stores-credentials.yaml"
@@ -1032,49 +1062,38 @@ for v in "${variants[@]}"; do
     [ "$(sel "$sc" '.metadata.name + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"] + " " + .metadata.labels["infrared.darkshift.io/layer"]')" = "stores-credentials 19 secrets" ] \
       && [ "$(sel "$c" 'select(.kind == "ClusterSecretStore") | .metadata.annotations["argocd.argoproj.io/sync-wave"]')" = 1 ] \
       && grep -qw infrared <<<"$(line "$c" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" \
-      && grep -qw seaweedfs-s3-objects-copy <<<"$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" \
-      && grep -qw seaweedfs-s3-gitea-dump <<<"$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" \
-      && [ "$(xs objects-copy-s3)" = "infrared 2 infrared-stores objects-copy-s3 AWS_ACCESS_KEY_ID=seaweedfs-s3-objects-copy/AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY=seaweedfs-s3-objects-copy/AWS_SECRET_ACCESS_KEY" ] \
-      && [ "$(xs gitea-dump-s3)" = "infrared 2 infrared-stores gitea-dump-s3 AWS_ACCESS_KEY_ID=seaweedfs-s3-gitea-dump/AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY=seaweedfs-s3-gitea-dump/AWS_SECRET_ACCESS_KEY" ] \
-      && ok "$variant: the copies' keys reach infrared (objects-copy-s3, gitea-dump-s3) through infrared-stores, after the store" \
-      || bad "$variant: the copies' keys are not copied into infrared as they should be"
+      && grep -qw postgres-substrate <<<"$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" \
+      && [ "$(line "$c" 'select(.kind == "ExternalSecret" and .metadata.namespace == "infrared") | .metadata.name')" = postgres-substrate ] \
+      && [ "$(xs postgres-substrate | grep '^infrared ')" = "infrared 2 infrared-stores postgres-substrate username=postgres-substrate/username,password=postgres-substrate/password" ] \
+      && ok "$variant: the Postgres role substrate reaches infrared (postgres-substrate) through infrared-stores, after the store, for the backup's dump" \
+      || bad "$variant: the backup's Postgres role is not copied into infrared as it should be"
     if [ -z "$zot_addr" ]; then
-      # Without the registry the store admits infrared alone, for those two alone.
+      # Without the registry the store admits infrared alone, for that role alone.
       [ "$(line "$c" 'select(.kind == "ClusterSecretStore") | .spec.conditions[].namespaces[]')" = infrared ] \
-        && [ "$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" = "seaweedfs-s3-objects-copy seaweedfs-s3-gitea-dump" ] \
-        && ok "$variant: without the registry the store hands out the copies' keys alone, to infrared alone" \
-        || bad "$variant: without the registry the store hands out more than the copies' keys"
+        && [ "$(line "$c" 'select(.kind == "Role") | .rules[].resourceNames[]')" = "postgres-substrate" ] \
+        && ok "$variant: without the registry the store hands out the backup's Postgres role alone, to infrared alone" \
+        || bad "$variant: without the registry the store hands out more than the backup's Postgres role"
     fi
   else
-    ! holds_objects "$out/components/stores-credentials/copies.yaml" \
-      && ok "$variant: no recipient (or no stores or backup bucket), no copies' keys" \
-      || bad "$variant: the copies' keys rendered without the copies"
+    ! holds_objects "$out/components/stores-credentials/backup.yaml" \
+      && ok "$variant: no recipient (or no stores or backup bucket), no backups' Postgres role" \
+      || bad "$variant: the backups' Postgres role is copied without backups"
   fi
 
   # A restore: with the stores, a backup bucket and a restore point, and only
-  # then. Postgres recovers from the source archive and archives under a name
-  # of its own; the stores-restore Application resets the file index once and
-  # copies the buckets back without overwriting; SeaweedFS waits for the index,
-  # Zot and Substrate for the buckets.
+  # then. Postgres starts empty, as on any install (the backup's dump restores
+  # its records); the stores-restore Application resets the file index once
+  # and copies the buckets back without overwriting; SeaweedFS waits for the
+  # index, Zot and Substrate for the buckets.
   restore_files="$(printf '%s\n' "$reg/components/stores-restore.yaml" "$out/components/seaweedfs/restore-wait.yaml" \
       "$out/components/zot/restore-wait.yaml" "$out/components/substrate/restore-wait.yaml"
     find "$out/components/stores-restore" -name '*.yaml')"
   if [ "$restoring" = true ]; then
     p="$work/$variant-built/postgres.yaml"
     c='select(.kind == "Cluster" and .metadata.name == "postgres")'
-    if [ -n "$restoring_source" ]; then
-      [ "$(sel "$p" "$c | .spec.bootstrap.recovery | .source + \" \" + .database + \" \" + .owner + \" \" + .secret.name + \" \" + (.recoveryTarget.targetTime // \"\")")" \
-          = "origin seaweedfs seaweedfs postgres-seaweedfs $restoring_target" ] \
-        && [ -z "$(sel "$p" "$c | .spec.bootstrap.initdb // \"\"")" ] \
-        && [ "$(sel "$p" "$c | .spec.externalClusters[] | .name + \" \" + .plugin.name + \" \" + .plugin.parameters.barmanObjectName + \" \" + .plugin.parameters.serverName")" \
-          = "origin barman-cloud.cloudnative-pg.io backup $restoring_source" ] \
-        && [ -n "$pg_server" ] && [ "$(sel "$p" "$c | .spec.plugins[0].parameters.serverName")" = "$pg_server" ] && [ "$pg_server" != "$restoring_source" ] \
-        && ok "$variant: Postgres recovers from server $restoring_source to ${restoring_target:-the end of the archive}, and archives under $pg_server" \
-        || bad "$variant: Postgres's recovery is wrong"
-    else
-      [ -n "$(sel "$p" "$c | .spec.bootstrap.initdb.database")" ] && [ -z "$(sel "$p" "$c | .spec.externalClusters // \"\"")" ] \
-        && ok "$variant: a restore without an archive to recover starts Postgres empty" || bad "$variant: Postgres recovers without a source"
-    fi
+    [ "$(sel "$p" "$c | .spec.bootstrap | keys | join(\",\")")" = initdb ] && [ "$(sel "$p" "$c | .spec.bootstrap.initdb.database")" = seaweedfs ] \
+      && [ -z "$(sel "$p" "$c | .spec.externalClusters // \"\"")" ] \
+      && ok "$variant: a restore starts Postgres empty, with initdb, and recovers no archive" || bad "$variant: a restore's Postgres does not start empty"
     a="$reg/components/stores-restore.yaml"
     [ "$(sel "$a" '.metadata.name + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"] + " " + .metadata.labels["infrared.darkshift.io/layer"] + " " + .spec.project + " " + .spec.destination.namespace + " " + .spec.source.path')" \
         = "stores-restore 18 backups platform stores components/stores-restore" ] \
@@ -1096,7 +1115,7 @@ for v in "${variants[@]}"; do
       && grep -q -- '--ignore-existing' <<<"$copy_sh" && ! grep -qE 'rclone (sync|move|delete|purge)' <<<"$copy_sh" \
       && grep -qF 'if ! listed="$(rclone lsf --max-depth 1 "$SOURCE/$bucket")"; then' <<<"$copy_sh" && ! grep -q '2>/dev/null' <<<"$copy_sh" \
       && [ "$(jenv stores-restore initContainers BUCKETS)" = "${want_buckets% }" ] \
-      && [ "$(jenv stores-restore initContainers SOURCE)" = "outside:$backup/$cluster/seaweedfs/current" ] \
+      && [ "$(jenv stores-restore initContainers SOURCE)" = "outside:$backup/${prefix:-$cluster}/seaweedfs/current" ] \
       && [ "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ACCESS_KEY_ID) $(jenv stores-restore initContainers RCLONE_CONFIG_SEAWEEDFS_ACCESS_KEY_ID)" = "seaweedfs-backup seaweedfs-s3-restore" ] \
       && [ "$(jenv stores-restore containers POINT) $(jenv stores-restore containers MARKER)" = "$restoring_point buckets" ] \
       && [ "$(line "$r" 'select(.kind == "Role" and .metadata.name == "stores-restore") | .rules[] | (.resourceNames // [] | join(",")) + ":" + (.verbs | join(","))')" = ":create restore-stores:get,patch" ] \
@@ -1440,6 +1459,7 @@ for v in "traefik - -edge traefik" \
     "registry-alone $infrared_app -registry $zot_registry" \
     "substrate-registry-alone $infrared_app -registry $zot_registry -substrate-capable" \
     "copies-alone $infrared_app -copies {\"recipients\":[\"$age_recipient\"],\"mirror\":{\"retention\":\"10d\"}}" \
+    "archive-alone $infrared_app -postgres-archive {\"enabled\":true,\"retention\":\"14d\"}" \
     "retention-alone $infrared_app -registry-retention {\"keepNewest\":20,\"gcDelay\":\"30m\"}" \
     "server-name-alone - -postgres-server-name $server_name" \
     "code-index-alone - -images $ci_images"; do
@@ -1467,20 +1487,32 @@ done
 [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.registry' "$work/registry-alone/$infrared_app")" = "{\"address\":\"$zot_registry\"}" ] \
   && ok "registry-alone: the infrared Application carries the registry's address without the stores" \
   || bad "registry-alone: the infrared Application does not carry the registry's address"
-[ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.copies' "$work/copies-alone/$infrared_app")" \
-    = "{\"recipients\":[\"$age_recipient\"],\"mirror\":{\"retention\":\"10d\"}}" ] \
+# The backups' settings ride in the chart's backup values: the mirror's
+# retention as backup.retention, the archive as backup.postgres.archive; never
+# copies, which the chart no longer has.
+[ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.backup' "$work/copies-alone/$infrared_app")" \
+    = "{\"recipients\":[\"$age_recipient\"],\"retention\":\"10d\"}" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.backup' "$work/archive-alone/$infrared_app")" = '{"postgres":{"archive":true}}' ] \
+  && [ "$(yq -r '.spec.sources[0].helm.valuesObject | has("copies")' "$work/copies-alone/$infrared_app")" = false ] \
   && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.registry' "$work/retention-alone/$infrared_app")" = '{"retention":{"keepNewest":20,"gcDelay":"30m"}}' ] \
-  && ok "copies-alone, retention-alone: the infrared Application carries the copies and Zot's retention without the stores" \
-  || bad "copies-alone, retention-alone: the infrared Application does not carry them as set"
-# A restore needs the stores and a backup bucket, and its new archive a name of its own.
+  && ok "copies-alone, archive-alone, retention-alone: the infrared Application carries the backups' settings under backup, and Zot's retention, without the stores" \
+  || bad "copies-alone, archive-alone, retention-alone: the infrared Application does not carry them as set"
+# A restore needs the stores and a backup bucket, a point, and that point's
+# artifact and a mirror run after it; the archive's recovery is gone. The
+# backup key day one reads is infrared-platform-tokens' access key alone.
 # Each case: the refusal's words, then the flags.
 for c in "needs the stores and a backup bucket|-restore {\"point\":\"$restore_point\"}" \
-    "needs a PostgresServerName|-stores -backup {\"bucket\":\"$backup_bucket\"} -restore {\"point\":\"$restore_point\",\"postgres\":{\"source\":\"postgres\"}}" \
-    "are both|-stores -backup {\"bucket\":\"$backup_bucket\"} -postgres-server-name postgres -restore {\"point\":\"$restore_point\",\"postgres\":{\"source\":\"postgres\"}}"; do
+    "need a Restore.Point|-stores -backup {\"bucket\":\"$backup_bucket\"} -restore {\"artifact\":\"$restore_point.irbackup\"}" \
+    "must be the point's object|-stores -backup {\"bucket\":\"$backup_bucket\"} -restore {\"point\":\"$restore_point\",\"artifact\":\"20261006T000500Z.irbackup\"}" \
+    "at or after the point|-stores -backup {\"bucket\":\"$backup_bucket\"} -restore {\"point\":\"$restore_point\",\"mirrorRun\":\"20261006T001700Z\"}" \
+    "unknown field|-stores -backup {\"bucket\":\"$backup_bucket\"} -restore {\"point\":\"$restore_point\",\"postgres\":{\"source\":\"postgres\"}}" \
+    "the one Secret the store infrared-platform reads|-stores -backup {\"bucket\":\"$backup_bucket\",\"credentials\":{\"secret\":\"acme-backup-key\"}}" \
+    "the one kind of credential day one reads|-stores -backup {\"bucket\":\"$backup_bucket\",\"credentials\":{\"kind\":\"role\"}}" \
+    "Backup.Prefix must be|-stores -backup {\"bucket\":\"$backup_bucket\",\"prefix\":\"Acme/Mgmt\"}"; do
   words="${c%%|*}" args="${c#*|}"
   # shellcheck disable=SC2086 # the flags split on spaces; the JSON holds none
   if "$work/render" -out "$work/refused" -cluster demo -flavor k3s $args >/dev/null 2>"$work/refused.err"; then
-    bad "hack/render rendered a restore it should refuse: $args"
+    bad "hack/render rendered what it should refuse: $args"
   elif grep -qF -- "$words" "$work/refused.err"; then
     ok "hack/render refuses it (\"$words\"): $args"
   else
@@ -1488,16 +1520,96 @@ for c in "needs the stores and a backup bucket|-restore {\"point\":\"$restore_po
   fi
 done
 
+# --- The mirror's mark names the newest complete backup -----------------------------
+# The copies variant's mirror script, run with a fake rclone and date over a
+# fake bucket: before any bucket is copied, it names the newest backup whose
+# artifact and manifest are both there and whose manifest's own "size" (not a
+# part's) is the artifact's; a newer one without its manifest, or of another
+# size, is passed over; with no backup, or no backups/ at all, the mark names
+# none.
+mirror_script="$(yq -N -r 'select(.kind == "CronJob" and .metadata.name == "seaweedfs-backup")
+  | .spec.jobTemplate.spec.template.spec.containers[0].command[2]' "$work/copies-built/seaweedfs.yaml")"
+fake="$work/fake-mirror"
+mkdir -p "$fake/bin"
+# rclone: lsf of backups/ prints the listing fixture (none: directory not
+# found, as rclone says it), cat prints a manifest, rcat keeps the mark; every
+# call is logged.
+cat >"$fake/bin/rclone" <<'EOF'
+#!/bin/sh
+echo "$*" >>"$FAKE_LOG"
+case "$1" in
+  lsf)
+    case "$*" in
+      *"$BACKUPS/"*) [ -f "$FAKE_BUCKET/listing" ] || exit 3; cat "$FAKE_BUCKET/listing" ;;
+    esac ;;
+  cat) cat "$FAKE_BUCKET/${2##*/}" ;;
+  rcat) cat >"$FAKE_BUCKET/mark" ;;
+esac
+EOF
+# date: 2026-10-06T02:17:00Z, in each form the script asks for.
+cat >"$fake/bin/date" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *-d*) echo 20260929021700 ;;
+  *+%s*) echo 1791253020 ;;
+  *T%H%M%SZ*) echo 20261006T021700Z ;;
+  *) echo 2026-10-06T02:17:00Z ;;
+esac
+EOF
+chmod +x "$fake/bin/rclone" "$fake/bin/date"
+# mirror_mark <case>: runs the script over the fixture in $fake/<case>, prints the mark's backup.
+mirror_mark() {
+  (
+    export FAKE_BUCKET="$fake/$1" FAKE_LOG="$fake/$1/log" PATH="$fake/bin:$PATH"
+    export BUCKETS="ate-snapshots registry" DESTINATION="dst:$backup_bucket/$backup_prefix/seaweedfs" BACKUPS="dst:$backup_bucket/$backup_prefix/backups"
+    sh -ec "$mirror_script" >"$fake/$1/out" 2>&1
+  ) || { echo "  the mirror script failed on $1: $(tail -n 3 "$fake/$1/out")"; return 1; }
+  jq -r '.backup' "$fake/$1/mark"
+}
+mkdir -p "$fake/newest" "$fake/older" "$fake/none" "$fake/absent"
+# newest: 0205 has no manifest yet, 0105 is complete (its manifest pretty-printed).
+printf '%s\n' '20261006T000500Z.irbackup 1000' '20261006T000500Z.json 300' '20261006T010500Z.irbackup 2000' \
+  '20261006T010500Z.json 310' '20261006T020500Z.irbackup 3000' >"$fake/newest/listing"
+jq -n '{format: 2, kind: "backup", stamp: "20261006T010500Z", object: "20261006T010500Z.irbackup",
+  parts: {gitea: {size: 1999}, postgres: {size: 3000}}, size: 2000, sha256: "0"}' >"$fake/newest/20261006T010500Z.json"
+# older: 0105's manifest says another size (a part says the artifact's), so 0005.
+cp "$fake/newest/listing" "$fake/older/listing"
+jq -c '.size = 1999 | .parts.gitea.size = 2000' "$fake/newest/20261006T010500Z.json" >"$fake/older/20261006T010500Z.json"
+jq -c '.stamp = "20261006T000500Z" | .object = "20261006T000500Z.irbackup" | .size = 1000' "$fake/newest/20261006T010500Z.json" \
+  >"$fake/older/20261006T000500Z.json"
+# none: artifacts without manifests; absent: no backups/ at all.
+printf '%s\n' '20261006T010500Z.irbackup 2000' >"$fake/none/listing"
+got="$(for c in newest older none absent; do printf '%s=%s ' "$c" "$(mirror_mark "$c")"; done)"
+first_sync="$(grep -n '^sync ' "$fake/newest/log" | head -n 1 | cut -d: -f1)"
+listed="$(grep -n "^lsf .*$backup_prefix/backups/\$" "$fake/newest/log" | cut -d: -f1)"
+[ "$got" = "newest=20261006T010500Z older=20261006T000500Z none= absent= " ] \
+  && [ -n "$listed" ] && [ -n "$first_sync" ] && [ "$listed" -lt "$first_sync" ] \
+  && [ "$(jq -c 'keys' "$fake/newest/mark")" = '["backup","buckets","finished","run"]' ] \
+  && [ "$(jq -r '.run + " " + .buckets' "$fake/newest/mark")" = "20261006T021700Z ate-snapshots registry" ] \
+  && ok "the mirror's mark names the newest complete backup before it copies ($got)" \
+  || bad "the mirror's mark names the wrong backup: $got (listed at line $listed, first copy at $first_sync)"
+
+# --- The backup key's defaults, spelled out, render what none renders ----------------
+# The operator sends day one's credential explicitly: infrared-platform-tokens,
+# backup-access-key-id, backup-secret-access-key, accessKey.
+yq -p json -o json '.Backup.Credentials = {"Secret": "infrared-platform-tokens", "AccessKeyIDKey": "backup-access-key-id",
+    "SecretKeyKey": "backup-secret-access-key", "Kind": "accessKey"}' "$work/substrate.json" >"$work/credentials.json"
+"$work/render" -out "$work/cmp-no-credentials" -cluster demo-x -flavor k3s -build-registry "$zot_registry" -data "$work/substrate.json" >/dev/null
+"$work/render" -out "$work/cmp-credentials" -cluster demo-x -flavor k3s -build-registry "$zot_registry" -data "$work/credentials.json" >/dev/null
+changed="$({ diff -rq "$work/cmp-no-credentials" "$work/cmp-credentials" || true; } | tr '\n' ' ')"
+[ -z "$changed" ] && ok "credentials: the operator's explicit defaults render exactly what none renders" \
+  || bad "credentials: the explicit defaults change files: $changed"
+
 # --- A restore changes only the restore's files ---------------------------------------
 # The copies variant and the restore variant, rendered for one cluster: the
-# restore adds its Application, component and waits, recovers Postgres, guards
-# the mirror and adds the identity restore, and changes nothing else. The
-# infrared Application, which never carries it, stays the same.
+# restore adds its Application, component and waits, guards the mirror and adds
+# the identity restore, and changes nothing else: Postgres starts as on any
+# install. The infrared Application, which never carries it, stays the same.
 "$work/render" -out "$work/cmp-copies" -cluster demo-x -flavor k3s -build-registry "$zot_registry" -data "$work/copies.json" >/dev/null
 "$work/render" -out "$work/cmp-restore" -cluster demo-x -flavor k3s -build-registry "$zot_registry" -data "$work/restore.json" >/dev/null
 changed="$({ diff -rq "$work/cmp-copies" "$work/cmp-restore" || true; } \
   | sed -E "s#^Files $work/cmp-copies/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
-want="$(printf '%s\n' README.md components/postgres/cluster.yaml components/seaweedfs/backup.yaml components/seaweedfs/identities.yaml \
+want="$(printf '%s\n' README.md components/seaweedfs/backup.yaml components/seaweedfs/identities.yaml \
     components/seaweedfs/kustomization.yaml components/seaweedfs/prepare.yaml components/seaweedfs/restore-wait.yaml \
     components/stores-restore/kustomization.yaml components/stores-restore/restore.yaml components/stores-restore/wait.yaml \
     components/substrate/kustomization.yaml components/substrate/restore-wait.yaml components/zot/kustomization.yaml \

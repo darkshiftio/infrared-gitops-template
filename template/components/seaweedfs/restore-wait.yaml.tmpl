@@ -2,9 +2,9 @@
 # =============================================================================
 # A restore, from [[ .Restore.Point ]]: SeaweedFS waits for its file index to be reset.
 # =============================================================================
-# The recovered Postgres holds the lost cluster's file index, whose entries
-# name data that went with the lost nodes. The stores-restore Application
-# resets it once Postgres has recovered, then marks the ConfigMap
+# SeaweedFS's filers keep their file index in the platform's Postgres. The
+# stores-restore Application resets it once Postgres answers, so no entry names
+# data that went with the lost nodes, then marks the ConfigMap
 # stores/restore-stores (key postgres, for this point). This PreSync hook holds
 # SeaweedFS's sync until then, half an hour at a time, so no filer starts on the
 # old index. It reads that one ConfigMap, nothing else.

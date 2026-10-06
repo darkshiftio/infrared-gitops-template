@@ -59,15 +59,16 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores"), and on k3s keeps VMSingle's metrics on an `emptyDir` (see "Metrics with the stores") |
-| `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1"}` | the operator's `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty |
+| `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1", "Prefix": "", "Credentials": {"Secret": "", "AccessKeyIDKey": "", "SecretKeyKey": "", "Kind": ""}}` | the Installation's `spec.backup.destination`, which the operator seeds from its `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to and the backups written to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty. `.Backup.Prefix` is the path everything is kept under in the bucket, `<prefix>` below; empty is `.ClusterName`, as before the field existed. `.Backup.Credentials` is where the bucket's key is: the Secret in `.InfraredNamespace` and its two keys, and the credential's kind; each empty field is today's, `infrared-platform-tokens`, `backup-access-key-id`, `backup-secret-access-key` and `accessKey`, and the operator may send those explicitly, which renders the same files. Day one reads no other Secret or kind (`hack/render` refuses them) |
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"), and `substrate-test-actors`, Substrate's test actors (see "Agent Substrate"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 | `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
 | `.ForgeURL` | `` or `http://gitea-http.infrared.svc.cluster.local:3000` | the forge's root as the cluster reaches it, without a trailing slash: repos are `<ForgeURL>/<owner>/<repo>`. Empty for GitHub |
 | `.Registry` | `` or `10.43.0.50:5000` | the operator's `INFRARED_REGISTRY` (chart value `registry.address`): the address of the registry inside the cluster, a private IPv4 address and a port. With `.Stores` the template runs Zot there, its Service's pinned ClusterIP and port, and builds push the builder to it (see "The registry"). Empty: no registry inside the cluster |
-| `.Copies` | `{"Recipients": ["age1..."], "Postgres": {"Schedule": "0 0 3 * * *", "Retention": "7d"}, "Mirror": {...}, "Objects": {...}, "Gitea": {...}}` | the operator's `INFRARED_COPIES` (chart value `copies`): when each of the platform's copies is made (`Postgres` six cron fields, seconds first; the others five) and how long it is kept (whole days), and the age recipients the copies of Infrared's objects and of Gitea are encrypted to. The template schedules Postgres's base backup and the buckets' mirror; with the stores, a backup bucket and `.Copies.Recipients`, it makes the copies' buckets and identities (see "Backups"). Every empty field keeps today's literal |
+| `.Copies` | `{"Recipients": ["age1..."], "Mirror": {"Schedule": "17 * * * *", "Retention": "7d"}}` | the rest of the Installation's `spec.backup` that the template renders (the operator seeds it from its `INFRARED_COPIES`, chart values `backup.*`): the buckets' mirror, its schedule (five cron fields) and how long what a run replaced or deleted is kept (whole days, `spec.backup.retention`), and the age recipients the backups are encrypted to. With the stores, a backup bucket and `.Copies.Recipients`, backups are on: the mirror's run mark names the newest complete backup, and the Postgres roles the backup dumps as reach `.InfraredNamespace` (see "Backups"). Every empty field keeps today's literal |
+| `.PostgresArchive` | `{"Enabled": false, "Schedule": "0 0 3 * * *", "Retention": "7d"}` | Barman's WAL archive of the platform's Postgres: `Enabled` is `spec.backup.postgres.archive`, which the `infrared` Application carries; `Schedule` is the base backup's (six cron fields, seconds first) and `Retention` the archive's (whole days). Every empty field keeps today's literal |
 | `.RegistryRetention` | `{"UntaggedAfter": "24h", "KeepTags": ["^v[0-9]"], "KeepNewest": 10, "GCInterval": "1h", "GCDelay": "1h"}` | the operator's `INFRARED_REGISTRY_RETENTION` (chart value `registry.retention`): Zot's garbage collection and retention (see "The registry"). Every zero field keeps today's literal, shown here |
-| `.Restore` | `{"Point": "20261003T050500Z", "Postgres": {"Source": "postgres", "TargetTime": "2026-10-03T05:17:00Z"}}` | the restore in progress, which the operator reads from the ConfigMap `infrared/infrared-restore` while its phase is `ObjectsRestored` or `Failed`, and zero otherwise: `Point` is the copy of Infrared's objects restored, `Postgres.Source` the archive's server name Postgres recovers from, `Postgres.TargetTime` the time it recovers to, in UTC (empty: the archive's end). With the stores and a backup bucket it brings the stores back (see "Restore") |
-| `.PostgresServerName` | `` or `postgres-20261003T060000Z` | the server name the platform's Postgres archives under, `<Backup.Bucket>/<ClusterName>/postgres/<name>/`. The operator chooses one per install, and on a restore a new one: it must name an empty prefix, and it never changes for the life of the install. Empty archives under `postgres`, the Cluster's name, as before the field existed |
+| `.Restore` | `{"Point": "20261006T010500Z", "Artifact": "20261006T010500Z.irbackup", "MirrorRun": "20261006T011700Z"}` | the restore in progress, which the operator reads from the ConfigMap `infrared/infrared-restore` while its phase is `ObjectsRestored` or `Failed`, and zero otherwise: `Point` is the stamp of the backup restored, `Artifact` its object under `<prefix>/backups/`, `MirrorRun` the mirror run the buckets come back from, a run after the point. With the stores and a backup bucket it brings the stores back (see "Restore") |
+| `.PostgresServerName` | `` or `postgres-20261003T060000Z` | the server name the platform's Postgres archives under, `<Backup.Bucket>/<prefix>/postgres/<name>/`. The operator chooses one per install, and on a restore a new one: it must name an empty prefix, and it never changes for the life of the install. Empty archives under `postgres`, the Cluster's name, as before the field existed |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -75,9 +76,10 @@ encoding/json matches them case-insensitively, so `hack/render -data` reads
 either, and `Backup`'s keys as `INFRARED_BACKUP` spells them (`bucket`, …).
 `hack/render` takes `-stores`, `-backup` as JSON and `-disabled` as a JSON
 array, exactly as the operator's environment carries them, `-forge` with
-`-forge-url`, and `-registry`; `-copies` and `-registry-retention` as JSON, as
-`INFRARED_COPIES` and `INFRARED_REGISTRY_RETENTION` carry them (camelCase keys),
-`-restore` as the restore's Data in JSON, and `-postgres-server-name`.
+`-forge-url`, and `-registry`; `-registry-retention` as JSON, as
+`INFRARED_REGISTRY_RETENTION` carries it (camelCase keys); `-copies`,
+`-postgres-archive` and `-restore` as their Data in JSON (camelCase keys too);
+and `-postgres-server-name`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed. Only `.Edge`, `.Stores`, `.Disabled`,
@@ -95,11 +97,14 @@ Retain class on `linode`). `.SubstrateCapable` runs Agent Substrate only with
 `.Stores` and `.Registry` both set; without either, the preflight's yes changes
 no file, so a Traefik cluster without the stores renders the same files
 whatever its preflight says (`make verify` checks it). `.Copies`,
-`.RegistryRetention` and `.PostgresServerName` change only settings that render
-today's literal when empty. `.Copies.Recipients` adds the copies' buckets and
-identities, with the stores and a backup bucket. `.Restore` adds the restore's
-pieces, with the same two: with neither, both change only what the `infrared`
-Application carries (`make verify` checks it).
+`.PostgresArchive`, `.RegistryRetention`, `.PostgresServerName` and
+`.Backup.Prefix` change only settings that render today's literal when empty,
+and `.Backup.Credentials` renders today's files with its defaults, empty or
+spelled out. `.Copies.Recipients` turns backups on, with the stores and a
+backup bucket: the Postgres roles' copy into `.InfraredNamespace` and the
+backup in the mirror's run mark. `.Restore` adds the restore's pieces, with the
+same two: with neither, both change only what the `infrared` Application
+carries (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -151,12 +156,12 @@ set, so a cluster without it renders the same file as before:
 | `.Edge` `gateway` | `installation.edge: gateway` |
 | `.PlatformDomain` and `.InfraredHost`, in gateway mode | `installation.previews.domain`, and `installation.previews.signInURL: https://<InfraredHost>` |
 | `.Stores` | `stores.enabled: true` |
-| `.Backup.Bucket` (with its `.Endpoint` and `.Region` when set) | `backup` |
+| `.Backup.Bucket` (with its `.Endpoint`, `.Region` and `.Prefix` when set) | `backup` (`bucket`, `endpoint`, `region`, `prefix`) |
+| `.Copies.Recipients`, `.Copies.Mirror.Schedule`, `.Copies.Mirror.Retention` and `.PostgresArchive.Enabled`, each that is set | `backup` (`recipients`, `mirror.schedule`, `retention`, `postgres.archive: true`), beside the bucket, or alone |
 | `.Disabled` | `components.disabled`, without `substrate-test-actors` |
 | `.Stores` and `.Registry`, with `substrate-test-actors` not in `.Disabled` | `substrate.testActors: true` (see "Agent Substrate") |
 | `.Forge` `gitea` | `gitea.enabled: true`, `giteaAdmin.existingSecret: infrared-gitea-admin`, and on `.Cloud` `linode` `gitea.persistence.storageClass: linode-block-storage-retain` |
 | `.Registry` | `registry.address` |
-| `.Copies`, each field that is set | `copies` (`recipients`, and each of `postgres`, `mirror`, `objects`, `gitea` with its `schedule` and `retention`) |
 | `.RegistryRetention`, each field that is set | `registry.retention` (`untaggedAfter`, `keepTags`, `keepNewest`, `gcInterval`, `gcDelay`) |
 | `.Images` `code-index`, with `.ImageRegistry` | `codeIndex: {enabled: true, image: {tag, digest}}`, and `platformTokens.existingSecret: infrared-platform-tokens` (see "The code index") |
 
@@ -216,7 +221,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
 | 18 | `seaweedfs` (Stores only) | https://seaweedfs.github.io/seaweedfs/helm `seaweedfs` + `components/seaweedfs` | chart 4.48.0 (SeaweedFS 4.48, by digest) |
 | 18 | `stores-restore` (Stores and a backup bucket, while a restore is in progress) | `components/stores-restore`: the file index's reset and the buckets' copy back | PostgreSQL 18.6, rclone 1.75.1, by digest |
-| 19 | `stores-credentials` (Stores, with Registry or the copies' recipients) | `components/stores-credentials`: ClusterSecretStore `infrared-stores` | — |
+| 19 | `stores-credentials` (Stores, with Registry or the backups' recipients) | `components/stores-credentials`: ClusterSecretStore `infrared-stores` | — |
 | 20 | `zot` (Stores and Registry) | https://zotregistry.dev/helm-charts `zot` + `components/zot` | chart 0.1.125 (Zot v2.1.21, by digest) |
 | 20 | `substrate-crds` (Stores, Registry and SubstrateCapable) | `components/substrate-crds`, vendored from Agent Substrate | `ce05e5d` (see "Agent Substrate") |
 | 21 | `substrate-podcert` (the same) | `components/substrate-podcert` | the same, images by digest |
@@ -433,9 +438,7 @@ stateless. No SeaweedFS object claims a volume, so none is a Linode volume.
 
 S3 answers at `http://seaweedfs-s3.stores.svc:8333`. The chart's bucket hook
 makes the buckets `ate-snapshots` (Agent Substrate's snapshots) and `registry`
-(the registry's images and charts) after each sync, with `weed shell`, and with
-`.Copies.Recipients` and a backup bucket also `infrared-objects` and
-`gitea-dumps` (see "Backups"). Each
+(the registry's images and charts) after each sync, with `weed shell`. Each
 bucket has an S3 identity that reaches it alone (Read, Write, List and Tagging
 on that bucket; no identity is an administrator), in
 `components/seaweedfs/identities.yaml`, which holds no key: each key is an
@@ -449,43 +452,42 @@ start. A new set of identities changes the gateways' annotation
 ### Backups
 
 With `.Stores` and a `.Backup.Bucket`, the stores are copied to that bucket,
-outside the cluster, under `<Bucket>/<ClusterName>/`, and kept seven days.
+outside the cluster, under `<Bucket>/<prefix>/`, and kept seven days, where
+`<prefix>` is `.Backup.Prefix`, or `.ClusterName` when that is empty.
 `.Backup.Endpoint` is the S3 endpoint (empty for AWS S3) and `.Backup.Region`
 its region. The keys are the platform's: the Secret `infrared-platform-tokens`
-keys `backup-access-key-id` and `backup-secret-access-key`, which the store
-`infrared-platform` copies into `stores` (`postgres-backup`,
-`seaweedfs-backup`); the store's `conditions` then admit `stores` as well, and
-`platform-tokens` renders even without a Gateway.
+keys `backup-access-key-id` and `backup-secret-access-key`
+(`.Backup.Credentials`), which the store `infrared-platform` copies into
+`stores` (`postgres-backup`, `seaweedfs-backup`); the store's `conditions` then
+admit `stores` as well, and `platform-tokens` renders even without a Gateway.
 
 | What | How | Where | Kept |
 |---|---|---|---|
-| Postgres's WAL | continuously: CloudNativePG's Barman Cloud plugin archives each segment as it is written (the Cluster's plugin, `isWALArchiver`) | `s3://<Bucket>/<ClusterName>/postgres/` | seven days of point-in-time recovery (`retentionPolicy: 7d` on the ObjectStore `backup`) |
+| Postgres's WAL | continuously: CloudNativePG's Barman Cloud plugin archives each segment as it is written (the Cluster's plugin, `isWALArchiver`) | `s3://<Bucket>/<prefix>/postgres/` | seven days of point-in-time recovery (`retentionPolicy: 7d` on the ObjectStore `backup`) |
 | Postgres's base backup | every day at 03:00 UTC, and once at the first sync (ScheduledBackup `postgres-daily`, `method: plugin`) | the same | the same |
-| SeaweedFS's buckets `ate-snapshots` and `registry`, and with `.Copies.Recipients` `infrared-objects` and `gitea-dumps` last | every hour at 17 past, CronJob `seaweedfs-backup`: rclone 1.75.1 makes `current/<bucket>/` match the bucket, and keeps what that run replaced or deleted under `archive/<run>/<bucket>/`; a mark `runs/<run>.json` says the run finished | `<Bucket>/<ClusterName>/seaweedfs/` | archives and marks for seven days, by the run's name |
+| SeaweedFS's buckets `ate-snapshots` and `registry` | every hour at 17 past, CronJob `seaweedfs-backup`: rclone 1.75.1 makes `current/<bucket>/` match the bucket, and keeps what that run replaced or deleted under `archive/<run>/<bucket>/`; a mark `runs/<run>.json` says the run finished | `<Bucket>/<prefix>/seaweedfs/` | archives and marks for seven days, by the run's name |
 
-`.Copies` sets each schedule and retention: `Postgres` the base backup's
-schedule (six cron fields, seconds first) and the archive's retention, `Mirror`
-the mirror's schedule and how long its archives and marks are kept. Each
-retention is whole days. Empty, each is the default above. `.PostgresServerName`
-is the archive's server name, `<server name>` below `postgres/`. Empty archives
-under `postgres`, the Cluster's own name.
+`.Copies.Mirror` sets the mirror's schedule and how long its archives and
+marks are kept, `.PostgresArchive` the base backup's schedule (six cron fields,
+seconds first) and the archive's retention. Each retention is whole days.
+Empty, each is the default above. `.PostgresServerName` is the archive's server
+name, `<server name>` below `postgres/`. Empty archives under `postgres`, the
+Cluster's own name.
 
-With `.Copies.Recipients` as well, the Infrared chart makes two more copies
-every hour, each encrypted with age to the recipients, into buckets of their
-own. The mirror copies those buckets last, so the other buckets in `current/`
-are never older than a copy that is there:
+With `.Copies.Recipients` as well, the install makes a backup every hour: the
+Infrared operator's CronJob, not this template, writes one artifact per backup
+straight to `<Bucket>/<prefix>/backups/`, `<stamp>.irbackup`, encrypted with
+age to the recipients (Infrared's objects, Gitea's dump and a dump of each
+consumer database of the platform's Postgres), and its clear manifest
+`<stamp>.json`. The template's part:
 
-| Bucket | Identity, keys in `.InfraredNamespace` | Written by the chart's CronJob |
-|---|---|---|
-| `infrared-objects` | `objects-copy` (Read, Write, List on it), `objects-copy-s3` | `infrared-objects-copy`: Infrared's own objects and the Secrets the cluster cannot make again |
-| `gitea-dumps` | `gitea-dump` (Read, Write, List on it), `gitea-dump-s3` | `infrared-gitea-dump`: `gitea dump` of the forge |
+| What | How |
+|---|---|
+| The backup's Postgres roles | the backup dumps each consumer database as that database's own role. The store `infrared-stores` copies each role's Secret (`username`, `password`) from `stores` into `.InfraredNamespace` under its own name, today `postgres-substrate` (`components/stores-credentials/backup.yaml`, wave 2, after the store), and its `conditions` then admit that namespace too. The database `seaweedfs` is not dumped: a restore's copy back of the buckets makes the file index again |
+| The mirror's mark | each run's mark also names the newest complete backup when the run started, `{"run", "finished", "buckets", "backup"}`: the newest `<stamp>` under `<prefix>/backups/` with both `<stamp>.irbackup` and `<stamp>.json`, the artifact's size the manifest's own `size`; `""` while there is none. The run looks before it copies any bucket, so the buckets in `current/` are never older than the backup a mark names, and a restore pairs a backup with a run that names it or a newer one. The mirror never reads an artifact; the restore checks its sha256 |
 
-Each copy is `<UTC stamp>.tar.gz.age` with a clear manifest `<UTC stamp>.json`
-beside it. The identity `backup` may also read and list both buckets. Their keys
-reach `.InfraredNamespace` through the store `infrared-stores`
-(`components/stores-credentials/copies.yaml`), whose conditions then admit that
-namespace too. No recipient, no bucket: an install changes nothing until a
-person makes the key.
+No recipient, no backup: an install changes nothing until a person makes the
+key.
 
 A copy of every object at every hour would take 168 times the buckets' size,
 so the buckets are kept as one mirror and the hourly changes to it. rclone reads
@@ -496,9 +498,9 @@ from `components/cloudnative-pg`, in waves of their own ahead of the charts,
 with the chart's own turned off.
 
 A Cluster built again from nothing writes its WAL to the same prefix, which
-Barman refuses while an older server's archive is there, and a recovered Cluster
-stays in "Setting up primary" for good. So each install archives under a server
-name of its own, `.PostgresServerName`, and a restore under a new one.
+Barman refuses while an older server's archive is there. So each install
+archives under a server name of its own, `.PostgresServerName`, and a restore
+under a new one.
 
 ### Restore
 
@@ -510,15 +512,15 @@ operator's; the template does not render them.
 
 | What | How |
 |---|---|
-| Postgres | the Cluster bootstraps by recovery from the archive of server `.Restore.Postgres.Source`, through the ObjectStore `backup`, up to `.Restore.Postgres.TargetTime`, and archives under `.PostgresServerName`, which may not be the source. The role `seaweedfs` takes the password in `postgres-seaweedfs`. CloudNativePG reads `bootstrap` only when it creates the Cluster, so the render after the restore, without it, changes nothing |
-| SeaweedFS's file index | the recovered Postgres holds the lost cluster's file index, whose entries name data that went with the lost nodes. The Job `stores/stores-index-reset` drops what the role `seaweedfs` owns, once per point: a comment on the database `seaweedfs`, written in the same transaction, makes a second run do nothing |
-| SeaweedFS's buckets | the Job `stores/stores-restore` copies each bucket back from `current/` of the copy outside, as the S3 identity `restore` (Read, Write, List on every bucket, only during a restore), and never overwrites an object that is there. A bucket whose copy lists empty is skipped; a listing that fails (a key, the network, a missing bucket) fails the Job, which runs again, so it never marks a bucket it did not copy |
+| Postgres | the Cluster bootstraps empty, with `initdb`, as on any install, and no archive is recovered: the Infrared chart's restore brings each consumer database's records back from the backup's dump. With an archive, the new Cluster archives under a new `.PostgresServerName` |
+| SeaweedFS's file index | the Job `stores/stores-index-reset` drops what the role `seaweedfs` owns, once per point, so no index of a lost cluster's names data that went with its nodes: a comment on the database `seaweedfs`, written in the same transaction, makes a second run do nothing |
+| SeaweedFS's buckets | the Job `stores/stores-restore` copies each bucket back from `<prefix>/seaweedfs/current/` of the copy outside, as the S3 identity `restore` (Read, Write, List on every bucket, only during a restore), and never overwrites an object that is there. A bucket whose copy lists empty is skipped; a listing that fails (a key, the network, a missing bucket) fails the Job, which runs again, so it never marks a bucket it did not copy |
 | The order | each Job marks the ConfigMap `stores/restore-stores` (`point`, then `postgres`, then `buckets`, each a UTC time). SeaweedFS's sync waits for `postgres`; Zot's and Agent Substrate's for `buckets`, each in a PreSync hook that reads that ConfigMap alone; the hourly mirror copies nothing and fails until `buckets`, so it never makes the copy outside match empty buckets |
 | The end | the operator marks the restore Complete once `buckets` is marked, and stops passing `.Restore`: the next render drops the `stores-restore` Application, the identity `restore` and the waits |
 
 `stores-restore` (wave 18, layer `backups`) holds the two Jobs. A PreSync hook
 in `.InfraredNamespace` first waits for Postgres's Service `postgres-rw` to have
-a ready endpoint, which is when Postgres has recovered. Neither Job is ever
+a ready endpoint, which is when Postgres has started. Neither Job is ever
 deleted by a timer: Argo CD would make a deleted one again, and run it again.
 
 ### The registry
@@ -535,7 +537,7 @@ falls back to plain HTTP only for a private address.
 
 | Application | What |
 |---|---|
-| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry`, and with Agent Substrate `ate-system` too, for `seaweedfs-s3-ate-snapshots` and `postgres-substrate`; with `.Copies.Recipients` and a backup bucket, `.InfraredNamespace` too, for the copies' keys, which its ExternalSecrets copy there (wave 2, after the store), and then it renders without `.Registry` as well. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
+| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry`, and with Agent Substrate `ate-system` too, for `seaweedfs-s3-ate-snapshots` and `postgres-substrate`; with `.Copies.Recipients` and a backup bucket, `.InfraredNamespace` too, for the Postgres roles the backup dumps as (`postgres-substrate`), which its ExternalSecret copies there (wave 2, after the store), and then it renders without `.Registry` as well. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
 | `zot` (wave 20) | `components/zot`: the ConfigMap `zot-base`, the ExternalSecret `zot-s3` (the S3 identity `registry`'s keys, from `stores/seaweedfs-s3-registry`) and two waits; and the chart: one replica, `strategy: Recreate`, not root, a read-only root filesystem, and the Service above. |
 
 Zot's config and its users are split between the template and the operator:
@@ -862,9 +864,12 @@ scripts/compare-render.sh origin/main   # this tree's zero-value render against 
 ```
 
 `scripts/compare-render.sh <ref>` renders `<ref>` and this tree with the same
-flags and fails unless every file `<ref>` renders is the same byte for byte
-and every file only this tree renders holds no objects. Extra flags after the
-ref are passed to both renders (e.g. `-flavor eks`).
+flags and fails unless every file `<ref>` renders is the same byte for byte,
+or held no objects and is no longer rendered, and every file only this tree
+renders holds no objects. Extra flags after the ref are passed to both renders
+(e.g. `-flavor eks`); after `--`, to this tree's only (a field `<ref>` does not
+know); after `--ref`, to `<ref>`'s only (what a renamed field was called
+there).
 
 `hack/render` (Go, stdlib only) implements the contract exactly; run it with
 `-h` for every Data flag, or `-data file.json` to render from the same JSON

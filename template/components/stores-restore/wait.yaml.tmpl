@@ -1,12 +1,12 @@
 [[- if and .Stores .Backup.Bucket .Restore.Point -]]
 # =============================================================================
-# Before the stores' restore: the recovered Postgres.
+# Before the stores' restore: Postgres.
 # =============================================================================
 # On a fresh cluster every Application syncs at once (README, "Order on a
 # fresh cluster"), and this one's objects live in the namespace stores, which
 # the stores' own Applications make and label. This PreSync hook waits, up to
 # half an hour, until Postgres's Service postgres-rw has a ready endpoint: the
-# namespace exists, and Postgres has recovered and accepts writes. It runs in
+# namespace exists, and Postgres has started and accepts writes. It runs in
 # [[ .InfraredNamespace ]], which the Infrared chart made before anything here.
 # =============================================================================
 apiVersion: v1

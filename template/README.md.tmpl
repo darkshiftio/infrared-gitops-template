@@ -1,6 +1,7 @@
 [[- $disabled := " " ]][[ range .Disabled ]][[ $disabled = printf "%s%s " $disabled . ]][[ end -]]
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 # [[ .GitopsRepoName ]]
@@ -55,7 +56,7 @@ components/
 [[- end ]]
 [[- end ]]
 [[- end ]]
-[[- if and $copies (not .Registry) ]]
+[[- if and $backups (not .Registry) ]]
   stores-credentials/      ClusterSecretStore infrared-stores, over the stores' own Secrets
 [[- end ]]
 [[- if $restore ]]
@@ -107,15 +108,15 @@ products/                  yours: one directory per product (see "Products")
 | 16 | `cloudnative-pg` | CloudNativePG, the operator behind the platform's one Postgres[[ if .Backup.Bucket ]], and its Barman Cloud plugin for backups[[ end ]] |
 [[- end ]]
 [[- if not (contains " postgres " $disabled) ]]
-| 17 | `postgres` | the platform's one Postgres (namespace `stores`), with a role and a database for each consumer[[ if .Backup.Bucket ]]; its WAL and a [[ if .Copies.Postgres.Schedule ]]base backup on `[[ .Copies.Postgres.Schedule ]]`[[ else ]]daily base backup[[ end ]] to `s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/postgres`, kept [[ if .Copies.Postgres.Retention ]][[ .Copies.Postgres.Retention ]][[ else ]]7 days[[ end ]][[ end ]][[ if $restore ]]; recovered from the copy outside[[ end ]] |
+| 17 | `postgres` | the platform's one Postgres (namespace `stores`), with a role and a database for each consumer[[ if .Backup.Bucket ]]; its WAL and a [[ if .PostgresArchive.Schedule ]]base backup on `[[ .PostgresArchive.Schedule ]]`[[ else ]]daily base backup[[ end ]] to `s3://[[ .Backup.Bucket ]]/[[ $prefix ]]/postgres`, kept [[ if .PostgresArchive.Retention ]][[ .PostgresArchive.Retention ]][[ else ]]7 days[[ end ]][[ end ]][[ if $backups ]]; each consumer's database dumped into every backup[[ end ]][[ if $restore ]]; started empty for the restore[[ end ]] |
 [[- end ]]
 [[- if not (contains " seaweedfs " $disabled) ]]
-| 18 | `seaweedfs` | SeaweedFS, the platform's object store (namespace `stores`): S3, buckets `ate-snapshots`[[ if $copies ]], `registry`, `infrared-objects` and `gitea-dumps` (the encrypted copies of Infrared's objects and of Gitea)[[ else ]] and `registry`[[ end ]][[ if .Backup.Bucket ]], copied [[ if .Copies.Mirror.Schedule ]]on `[[ .Copies.Mirror.Schedule ]]`[[ else ]]every hour[[ end ]] to `[[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs`, what a copy replaces kept [[ if .Copies.Mirror.Retention ]][[ .Copies.Mirror.Retention ]][[ else ]]7 days[[ end ]][[ end ]] |
+| 18 | `seaweedfs` | SeaweedFS, the platform's object store (namespace `stores`): S3, buckets `ate-snapshots` and `registry`[[ if .Backup.Bucket ]], copied [[ if .Copies.Mirror.Schedule ]]on `[[ .Copies.Mirror.Schedule ]]`[[ else ]]every hour[[ end ]] to `[[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs`, what a copy replaces kept [[ if .Copies.Mirror.Retention ]][[ .Copies.Mirror.Retention ]][[ else ]]7 days[[ end ]][[ if $backups ]], each run's mark naming the newest backup in `[[ .Backup.Bucket ]]/[[ $prefix ]]/backups` before it[[ end ]][[ end ]] |
 [[- end ]]
 [[- if and $restore (not (contains " stores-restore " $disabled)) ]]
 | 18 | `stores-restore` | a restore, from [[ .Restore.Point ]], in progress: SeaweedFS's file index reset, then every bucket copied back from the copy outside; gone once the restore is complete |
 [[- end ]]
-[[- if and $copies (not .Registry) (not (contains " stores-credentials " $disabled)) ]]
+[[- if and $backups (not .Registry) (not (contains " stores-credentials " $disabled)) ]]
 | 19 | `stores-credentials` | ClusterSecretStore `infrared-stores`: the stores' credentials, each by name, for the namespaces that use them |
 [[- end ]]
 [[- if .Registry ]]

@@ -1,24 +1,22 @@
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- if and .Stores .Backup.Bucket .Restore.Point -]]
 # =============================================================================
 # A restore, from [[ .Restore.Point ]]: the stores come back.
 # =============================================================================
-# The Infrared operator restored its own objects from the copy [[ .Restore.Point ]], and
-# Postgres recovered from the archive outside the cluster (components/postgres,
-# the Cluster's bootstrap). SeaweedFS's data was on the lost nodes' disks, so
-# two Jobs, in order, bring the stores back, and mark the ConfigMap
-# stores/restore-stores after each, for this point:
+# The Infrared operator restored its own objects from the backup [[ .Restore.Point ]], and
+# Postgres started empty (components/postgres). SeaweedFS's data was on the
+# lost nodes' disks, so two Jobs, in order, bring the stores back, and mark the
+# ConfigMap stores/restore-stores after each, for this point:
 #
-#   stores-index-reset  The recovered Postgres holds the lost cluster's file
-#                       index, whose entries name data that went with the
-#                       lost nodes; a copy back would skip those objects as
-#                       present. As the role seaweedfs, it drops everything
-#                       that role owns, once: it notes the point on the
-#                       database seaweedfs in the same transaction, and does
-#                       nothing when the note is there. Then it marks postgres,
-#                       which SeaweedFS waits for (components/seaweedfs).
+#   stores-index-reset  As the role seaweedfs, drops everything that role
+#                       owns, once, so no file index of a lost cluster's
+#                       makes a copy back skip objects as present: it notes
+#                       the point on the database seaweedfs in the same
+#                       transaction, and does nothing when the note is there.
+#                       Then it marks postgres, which SeaweedFS waits for
+#                       (components/seaweedfs).
 #   stores-restore      Copies every bucket back from the copy outside the
-#                       cluster, [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/current/<bucket>,
+#                       cluster, [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/current/<bucket>,
 #                       as the S3 identity restore, skipping any object
 #                       already there, so a second run never overwrites one.
 #                       Then it marks buckets, which Zot, Agent Substrate and
@@ -123,7 +121,7 @@ spec:
             - -ec
             - |
               # The role's password reaches Postgres a moment after it has
-              # recovered (its DatabaseRole): sign in until it works.
+              # started (its DatabaseRole): sign in until it works.
               until psql -X -q -c 'SELECT 1' >/dev/null 2>&1; do
                 echo "waiting to sign in to Postgres as seaweedfs"
                 sleep 10
@@ -233,9 +231,9 @@ spec:
             - name: HOME
               value: /tmp
             - name: BUCKETS
-              value: "ate-snapshots registry[[ if $copies ]] infrared-objects gitea-dumps[[ end ]]"
+              value: "ate-snapshots registry"
             - name: SOURCE
-              value: [[ printf "outside:%s/%s/seaweedfs/current" .Backup.Bucket .ClusterName | quote ]]
+              value: [[ printf "outside:%s/%s/seaweedfs/current" .Backup.Bucket $prefix | quote ]]
             # The source: the copy outside the cluster, with the platform's
             # backup keys (Secret seaweedfs-backup, components/seaweedfs).
             - name: RCLONE_CONFIG_OUTSIDE_TYPE

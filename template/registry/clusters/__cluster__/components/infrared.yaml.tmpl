@@ -154,10 +154,15 @@ spec:
           stores:
             enabled: true
 [[- end ]]
+[[- $c := .Copies ]]
+[[- $settings := or $c.Recipients $c.Mirror.Schedule $c.Mirror.Retention .PostgresArchive.Enabled ]]
+[[- if or .Backup.Bucket $settings ]]
 [[- if .Backup.Bucket ]]
           # The bucket outside the cluster that the stores are copied to
           # (INFRARED_BACKUP). Its key stays in the install's Secret.
+[[- end ]]
           backup:
+[[- if .Backup.Bucket ]]
             bucket: [[ .Backup.Bucket | quote ]]
 [[- if .Backup.Endpoint ]]
             endpoint: [[ .Backup.Endpoint | quote ]]
@@ -165,56 +170,34 @@ spec:
 [[- if .Backup.Region ]]
             region: [[ .Backup.Region | quote ]]
 [[- end ]]
+[[- if .Backup.Prefix ]]
+            prefix: [[ .Backup.Prefix | quote ]]
 [[- end ]]
-[[- $c := .Copies ]]
-[[- if or $c.Postgres.Schedule $c.Postgres.Retention $c.Mirror.Schedule $c.Mirror.Retention $c.Objects.Schedule $c.Objects.Retention $c.Gitea.Schedule $c.Gitea.Retention $c.Recipients ]]
-          # The platform's copies as the install set them (INFRARED_COPIES):
-          # when each is made, how long it is kept, and the age recipients the
-          # copies of Infrared's objects and of Gitea are encrypted to. What is
-          # unset keeps the chart's and the template's defaults.
-          copies:
+[[- end ]]
+[[- if $settings ]]
+            # The backups' settings as the install set them (INFRARED_COPIES):
+            # the age recipients each backup is encrypted to, the mirror's
+            # schedule, how long backups and what the mirror replaces are
+            # kept, and Postgres's WAL archive. What is unset keeps the chart's
+            # and the template's defaults.
 [[- if $c.Recipients ]]
             recipients:
 [[- range $c.Recipients ]]
               - [[ . | quote ]]
 [[- end ]]
 [[- end ]]
-[[- with $c.Postgres ]][[ if or .Schedule .Retention ]]
-            postgres:
-[[- with .Schedule ]]
-              schedule: [[ . | quote ]]
-[[- end ]]
-[[- with .Retention ]]
-              retention: [[ . | quote ]]
-[[- end ]]
-[[- end ]][[ end ]]
-[[- with $c.Mirror ]][[ if or .Schedule .Retention ]]
+[[- if $c.Mirror.Schedule ]]
             mirror:
-[[- with .Schedule ]]
-              schedule: [[ . | quote ]]
+              schedule: [[ $c.Mirror.Schedule | quote ]]
 [[- end ]]
-[[- with .Retention ]]
-              retention: [[ . | quote ]]
+[[- if $c.Mirror.Retention ]]
+            retention: [[ $c.Mirror.Retention | quote ]]
 [[- end ]]
-[[- end ]][[ end ]]
-[[- with $c.Objects ]][[ if or .Schedule .Retention ]]
-            objects:
-[[- with .Schedule ]]
-              schedule: [[ . | quote ]]
+[[- if .PostgresArchive.Enabled ]]
+            postgres:
+              archive: true
 [[- end ]]
-[[- with .Retention ]]
-              retention: [[ . | quote ]]
 [[- end ]]
-[[- end ]][[ end ]]
-[[- with $c.Gitea ]][[ if or .Schedule .Retention ]]
-            gitea:
-[[- with .Schedule ]]
-              schedule: [[ . | quote ]]
-[[- end ]]
-[[- with .Retention ]]
-              retention: [[ . | quote ]]
-[[- end ]]
-[[- end ]][[ end ]]
 [[- end ]]
 [[- $kept := false ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ $kept = true ]][[ end ]][[ end ]]
 [[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]

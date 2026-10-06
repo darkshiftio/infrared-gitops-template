@@ -4,10 +4,10 @@
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
 [[- else if and .Stores .Backup.Bucket .Restore.Point -]]
 # A restore, from [[ .Restore.Point ]], brings the stores back (components/stores-restore):
-# once Postgres has recovered from the archive outside the cluster, it resets
-# SeaweedFS's file index, then copies every bucket back from the copy outside,
-# and marks the ConfigMap stores/restore-stores after each. SeaweedFS waits for
-# the first mark; Zot, Agent Substrate and the hourly mirror for the second.
+# once Postgres answers, it resets SeaweedFS's file index, then copies every
+# bucket back from the copy outside, and marks the ConfigMap
+# stores/restore-stores after each. SeaweedFS waits for the first mark; Zot,
+# Agent Substrate and the hourly mirror for the second.
 # The Infrared operator renders this only while the restore is in progress.
 # Wave 18, with SeaweedFS, in the backups layer.
 #

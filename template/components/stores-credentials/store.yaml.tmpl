@@ -1,5 +1,5 @@
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
-[[- if and .Stores (or .Registry $copies) -]]
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- if and .Stores (or .Registry $backups) -]]
 # =============================================================================
 # infrared-stores: the stores' credentials, each one handed out by name.
 # =============================================================================
@@ -20,11 +20,9 @@
 #   postgres-substrate      ate-system/ate-api-server-secret-envvars (Substrate's
 #                           records: its API's Postgres DSN)
 [[- end ]]
-[[- if $copies ]]
-#   seaweedfs-s3-objects-copy  [[ .InfraredNamespace ]]/objects-copy-s3 (the copy of
-#                           Infrared's objects, the S3 identity objects-copy)
-#   seaweedfs-s3-gitea-dump [[ .InfraredNamespace ]]/gitea-dump-s3 (Gitea's dump, the S3
-#                           identity gitea-dump)
+[[- if $backups ]]
+#   postgres-substrate      [[ .InfraredNamespace ]]/postgres-substrate (the backup's dump of
+#                           Substrate's records, as the role substrate)
 [[- end ]]
 #
 # `conditions` limits the store to those namespaces: any other namespace, a
@@ -47,9 +45,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
 [[- if .Registry ]]
-    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots", "postgres-substrate"[[ end ]][[ if $copies ]], "seaweedfs-s3-objects-copy", "seaweedfs-s3-gitea-dump"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots", "postgres-substrate"[[ else if $backups ]], "postgres-substrate"[[ end ]]]
 [[- else ]]
-    resourceNames: ["seaweedfs-s3-objects-copy", "seaweedfs-s3-gitea-dump"]
+    resourceNames: ["postgres-substrate"]
 [[- end ]]
     verbs: ["get"]
 ---
@@ -83,7 +81,7 @@ spec:
 [[- if and .Registry .SubstrateCapable ]]
         - ate-system
 [[- end ]]
-[[- if $copies ]]
+[[- if $backups ]]
         - [[ .InfraredNamespace ]]
 [[- end ]]
   provider:

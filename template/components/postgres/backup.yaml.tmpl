@@ -1,29 +1,31 @@
+[[- $prefix := default .ClusterName .Backup.Prefix -]]
+[[- $credentials := default "infrared-platform-tokens" .Backup.Credentials.Secret -]]
 [[- if and .Stores .Backup.Bucket -]]
 # =============================================================================
 # Postgres's backups, to the bucket outside the cluster.
 # =============================================================================
 # CloudNativePG's Barman Cloud plugin archives every WAL segment as it is
-[[- if .Copies.Postgres.Schedule ]]
+[[- if .PostgresArchive.Schedule ]]
 # written (the Cluster's plugin, cluster.yaml) and takes a base backup on the
-# install's schedule, [[ .Copies.Postgres.Schedule ]] (seconds first, UTC), and one when this is
+# install's schedule, [[ .PostgresArchive.Schedule ]] (seconds first, UTC), and one when this is
 # first applied. Both go to
 [[- else ]]
 # written (the Cluster's plugin, cluster.yaml) and takes a base backup every
 # day at 03:00 UTC, and one when this is first applied. Both go to
 [[- end ]]
 #
-#   s3://[[ .Backup.Bucket ]]/[[ .ClusterName ]]/postgres/[[ default "<server name>" .PostgresServerName ]]/
+#   s3://[[ .Backup.Bucket ]]/[[ $prefix ]]/postgres/[[ default "<server name>" .PostgresServerName ]]/
 #
-[[- if .Copies.Postgres.Retention ]]
-# and are kept for [[ .Copies.Postgres.Retention ]]: Barman deletes what a restore to any point of
+[[- if .PostgresArchive.Retention ]]
+# and are kept for [[ .PostgresArchive.Retention ]]: Barman deletes what a restore to any point of
 # that time no longer needs.
 [[- else ]]
 # and are kept for seven days: Barman deletes what a restore to any point of
 # the last seven days no longer needs.
 [[- end ]]
 #
-# The keys are the platform's (Secret infrared-platform-tokens, keys
-# backup-access-key-id and backup-secret-access-key), copied here through the
+# The keys are the platform's (Secret [[ $credentials ]], keys
+# [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]] and [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]), copied here through the
 # ClusterSecretStore infrared-platform.
 #
 # Waves: the keys (-2), the object store (-1), the Cluster (0, cluster.yaml),
@@ -57,12 +59,12 @@ spec:
   data:
     - secretKey: ACCESS_KEY_ID
       remoteRef:
-        key: infrared-platform-tokens
-        property: backup-access-key-id
+        key: [[ $credentials ]]
+        property: [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]]
     - secretKey: ACCESS_SECRET_KEY
       remoteRef:
-        key: infrared-platform-tokens
-        property: backup-secret-access-key
+        key: [[ $credentials ]]
+        property: [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]
 ---
 apiVersion: barmancloud.cnpg.io/v1
 kind: ObjectStore
@@ -72,9 +74,9 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
 spec:
-  retentionPolicy: [[ default "7d" .Copies.Postgres.Retention | quote ]]
+  retentionPolicy: [[ default "7d" .PostgresArchive.Retention | quote ]]
   configuration:
-    destinationPath: [[ printf "s3://%s/%s/postgres" .Backup.Bucket .ClusterName | quote ]]
+    destinationPath: [[ printf "s3://%s/%s/postgres" .Backup.Bucket $prefix | quote ]]
 [[- if .Backup.Endpoint ]]
     endpointURL: [[ .Backup.Endpoint | quote ]]
 [[- end ]]
@@ -105,9 +107,9 @@ metadata:
 spec:
   cluster:
     name: postgres
-[[- if .Copies.Postgres.Schedule ]]
-  # Seconds first, in UTC: the install's copies.postgres.schedule.
-  schedule: [[ .Copies.Postgres.Schedule | quote ]]
+[[- if .PostgresArchive.Schedule ]]
+  # Seconds first, in UTC: the install's schedule.
+  schedule: [[ .PostgresArchive.Schedule | quote ]]
 [[- else ]]
   # Seconds first: every day at 03:00 UTC.
   schedule: "0 0 3 * * *"

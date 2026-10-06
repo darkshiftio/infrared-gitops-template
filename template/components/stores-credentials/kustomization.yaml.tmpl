@@ -1,5 +1,5 @@
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
-[[- if and .Stores (or .Registry $copies) -]]
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- if and .Stores (or .Registry $backups) -]]
 # The stores' credentials (the `stores-credentials` Application, wave 19). See
 # store.yaml; wait.yaml holds the sync until External Secrets and SeaweedFS's S3
 # gateway answer. Every object names its own namespace.
@@ -8,8 +8,8 @@ kind: Kustomization
 resources:
   - wait.yaml
   - store.yaml
-[[- if $copies ]]
-  - copies.yaml
+[[- if $backups ]]
+  - backup.yaml
 [[- end ]]
 [[- else -]]
 # The stores' credentials are handed out only to the registry inside the

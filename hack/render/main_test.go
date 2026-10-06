@@ -218,6 +218,10 @@ func TestBackupAndDisabledFlags(t *testing.T) {
 	if err := bf.Set(`{"buckets": "x"}`); err == nil {
 		t.Error("-backup took an unknown field")
 	}
+	// INFRARED_BACKUP's prefix, when the install sets one.
+	if err := bf.Set(`{"bucket": "acme-backups", "prefix": "acme-mgmt"}`); err != nil || b != (BackupTarget{Bucket: "acme-backups", Prefix: "acme-mgmt"}) {
+		t.Errorf("-backup with a prefix loaded %+v, %v", b, err)
+	}
 	if err := bf.Set(""); err != nil || b != (BackupTarget{}) {
 		t.Errorf("-backup '' = %+v, %v; want the zero value", b, err)
 	}
@@ -424,27 +428,39 @@ func TestRegistrySplitIdiom(t *testing.T) {
 	}
 }
 
-// The copies, Zot's retention and a restore load from the operator's
-// environment's JSON (camelCase keys) through their flags, refuse an unknown
-// field, and an empty flag is the zero value.
+// The copies, Postgres's archive, Zot's retention and a restore load through
+// their flags (camelCase keys), refuse an unknown field, and an empty flag is
+// the zero value.
 func TestCopiesRetentionRestoreFlags(t *testing.T) {
 	var c Copies
 	cf := jsonFlag[Copies]{&c, "copies"}
 	if err := cf.Set(`{"recipients": ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"],
-		"postgres": {"schedule": "0 0 3 * * *", "retention": "7d"}, "gitea": {"schedule": "10 * * * *"}}`); err != nil {
+		"mirror": {"schedule": "17 * * * *", "retention": "7d"}}`); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Recipients) != 1 || c.Postgres != (CopySchedule{Schedule: "0 0 3 * * *", Retention: "7d"}) ||
-		c.Gitea.Schedule != "10 * * * *" || c.Mirror != (CopySchedule{}) {
+	if len(c.Recipients) != 1 || c.Mirror != (CopySchedule{Schedule: "17 * * * *", Retention: "7d"}) {
 		t.Errorf("-copies loaded %+v", c)
 	}
-	for _, bad := range []string{`{"recipient": []}`, `{"postgres": {"when": "x"}}`, `{} {}`} {
+	// The staging copies and Postgres's schedule are gone from Copies.
+	for _, bad := range []string{`{"recipient": []}`, `{"mirror": {"when": "x"}}`, `{"objects": {"schedule": "5 * * * *"}}`,
+		`{"gitea": {"schedule": "10 * * * *"}}`, `{"postgres": {"schedule": "0 0 3 * * *"}}`, `{} {}`} {
 		if err := cf.Set(bad); err == nil {
 			t.Errorf("-copies took %s", bad)
 		}
 	}
-	if err := cf.Set(""); err != nil || c.Recipients != nil || c.Postgres != (CopySchedule{}) {
+	if err := cf.Set(""); err != nil || c.Recipients != nil || c.Mirror != (CopySchedule{}) {
 		t.Errorf("-copies '' = %+v, %v; want the zero value", c, err)
+	}
+	var a PostgresArchive
+	af := jsonFlag[PostgresArchive]{&a, "postgres-archive"}
+	if err := af.Set(`{"enabled": true, "schedule": "0 30 2 * * *", "retention": "14d"}`); err != nil {
+		t.Fatal(err)
+	}
+	if a != (PostgresArchive{Enabled: true, Schedule: "0 30 2 * * *", Retention: "14d"}) {
+		t.Errorf("-postgres-archive loaded %+v", a)
+	}
+	if err := af.Set(`{"archive": true}`); err == nil {
+		t.Error("-postgres-archive took an unknown field")
 	}
 	var r RegistryRetention
 	rf := jsonFlag[RegistryRetention]{&r, "registry-retention"}
@@ -459,22 +475,31 @@ func TestCopiesRetentionRestoreFlags(t *testing.T) {
 	}
 	var x Restore
 	xf := jsonFlag[Restore]{&x, "restore"}
-	if err := xf.Set(`{"point": "20261003T050500Z", "postgres": {"source": "postgres", "targetTime": "2026-10-03T05:17:00Z"}}`); err != nil {
+	if err := xf.Set(`{"point": "20261006T010500Z", "artifact": "20261006T010500Z.irbackup", "mirrorRun": "20261006T011700Z"}`); err != nil {
 		t.Fatal(err)
 	}
-	if x != (Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres", TargetTime: "2026-10-03T05:17:00Z"}}) {
+	if x != (Restore{Point: "20261006T010500Z", Artifact: "20261006T010500Z.irbackup", MirrorRun: "20261006T011700Z"}) {
 		t.Errorf("-restore loaded %+v", x)
 	}
-	if got := xf.String(); !strings.Contains(got, `"Point":"20261003T050500Z"`) {
+	if got := xf.String(); !strings.Contains(got, `"Point":"20261006T010500Z"`) {
 		t.Errorf("-restore's String is %s", got)
+	}
+	// A restore's Postgres no longer comes from an archive.
+	if err := xf.Set(`{"point": "20261006T010500Z", "postgres": {"source": "postgres"}}`); err == nil {
+		t.Error("-restore took the archive's source")
 	}
 }
 
-// The new fields load from the operator's Data JSON by their Go names.
+// The new fields load from the operator's Data JSON by their Go names, the
+// backup's prefix and credentials among them.
 func TestDataFileCopiesFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.json")
 	body := `{"clusterName": "c1", "Copies": {"Recipients": ["age1x"], "Mirror": {"Schedule": "17 * * * *"}},
-		"RegistryRetention": {"KeepNewest": 5}, "Restore": {"Point": "20261003T050500Z"},
+		"Backup": {"Bucket": "acme-backups", "Prefix": "acme-mgmt", "Credentials": {"Secret": "infrared-platform-tokens",
+			"AccessKeyIDKey": "backup-access-key-id", "SecretKeyKey": "backup-secret-access-key", "Kind": "accessKey"}},
+		"PostgresArchive": {"Enabled": true, "Retention": "7d"},
+		"RegistryRetention": {"KeepNewest": 5},
+		"Restore": {"Point": "20261006T010500Z", "Artifact": "20261006T010500Z.irbackup", "MirrorRun": "20261006T011700Z"},
 		"PostgresServerName": "postgres-20261003T060000Z"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -484,9 +509,21 @@ func TestDataFileCopiesFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(d.Copies.Recipients) != 1 || d.Copies.Mirror.Schedule != "17 * * * *" || d.RegistryRetention.KeepNewest != 5 ||
-		d.Restore.Point != "20261003T050500Z" || d.PostgresServerName != "postgres-20261003T060000Z" {
-		t.Errorf("loaded Copies %+v, RegistryRetention %+v, Restore %+v, PostgresServerName %q",
-			d.Copies, d.RegistryRetention, d.Restore, d.PostgresServerName)
+		d.Backup.Prefix != "acme-mgmt" || d.Backup.Credentials.Kind != "accessKey" ||
+		d.PostgresArchive != (PostgresArchive{Enabled: true, Retention: "7d"}) ||
+		d.Restore != (Restore{Point: "20261006T010500Z", Artifact: "20261006T010500Z.irbackup", MirrorRun: "20261006T011700Z"}) ||
+		d.PostgresServerName != "postgres-20261003T060000Z" {
+		t.Errorf("loaded Copies %+v, Backup %+v, PostgresArchive %+v, RegistryRetention %+v, Restore %+v, PostgresServerName %q",
+			d.Copies, d.Backup, d.PostgresArchive, d.RegistryRetention, d.Restore, d.PostgresServerName)
+	}
+	for _, old := range []string{`{"Copies": {"Postgres": {"Schedule": "0 0 3 * * *"}}}`, `{"Copies": {"Objects": {}}}`,
+		`{"Restore": {"Postgres": {"Source": "postgres"}}}`} {
+		if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := mergeDataFile(&Data{}, path); err == nil {
+			t.Errorf("a field that is gone loaded: %s", old)
+		}
 	}
 }
 
@@ -497,20 +534,30 @@ func TestValidateCopiesRetentionRestore(t *testing.T) {
 	const recipient = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
 	stores := func(d *Data) { d.Stores, d.Backup = true, BackupTarget{Bucket: "acme-backups"} }
 	for name, mutate := range map[string]func(*Data){
-		"every copy": func(d *Data) {
-			d.Copies = Copies{Recipients: []string{recipient}, Postgres: CopySchedule{"0 30 2 * * *", "14d"},
-				Mirror: CopySchedule{"*/30 * * * *", "10d"}, Objects: CopySchedule{"5 * * * MON-FRI", "9d"}, Gitea: CopySchedule{"10 * * * *", "365d"}}
+		"every setting": func(d *Data) {
+			d.Copies = Copies{Recipients: []string{recipient}, Mirror: CopySchedule{"*/30 * * * *", "10d"}}
+			d.PostgresArchive = PostgresArchive{Enabled: true, Schedule: "0 30 2 * * *", Retention: "365d"}
 		},
 		"retention": func(d *Data) {
 			d.RegistryRetention = RegistryRetention{UntaggedAfter: "1h30m", KeepTags: []string{`^v\d+`, "^release-"}, KeepNewest: 1000, GCInterval: "2h", GCDelay: "30m"}
 		},
 		"server name": func(d *Data) { d.PostgresServerName = "postgres-20261003T060000Z" },
+		"prefix":      func(d *Data) { stores(d); d.Backup.Prefix = "acme-mgmt.2" },
+		// The operator sends day one's credential explicitly.
+		"credentials, explicit": func(d *Data) {
+			stores(d)
+			d.Backup.Credentials = BackupCredentials{Secret: "infrared-platform-tokens", AccessKeyIDKey: "backup-access-key-id",
+				SecretKeyKey: "backup-secret-access-key", Kind: "accessKey"}
+		},
 		"restore": func(d *Data) {
 			stores(d)
-			d.PostgresServerName = "postgres-20261004T101500Z"
-			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres", TargetTime: "2026-10-03T05:17:00Z"}}
+			d.Restore = Restore{Point: "20261006T010500Z", Artifact: "20261006T010500Z.irbackup", MirrorRun: "20261006T011700Z"}
 		},
-		"restore, no archive": func(d *Data) { stores(d); d.Restore = Restore{Point: "20261003T050500Z"} },
+		"restore, the artifact under its path": func(d *Data) {
+			stores(d)
+			d.Restore = Restore{Point: "20261006T010500Z", Artifact: "lke-tmp1/backups/20261006T010500Z.irbackup"}
+		},
+		"restore, the point alone": func(d *Data) { stores(d); d.Restore = Restore{Point: "20261006T010500Z"} },
 	} {
 		d := base
 		mutate(&d)
@@ -519,10 +566,10 @@ func TestValidateCopiesRetentionRestore(t *testing.T) {
 		}
 	}
 	for name, mutate := range map[string]func(*Data){
-		"five-field Postgres schedule": func(d *Data) { d.Copies.Postgres.Schedule = "0 3 * * *" },
+		"five-field Postgres schedule": func(d *Data) { d.PostgresArchive.Schedule = "0 3 * * *" },
 		"six-field mirror schedule":    func(d *Data) { d.Copies.Mirror.Schedule = "0 17 * * * *" },
-		"retention in hours":           func(d *Data) { d.Copies.Objects.Retention = "168h" },
-		"retention of 0 days":          func(d *Data) { d.Copies.Gitea.Retention = "0d" },
+		"retention in hours":           func(d *Data) { d.Copies.Mirror.Retention = "168h" },
+		"retention of 0 days":          func(d *Data) { d.PostgresArchive.Retention = "0d" },
 		"an SSH key as recipient":      func(d *Data) { d.Copies.Recipients = []string{"ssh-ed25519 AAAA"} },
 		"recipient twice":              func(d *Data) { d.Copies.Recipients = []string{recipient, recipient} },
 		"retention in days":            func(d *Data) { d.RegistryRetention.UntaggedAfter = "1d" },
@@ -531,30 +578,37 @@ func TestValidateCopiesRetentionRestore(t *testing.T) {
 		"keep newest negative":         func(d *Data) { d.RegistryRetention.KeepNewest = -1 },
 		"server name upper case":       func(d *Data) { d.PostgresServerName = "Postgres" },
 		"server name with a slash":     func(d *Data) { d.PostgresServerName = "postgres/x" },
-		"restore without stores":       func(d *Data) { d.Restore.Point = "20261003T050500Z" },
+		"prefix without a bucket":      func(d *Data) { d.Backup.Prefix = "acme" },
+		"prefix with a slash":          func(d *Data) { stores(d); d.Backup.Prefix = "acme/mgmt" },
+		"prefix upper case":            func(d *Data) { stores(d); d.Backup.Prefix = "Acme" },
+		"credentials of another Secret": func(d *Data) {
+			stores(d)
+			d.Backup.Credentials.Secret = "acme-backup-key"
+		},
+		"credentials of another kind": func(d *Data) { stores(d); d.Backup.Credentials.Kind = "role" },
+		"a key name with a space":     func(d *Data) { stores(d); d.Backup.Credentials.AccessKeyIDKey = "access key" },
+		"credentials without a bucket": func(d *Data) {
+			d.Backup.Credentials = BackupCredentials{Kind: "accessKey"}
+		},
+		"restore without stores": func(d *Data) { d.Restore.Point = "20261006T010500Z" },
 		"restore point not a stamp": func(d *Data) {
 			stores(d)
-			d.Restore.Point = "2026-10-03T05:05:00Z"
+			d.Restore.Point = "2026-10-06T01:05:00Z"
 		},
-		"restore source, no new name": func(d *Data) {
+		"an artifact without a point":  func(d *Data) { stores(d); d.Restore.Artifact = "20261006T010500Z.irbackup" },
+		"a mirror run without a point": func(d *Data) { stores(d); d.Restore.MirrorRun = "20261006T011700Z" },
+		"another point's artifact": func(d *Data) {
 			stores(d)
-			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres"}}
+			d.Restore = Restore{Point: "20261006T010500Z", Artifact: "20261006T000500Z.irbackup"}
 		},
-		"restore into its own source": func(d *Data) {
+		"an artifact of format 1": func(d *Data) {
 			stores(d)
-			d.PostgresServerName = "postgres"
-			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres"}}
+			d.Restore = Restore{Point: "20261006T010500Z", Artifact: "20261006T010500Z.tar.gz.age"}
 		},
-		"target time not UTC": func(d *Data) {
+		"a mirror run before the point": func(d *Data) {
 			stores(d)
-			d.PostgresServerName = "postgres-20261004T101500Z"
-			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{Source: "postgres", TargetTime: "2026-10-03T05:17:00+02:00"}}
+			d.Restore = Restore{Point: "20261006T010500Z", MirrorRun: "20261006T001700Z"}
 		},
-		"target time, no source": func(d *Data) {
-			stores(d)
-			d.Restore = Restore{Point: "20261003T050500Z", Postgres: RestorePostgres{TargetTime: "2026-10-03T05:17:00Z"}}
-		},
-		"postgres without a point": func(d *Data) { stores(d); d.Restore.Postgres.Source = "postgres" },
 	} {
 		d := base
 		mutate(&d)

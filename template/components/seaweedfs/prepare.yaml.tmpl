@@ -1,4 +1,3 @@
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- if .Stores -]]
 # =============================================================================
@@ -71,7 +70,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $copies ]], "seaweedfs-s3-objects-copy", "seaweedfs-s3-gitea-dump"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]]]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -127,7 +126,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: IDENTITIES
-              value: "ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]][[ if $copies ]] objects-copy gitea-dump[[ end ]][[ if $restore ]] restore[[ end ]]"
+              value: "ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]"
             - name: WAIT_CRDS
               value: "[[ if .Backup.Bucket ]]externalsecrets.external-secrets.io[[ end ]]"
             - name: WAIT_SERVICES

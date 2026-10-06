@@ -1,5 +1,7 @@
-[[- $copies := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $prefix := default .ClusterName .Backup.Prefix -]]
+[[- $credentials := default "infrared-platform-tokens" .Backup.Credentials.Secret -]]
 [[- if and .Stores .Backup.Bucket -]]
 # =============================================================================
 # SeaweedFS's buckets, copied to the bucket outside the cluster every hour.
@@ -11,9 +13,9 @@
 # Every hour, at 17 past, rclone makes the copy of each bucket match it:
 [[- end ]]
 #
-#   [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/current/<bucket>/          the bucket as it is
-#   [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/archive/<run>/<bucket>/    what that run replaced or deleted
-#   [[ .Backup.Bucket ]]/[[ .ClusterName ]]/seaweedfs/runs/<run>.json            that the run finished
+#   [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/current/<bucket>/          the bucket as it is
+#   [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/archive/<run>/<bucket>/    what that run replaced or deleted
+#   [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/runs/<run>.json            that the run finished
 #
 # A run is named by its start, e.g. 20261002T221700Z. What a run replaces or
 [[- if .Copies.Mirror.Retention ]]
@@ -24,11 +26,14 @@
 # brought back; archives and marks older than that are deleted. A copy of every
 # object at every hour would take 168 times the buckets' size.
 [[- end ]]
-[[- if $copies ]]
+[[- if $backups ]]
 #
-# The copies of Infrared's objects (infrared-objects) and of Gitea
-# (gitea-dumps), which the Infrared chart makes and encrypts, come last: the
-# other buckets in current/ are never older than a copy that is there.
+# The install's backups are one artifact each, which the Infrared operator
+# writes straight to [[ .Backup.Bucket ]]/[[ $prefix ]]/backups/: <stamp>.irbackup, encrypted,
+# and its manifest <stamp>.json. A run's mark names the newest complete backup
+# when the run started (backup), both objects there and the artifact the size
+# its manifest says, so the buckets in current/ are never older than that
+# backup: a restore pairs a backup with a run that names it or a newer one.
 [[- end ]]
 [[- if $restore ]]
 #
@@ -38,14 +43,10 @@
 # empty the copy the restore reads.
 [[- end ]]
 #
-[[- if $copies ]]
-# rclone reads with the S3 identity backup (Read and List on every bucket, see
-[[- else ]]
 # rclone reads with the S3 identity backup (Read and List on both buckets, see
-[[- end ]]
 # identities.yaml) and writes with the platform's backup keys (Secret
-# infrared-platform-tokens, keys backup-access-key-id and
-# backup-secret-access-key), copied here through the ClusterSecretStore
+# [[ $credentials ]], keys [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]] and
+# [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]), copied here through the ClusterSecretStore
 # infrared-platform. Nothing prints a key.
 # =============================================================================
 apiVersion: external-secrets.io/v1
@@ -68,12 +69,12 @@ spec:
   data:
     - secretKey: ACCESS_KEY_ID
       remoteRef:
-        key: infrared-platform-tokens
-        property: backup-access-key-id
+        key: [[ $credentials ]]
+        property: [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]]
     - secretKey: ACCESS_SECRET_KEY
       remoteRef:
-        key: infrared-platform-tokens
-        property: backup-secret-access-key
+        key: [[ $credentials ]]
+        property: [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -108,9 +109,14 @@ spec:
                 - name: HOME
                   value: /tmp
                 - name: BUCKETS
-                  value: "ate-snapshots registry[[ if $copies ]] infrared-objects gitea-dumps[[ end ]]"
+                  value: "ate-snapshots registry"
                 - name: DESTINATION
-                  value: [[ printf "dst:%s/%s/seaweedfs" .Backup.Bucket .ClusterName | quote ]]
+                  value: [[ printf "dst:%s/%s/seaweedfs" .Backup.Bucket $prefix | quote ]]
+[[- if $backups ]]
+                # Where the operator writes the backups, for the run's mark.
+                - name: BACKUPS
+                  value: [[ printf "dst:%s/%s/backups" .Backup.Bucket $prefix | quote ]]
+[[- end ]]
                 # The source: SeaweedFS, as the identity backup.
                 - name: RCLONE_CONFIG_SRC_TYPE
                   value: s3
@@ -167,6 +173,39 @@ spec:
                   fi
 [[- end ]]
                   run="$(date -u +%Y%m%dT%H%M%SZ)"
+[[- if $backups ]]
+                  # The newest complete backup as the run starts, before any
+                  # bucket is copied: its artifact and its manifest both there,
+                  # the artifact the size the manifest's own "size" says. None
+                  # yet, or a listing that fails, names none ("").
+                  backup=""
+                  listing="$(rclone lsf --files-only --format ps --separator ' ' "$BACKUPS/" 2>/dev/null || true)"
+                  manifest_size() {
+                    tr -d ' \t\r\n' | awk '{
+                      s = $0; d = 0
+                      for (i = 1; i <= length(s); i++) {
+                        c = substr(s, i, 1)
+                        if (c == "\"") {
+                          j = index(substr(s, i + 1), "\"")
+                          if (j == 0) exit
+                          key = substr(s, i + 1, j - 1); i += j
+                          if (d == 1 && key == "size" && substr(s, i + 1, 1) == ":") {
+                            v = substr(s, i + 2); sub(/[^0-9].*$/, "", v); print v; exit
+                          }
+                        } else if (c == "{" || c == "[") d++
+                        else if (c == "}" || c == "]") d--
+                      }
+                    }'
+                  }
+                  for stamp in $(printf '%s\n' "$listing" | sed -n 's/^\([0-9]\{8\}T[0-9]\{6\}Z\)\.json .*$/\1/p' | sort -r); do
+                    size="$(printf '%s\n' "$listing" | awk -v f="$stamp.irbackup" '$1 == f {print $2}')"
+                    [ -n "$size" ] || continue
+                    if [ "$(rclone cat "$BACKUPS/$stamp.json" 2>/dev/null | manifest_size)" = "$size" ]; then
+                      backup="$stamp"
+                      break
+                    fi
+                  done
+[[- end ]]
                   for bucket in $BUCKETS; do
                     rclone sync "src:$bucket" "$DESTINATION/current/$bucket" \
                       --backup-dir "$DESTINATION/archive/$run/$bucket" \
@@ -185,9 +224,15 @@ spec:
                   for mark in $(rclone lsf --files-only "$DESTINATION/runs/" 2>/dev/null); do
                     if older "$mark"; then rclone deletefile "$DESTINATION/runs/$mark"; fi
                   done
+[[- if $backups ]]
+                  printf '{"run": "%s", "finished": "%s", "buckets": "%s", "backup": "%s"}\n' \
+                    "$run" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUCKETS" "$backup" | rclone rcat "$DESTINATION/runs/$run.json"
+                  echo "copied $BUCKETS to $DESTINATION, run $run, after the backup ${backup:-(none yet)}"
+[[- else ]]
                   printf '{"run": "%s", "finished": "%s", "buckets": "%s"}\n' \
                     "$run" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUCKETS" | rclone rcat "$DESTINATION/runs/$run.json"
                   echo "copied $BUCKETS to $DESTINATION, run $run"
+[[- end ]]
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -29,7 +29,6 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
-	"time"
 )
 
 // Data is the value every .tmpl file is executed against. encoding/json matches
@@ -84,8 +83,9 @@ type Data struct {
 	// Stores is the operator's INFRARED_STORES: true renders the platform's own
 	// stores, CloudNativePG with one Postgres Cluster, and SeaweedFS.
 	Stores bool `json:"Stores"`
-	// Backup is the operator's INFRARED_BACKUP: the bucket outside the cluster
-	// the stores are copied to. An empty Bucket turns backups off, and with
+	// Backup is the destination of the install's backups, outside the cluster:
+	// the Installation's spec.backup.destination, which the operator seeds from
+	// the chart's INFRARED_BACKUP. An empty Bucket turns backups off, and with
 	// Stores false there is nothing to copy.
 	Backup BackupTarget `json:"Backup"`
 	// Disabled is the operator's INFRARED_DISABLED_COMPONENTS: the components,
@@ -103,14 +103,22 @@ type Data struct {
 	// With Stores the template runs Zot there (its Service's pinned ClusterIP
 	// and port), and builds push the builder to it.
 	Registry string `json:"Registry"`
-	// Copies is the operator's INFRARED_COPIES: when the platform's copies are
-	// made and how long each is kept, and the age recipients the copies of
-	// Infrared's objects and of Gitea are encrypted to. The template schedules
-	// Postgres's base backup and the buckets' mirror, makes the buckets and
-	// identities of the two encrypted copies only with Recipients, and carries
-	// the whole setting in the infrared Application. Each empty field renders
-	// today's literal.
+	// Copies is the rest of the Installation's spec.backup that the template
+	// renders: the buckets' mirror (spec.backup.mirror.schedule, and how long
+	// what a run replaced or deleted is kept, spec.backup.retention) and the
+	// age recipients the backups are encrypted to. With the stores, a backup
+	// bucket and Recipients, backups are on: the operator's backup CronJob
+	// writes one artifact per backup under <prefix>/backups/, the mirror's run
+	// mark names the newest complete one, and the consumers' Postgres roles
+	// reach the Infrared namespace for its dump. The template carries the
+	// setting in the infrared Application. Each empty field renders today's
+	// literal.
 	Copies Copies `json:"Copies"`
+	// PostgresArchive is Barman's WAL archiving of the platform's Postgres to
+	// the backup bucket: Enabled is spec.backup.postgres.archive, which the
+	// infrared Application carries; Schedule is the base backup's and
+	// Retention the archive's, each empty for today's literal.
+	PostgresArchive PostgresArchive `json:"PostgresArchive"`
 	// RegistryRetention is the operator's INFRARED_REGISTRY_RETENTION: Zot's
 	// garbage collection and retention. Each empty field renders today's
 	// literal.
@@ -118,30 +126,36 @@ type Data struct {
 	// Restore is the restore in progress, which the operator reads from the
 	// ConfigMap infrared/infrared-restore while its phase is ObjectsRestored or
 	// Failed, and zero otherwise. With the stores and a backup bucket it
-	// recovers Postgres, resets SeaweedFS's file index, copies the buckets back
-	// and holds what needs them until they are back.
+	// starts Postgres empty, resets SeaweedFS's file index, copies the buckets
+	// back and holds what needs them until they are back.
 	Restore Restore `json:"Restore"`
 	// PostgresServerName is the server name the platform's Postgres archives
-	// under, s3://<Backup.Bucket>/<ClusterName>/postgres/<name>/: it must name an
+	// under, s3://<Backup.Bucket>/<prefix>/postgres/<name>/: it must name an
 	// empty prefix and never changes for the life of the install. Empty means
 	// postgres, the Cluster's own name, as before the field existed.
 	PostgresServerName string `json:"PostgresServerName"`
 }
 
-// Copies is INFRARED_COPIES: Copies.Postgres is the base backup (six cron
-// fields, seconds first), Copies.Mirror the buckets' hourly mirror, Objects and
-// Gitea the chart's encrypted copies (five cron fields each); every Retention is
-// days, such as 7d. Recipients are age X25519 recipients (age1...).
+// Copies is spec.backup's mirror and recipients: Copies.Mirror is the
+// buckets' hourly mirror (five cron fields), its Retention whole days, such
+// as 7d; Recipients are age X25519 recipients (age1...).
 type Copies struct {
-	Postgres   CopySchedule `json:"Postgres"`
 	Mirror     CopySchedule `json:"Mirror"`
-	Objects    CopySchedule `json:"Objects"`
-	Gitea      CopySchedule `json:"Gitea"`
 	Recipients []string     `json:"Recipients"`
 }
 
-// CopySchedule is one copy's schedule and retention; empty keeps the default.
+// CopySchedule is one schedule and retention; empty keeps the default.
 type CopySchedule struct {
+	Schedule  string `json:"Schedule"`
+	Retention string `json:"Retention"`
+}
+
+// PostgresArchive is Barman's archive of the platform's Postgres: Enabled is
+// spec.backup.postgres.archive; Schedule the base backup's (six cron fields,
+// seconds first) and Retention the archive's (whole days), each empty for the
+// default, 0 0 3 * * * and 7d.
+type PostgresArchive struct {
+	Enabled   bool   `json:"Enabled"`
 	Schedule  string `json:"Schedule"`
 	Retention string `json:"Retention"`
 }
@@ -159,19 +173,14 @@ type RegistryRetention struct {
 	GCDelay       string   `json:"GCDelay"`
 }
 
-// Restore is a restore in progress: Point is P, the stamp of the copy of
-// Infrared's objects restored (e.g. 20261003T050500Z), and Postgres the
-// archive's server name it recovers from (Source, S) and the time it recovers
-// to (TargetTime, RFC 3339 in UTC; empty: the end of the archive).
+// Restore is a restore in progress: Point is the stamp of the backup restored
+// (e.g. 20261006T010500Z), Artifact its object under <prefix>/backups/
+// (<Point>.irbackup), and MirrorRun the mirror run whose current/ the buckets
+// come back from, a stamp too.
 type Restore struct {
-	Point    string          `json:"Point"`
-	Postgres RestorePostgres `json:"Postgres"`
-}
-
-// RestorePostgres is where a restore's Postgres comes from.
-type RestorePostgres struct {
-	Source     string `json:"Source"`
-	TargetTime string `json:"TargetTime"`
+	Point     string `json:"Point"`
+	Artifact  string `json:"Artifact"`
+	MirrorRun string `json:"MirrorRun"`
 }
 
 // ImageRef is one component's image pin: Images["api"].Tag and .Digest.
@@ -181,11 +190,27 @@ type ImageRef struct {
 }
 
 // BackupTarget is an S3-compatible bucket outside the cluster:
-// Backup.Bucket, .Endpoint (empty for AWS S3) and .Region (may be empty).
+// Backup.Bucket, .Endpoint (empty for AWS S3), .Region (may be empty),
+// .Prefix, the path everything is kept under (empty: the install's name,
+// ClusterName), and .Credentials, where its key is.
 type BackupTarget struct {
-	Bucket   string `json:"Bucket"`
-	Endpoint string `json:"Endpoint"`
-	Region   string `json:"Region"`
+	Bucket      string            `json:"Bucket"`
+	Endpoint    string            `json:"Endpoint"`
+	Region      string            `json:"Region"`
+	Prefix      string            `json:"Prefix"`
+	Credentials BackupCredentials `json:"Credentials"`
+}
+
+// BackupCredentials is where the backup bucket's key is: the Secret in the
+// Infrared namespace, its two keys, and the credential's Kind. Each empty
+// field is today's: infrared-platform-tokens, backup-access-key-id,
+// backup-secret-access-key, accessKey. Day one reads that Secret alone, which
+// the store infrared-platform reads, and an access key alone.
+type BackupCredentials struct {
+	Secret         string `json:"Secret"`
+	AccessKeyIDKey string `json:"AccessKeyIDKey"`
+	SecretKeyKey   string `json:"SecretKeyKey"`
+	Kind           string `json:"Kind"`
 }
 
 // Required are the components the template always renders: Disabled may not
@@ -199,7 +224,8 @@ var (
 )
 
 // backupFlag reads -backup: a JSON object {"bucket", "endpoint", "region"}, as
-// the operator's INFRARED_BACKUP carries it.
+// the operator's INFRARED_BACKUP carries it, with "prefix" and "credentials"
+// when they are set.
 type backupFlag struct{ b *BackupTarget }
 
 func (f backupFlag) String() string {
@@ -279,10 +305,10 @@ func (f imagesFlag) Set(s string) error {
 }
 
 // jsonFlag reads a flag's JSON into a value, refusing unknown fields: -copies
-// as the operator's INFRARED_COPIES carries it, -registry-retention as its
-// INFRARED_REGISTRY_RETENTION does, and -restore as the restore's Data. Field
-// names match case-insensitively, so the environment's camelCase keys load.
-// An empty value is the zero value.
+// and -postgres-archive as the Data carries them, -registry-retention as the
+// operator's INFRARED_REGISTRY_RETENTION does, and -restore as the restore's
+// Data. Field names match case-insensitively, so camelCase keys load. An empty
+// value is the zero value.
 type jsonFlag[T any] struct {
 	v    *T
 	name string
@@ -377,17 +403,19 @@ func main() {
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws" or "linode"`)
 	flag.BoolVar(&d.SubstrateCapable, "substrate-capable", false, "SubstrateCapable: the preflight's result")
 	flag.BoolVar(&d.Stores, "stores", false, "Stores: the platform's own Postgres and SeaweedFS")
-	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "..."} (empty: no backups)`)
+	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "...", "prefix": "..."} (empty: no backups)`)
 	flag.Var(disabledFlag{&d.Disabled}, "disabled", `Disabled, as a JSON array of component names: ["infisical"] (empty: none)`)
 	flag.StringVar(&d.Forge, "forge", "", `Forge: "" (GitHub, as before) or "gitea"`)
 	flag.StringVar(&d.ForgeURL, "forge-url", "", "ForgeURL: the forge's root as the cluster reaches it, no trailing slash (Gitea only)")
 	flag.StringVar(&d.Registry, "registry", "", "Registry: the address of the registry inside the cluster, <IPv4>:<port> (empty for none)")
 	flag.Var(jsonFlag[Copies]{&d.Copies, "copies"}, "copies",
-		`Copies, as INFRARED_COPIES: {"recipients": ["age1..."], "postgres": {"schedule": "0 0 3 * * *", "retention": "7d"}, "mirror": {...}, "objects": {...}, "gitea": {...}} (empty: today's)`)
+		`Copies: {"recipients": ["age1..."], "mirror": {"schedule": "17 * * * *", "retention": "7d"}} (empty: today's)`)
+	flag.Var(jsonFlag[PostgresArchive]{&d.PostgresArchive, "postgres-archive"}, "postgres-archive",
+		`PostgresArchive: {"enabled": true, "schedule": "0 0 3 * * *", "retention": "7d"} (empty: today's)`)
 	flag.Var(jsonFlag[RegistryRetention]{&d.RegistryRetention, "registry-retention"}, "registry-retention",
 		`RegistryRetention, as INFRARED_REGISTRY_RETENTION: {"untaggedAfter": "24h", "keepTags": ["^v[0-9]"], "keepNewest": 10, "gcInterval": "1h", "gcDelay": "1h"} (empty: today's)`)
 	flag.Var(jsonFlag[Restore]{&d.Restore, "restore"}, "restore",
-		`Restore: {"point": "20261003T050500Z", "postgres": {"source": "postgres", "targetTime": "2026-10-03T05:17:00Z"}} (empty: no restore)`)
+		`Restore: {"point": "20261006T010500Z", "artifact": "20261006T010500Z.irbackup", "mirrorRun": "20261006T011700Z"} (empty: no restore)`)
 	flag.StringVar(&d.PostgresServerName, "postgres-server-name", "", "PostgresServerName: the server name Postgres archives under (empty: postgres)")
 	flag.Parse()
 
@@ -458,6 +486,7 @@ func mergeDataFile(d *Data, path string) error {
 		"forge-url":            func() { d.ForgeURL = explicit.ForgeURL },
 		"registry":             func() { d.Registry = explicit.Registry },
 		"copies":               func() { d.Copies = explicit.Copies },
+		"postgres-archive":     func() { d.PostgresArchive = explicit.PostgresArchive },
 		"registry-retention":   func() { d.RegistryRetention = explicit.RegistryRetention },
 		"restore":              func() { d.Restore = explicit.Restore },
 		"postgres-server-name": func() { d.PostgresServerName = explicit.PostgresServerName },
@@ -512,6 +541,7 @@ func validate(d Data) error {
 		errs = append(errs, err)
 	}
 	errs = append(errs, validateCopies(d.Copies)...)
+	errs = append(errs, validatePostgresArchive(d.PostgresArchive)...)
 	errs = append(errs, validateRegistryRetention(d.RegistryRetention)...)
 	errs = append(errs, validateRestore(d)...)
 	if d.PostgresServerName != "" && !serverName.MatchString(d.PostgresServerName) {
@@ -534,32 +564,38 @@ var (
 	duration = regexp.MustCompile(`^([0-9]+(h|m|s))+$`)
 	// printable is printable ASCII, which the templates quote as JSON safely.
 	printable = regexp.MustCompile(`^[ -~]{1,200}$`)
-	// stamp is a copy's name: its UTC time, YYYYMMDDTHHMMSSZ.
+	// stamp is a backup's or a mirror run's name: its UTC time,
+	// YYYYMMDDTHHMMSSZ.
 	stamp = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z$`)
+	// artifact is a backup's object: its stamp and .irbackup, alone or under
+	// its path.
+	artifact = regexp.MustCompile(`^([a-z0-9][a-z0-9._-]{0,62}/backups/)?[0-9]{8}T[0-9]{6}Z\.irbackup$`)
 	// serverName is a Postgres archive's server name, such as postgres or
 	// postgres-20261003T060000Z.
 	serverName = regexp.MustCompile(`^[a-z][A-Za-z0-9._-]{0,62}$`)
+	// backupPrefix is the path a destination keeps an install's backups
+	// under, as spec.backup.destination.prefix allows it.
+	backupPrefix = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+	// secretKey is a key of a Secret's data.
+	secretKey = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
 )
 
-// validateCopies checks each copy's schedule and retention that is set, and
-// the recipients.
+// The backup bucket's key, as day one reads it: from this Secret alone, and
+// an access key alone.
+const (
+	backupSecret = "infrared-platform-tokens"
+	backupKind   = "accessKey"
+)
+
+// validateCopies checks the mirror's schedule and retention when they are
+// set, and the recipients.
 func validateCopies(c Copies) []error {
 	var errs []error
-	for _, s := range []struct {
-		name string
-		six  bool
-		v    CopySchedule
-	}{{"Postgres", true, c.Postgres}, {"Mirror", false, c.Mirror}, {"Objects", false, c.Objects}, {"Gitea", false, c.Gitea}} {
-		re, want := cron5, "5 cron fields"
-		if s.six {
-			re, want = cron6, "6 cron fields, seconds first"
-		}
-		if s.v.Schedule != "" && !re.MatchString(s.v.Schedule) {
-			errs = append(errs, fmt.Errorf("Copies.%s.Schedule must be %s, got %q", s.name, want, s.v.Schedule))
-		}
-		if s.v.Retention != "" && !retentionDays.MatchString(s.v.Retention) {
-			errs = append(errs, fmt.Errorf("Copies.%s.Retention must be whole days, such as 7d, got %q", s.name, s.v.Retention))
-		}
+	if c.Mirror.Schedule != "" && !cron5.MatchString(c.Mirror.Schedule) {
+		errs = append(errs, fmt.Errorf("Copies.Mirror.Schedule must be 5 cron fields, got %q", c.Mirror.Schedule))
+	}
+	if c.Mirror.Retention != "" && !retentionDays.MatchString(c.Mirror.Retention) {
+		errs = append(errs, fmt.Errorf("Copies.Mirror.Retention must be whole days, such as 7d, got %q", c.Mirror.Retention))
 	}
 	seen := map[string]bool{}
 	for _, r := range c.Recipients {
@@ -570,6 +606,19 @@ func validateCopies(c Copies) []error {
 			errs = append(errs, fmt.Errorf("Copies.Recipients lists %s twice", r))
 		}
 		seen[r] = true
+	}
+	return errs
+}
+
+// validatePostgresArchive checks the base backup's schedule and the archive's
+// retention when they are set.
+func validatePostgresArchive(a PostgresArchive) []error {
+	var errs []error
+	if a.Schedule != "" && !cron6.MatchString(a.Schedule) {
+		errs = append(errs, fmt.Errorf("PostgresArchive.Schedule must be 6 cron fields, seconds first, got %q", a.Schedule))
+	}
+	if a.Retention != "" && !retentionDays.MatchString(a.Retention) {
+		errs = append(errs, fmt.Errorf("PostgresArchive.Retention must be whole days, such as 7d, got %q", a.Retention))
 	}
 	return errs
 }
@@ -599,39 +648,28 @@ func validateRegistryRetention(r RegistryRetention) []error {
 }
 
 // validateRestore checks a restore: a point, with the stores and a backup
-// bucket to restore them from; a source server name, and a target time in
-// UTC, are optional.
+// bucket to restore them from; the artifact and the mirror run, when set, are
+// that point's.
 func validateRestore(d Data) []error {
 	r := d.Restore
 	if r.Point == "" {
 		if r != (Restore{}) {
-			return []error{errors.New("Restore.Postgres needs a Restore.Point")}
+			return []error{errors.New("Restore.Artifact and Restore.MirrorRun need a Restore.Point")}
 		}
 		return nil
 	}
 	var errs []error
 	if !stamp.MatchString(r.Point) {
-		errs = append(errs, fmt.Errorf("Restore.Point must be a copy's stamp, YYYYMMDDTHHMMSSZ, got %q", r.Point))
+		errs = append(errs, fmt.Errorf("Restore.Point must be a backup's stamp, YYYYMMDDTHHMMSSZ, got %q", r.Point))
 	}
 	if !d.Stores || d.Backup.Bucket == "" {
 		errs = append(errs, errors.New("Restore needs the stores and a backup bucket to restore them from"))
 	}
-	if r.Postgres.Source != "" && !serverName.MatchString(r.Postgres.Source) {
-		errs = append(errs, fmt.Errorf("Restore.Postgres.Source must be a server name, got %q", r.Postgres.Source))
+	if r.Artifact != "" && (!artifact.MatchString(r.Artifact) || !strings.HasSuffix(r.Artifact, r.Point+".irbackup")) {
+		errs = append(errs, fmt.Errorf("Restore.Artifact must be the point's object, %s.irbackup, got %q", r.Point, r.Artifact))
 	}
-	if r.Postgres.Source != "" && r.Postgres.Source == d.PostgresServerName {
-		errs = append(errs, fmt.Errorf("Restore.Postgres.Source and PostgresServerName are both %q: the new archive must not be the one recovered from", r.Postgres.Source))
-	}
-	if r.Postgres.Source != "" && d.PostgresServerName == "" {
-		errs = append(errs, errors.New("Restore.Postgres.Source needs a PostgresServerName for the new archive: postgres would hold the archive recovered from"))
-	}
-	if t := r.Postgres.TargetTime; t != "" {
-		if _, err := time.Parse(time.RFC3339, t); err != nil || !strings.HasSuffix(t, "Z") {
-			errs = append(errs, fmt.Errorf("Restore.Postgres.TargetTime must be RFC 3339 in UTC, such as 2026-10-03T05:17:00Z, got %q", t))
-		}
-		if r.Postgres.Source == "" {
-			errs = append(errs, errors.New("Restore.Postgres.TargetTime needs a Restore.Postgres.Source"))
-		}
+	if r.MirrorRun != "" && (!stamp.MatchString(r.MirrorRun) || r.MirrorRun < r.Point) {
+		errs = append(errs, fmt.Errorf("Restore.MirrorRun must be the stamp of a mirror run at or after the point %s, got %q", r.Point, r.MirrorRun))
 	}
 	return errs
 }
@@ -675,14 +713,29 @@ func validateForge(forge, forgeURL string) []error {
 }
 
 // validateBackup checks the shape of each Backup field that is set; an empty
-// Bucket turns backups off, so the other two need one.
+// Bucket turns backups off, so the others need one.
 func validateBackup(b BackupTarget) []error {
 	var errs []error
 	if b.Bucket == "" {
-		if b.Endpoint != "" || b.Region != "" {
-			errs = append(errs, errors.New("Backup.Endpoint and Backup.Region need a Backup.Bucket"))
+		if b.Endpoint != "" || b.Region != "" || b.Prefix != "" || b.Credentials != (BackupCredentials{}) {
+			errs = append(errs, errors.New("Backup.Endpoint, Backup.Region, Backup.Prefix and Backup.Credentials need a Backup.Bucket"))
 		}
 		return errs
+	}
+	if b.Prefix != "" && !backupPrefix.MatchString(b.Prefix) {
+		errs = append(errs, fmt.Errorf("Backup.Prefix must be 1 to 63 lowercase letters, digits, dots, underscores and hyphens, starting with a letter or digit, got %q", b.Prefix))
+	}
+	c := b.Credentials
+	if c.Secret != "" && c.Secret != backupSecret {
+		errs = append(errs, fmt.Errorf("Backup.Credentials.Secret must be %s, the one Secret the store infrared-platform reads, got %q", backupSecret, c.Secret))
+	}
+	if c.Kind != "" && c.Kind != backupKind {
+		errs = append(errs, fmt.Errorf("Backup.Credentials.Kind must be %s, the one kind of credential day one reads, got %q", backupKind, c.Kind))
+	}
+	for name, v := range map[string]string{"AccessKeyIDKey": c.AccessKeyIDKey, "SecretKeyKey": c.SecretKeyKey} {
+		if v != "" && !secretKey.MatchString(v) {
+			errs = append(errs, fmt.Errorf("Backup.Credentials.%s must be a Secret's key: letters, digits, '-', '_' and '.', got %q", name, v))
+		}
 	}
 	if !bucketName.MatchString(b.Bucket) || strings.Contains(b.Bucket, "..") {
 		errs = append(errs, fmt.Errorf("Backup.Bucket must be an S3 bucket name, got %q", b.Bucket))
