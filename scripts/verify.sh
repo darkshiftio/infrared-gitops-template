@@ -184,6 +184,11 @@ cat >"$work/gateway.json" <<EOF
 }
 EOF
 
+# The gateway variant off Linode (Cloud ""): the same edge on a cluster that
+# does not bring the Gateway API CRDs itself, such as GKE, where Envoy's chart
+# installs them (Google Cloud run 1, 2026-10-07).
+yq -p json -o json '. + {"Cloud": ""}' "$work/gateway.json" >"$work/gateway-nocloud.json"
+
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
 # the forge: the shape of a Linode install that runs Gitea.
@@ -255,6 +260,7 @@ variants=(
   "k3s-builds demo-b k3s $ecr_registry"
   "eks-builds demo-eks-b eks $ecr_registry -region us-west-2 -pull-secret infrared-pull"
   "gateway demo-gw k3s - -data $work/gateway.json"
+  "gateway-nocloud demo-gn k3s - -data $work/gateway-nocloud.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
@@ -685,9 +691,12 @@ for v in "${variants[@]}"; do
         && ok "$variant: $name Application (wave ${a#*:})" || bad "$variant: $name Application missing or wrong"
     done
     f="$reg/components/envoy-gateway.yaml"
-    [ "$(sel "$f" '.spec.sources[] | select(.chart == "gateway-crds-helm") | .helm.valuesObject.crds.gatewayAPI.enabled')" = false ] \
+    # The Gateway API CRDs: k3s on Linode brings them, so the chart leaves them out there; elsewhere (GKE) the chart installs them.
+    if [ "$cloud" = linode ]; then gw_crds=false; else gw_crds=true; fi
+    [ "$(sel "$f" '.spec.sources[] | select(.chart == "gateway-crds-helm") | .helm.valuesObject.crds.gatewayAPI.enabled')" = "$gw_crds" ] \
       && [ "$(sel "$f" '.spec.sources[] | select(.chart == "gateway-helm") | .helm.valuesObject.crds.enabled')" = false ] \
-      && ok "$variant: Envoy Gateway installs no Gateway API CRDs" || bad "$variant: Envoy Gateway would install the Gateway API CRDs"
+      && ok "$variant: Envoy Gateway's CRD chart installs the Gateway API CRDs: $gw_crds (cloud '$cloud'); gateway-helm's subchart off" \
+      || bad "$variant: Envoy Gateway's Gateway API CRDs are not $gw_crds for cloud '$cloud', or gateway-helm's CRD subchart is on"
     e="$work/$variant-built/edge.yaml" t="$work/$variant-built/platform-tokens.yaml" x="$work/$variant-built/external-dns.yaml"
     dns="$reg/components/external-dns.yaml"
     # Envoy on each node's own ports, behind a NodePort Service.

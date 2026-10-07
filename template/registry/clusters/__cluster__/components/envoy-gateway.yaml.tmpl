@@ -6,10 +6,12 @@
 # Envoy Gateway, the edge's controller: its own CRDs (gateway-crds-helm) and the
 # controller (gateway-helm), both v1.9.2 from one OCI repository. Wave 11.
 #
-# The Gateway API CRDs are not installed here. The cluster provides them (k3s
-# installs them with its gateway-api-crd chart), and a second copy would take
-# turns owning them: gateway-crds-helm installs only Envoy Gateway's own, and
-# gateway-helm's CRD subchart is off.
+# The Gateway API CRDs come from gateway-crds-helm too, except on Linode, where
+# k3s installs them with its gateway-api-crd chart and a second copy would take
+# turns owning them. GKE has them only with its own Gateway controller on, which
+# the Google root keeps off so no load balancer appears (Google Cloud run 1,
+# 2026-10-07: Envoy Gateway crashed on "no matches for kind ReferenceGrant").
+# gateway-helm's CRD subchart is off either way.
 #
 # The GatewayClass, the EnvoyProxy that puts Envoy on each node's ports 80 and
 # 443, the Gateway and its routes are the `edge` Application's (wave 13).
@@ -36,7 +38,7 @@ spec:
         valuesObject:
           crds:
             gatewayAPI:
-              enabled: false
+              enabled: [[ if eq .Cloud "linode" ]]false[[ else ]]true[[ end ]]
             envoyGateway:
               enabled: true
     - repoURL: docker.io/envoyproxy
