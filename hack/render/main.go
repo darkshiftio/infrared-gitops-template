@@ -194,12 +194,15 @@ type ImageRef struct {
 	Digest string `json:"Digest"`
 }
 
-// BackupTarget is an S3-compatible bucket outside the cluster:
-// Backup.Bucket, .Endpoint (empty for AWS S3), .Region (may be empty),
-// .Prefix, the path everything is kept under (empty: the install's name,
-// ClusterName), and .Credentials, where its key is.
+// BackupTarget is a bucket outside the cluster: Backup.Bucket, .Provider
+// (empty, linode or s3: an S3-compatible bucket, as before the field existed;
+// gcs: Google Cloud Storage), .Endpoint (empty for AWS S3), .Region (may be
+// empty), .Prefix, the path everything is kept under (empty: the install's
+// name, ClusterName), and .Credentials, where its key is, or that there is
+// none.
 type BackupTarget struct {
 	Bucket      string            `json:"Bucket"`
+	Provider    string            `json:"Provider"`
 	Endpoint    string            `json:"Endpoint"`
 	Region      string            `json:"Region"`
 	Prefix      string            `json:"Prefix"`
@@ -210,7 +213,10 @@ type BackupTarget struct {
 // Infrared namespace, its two keys, and the credential's Kind. Each empty
 // field is today's: infrared-platform-tokens, backup-access-key-id,
 // backup-secret-access-key, accessKey. Day one reads that Secret alone, which
-// the store infrared-platform reads, and an access key alone.
+// the store infrared-platform reads, and an access key alone. With Provider
+// gcs the Kind is serviceAccount, or empty for the same: no key at all; the
+// Secret and its keys are not read, and the bucket is written and read by the
+// cluster's own identities (Workload Identity).
 type BackupCredentials struct {
 	Secret         string `json:"Secret"`
 	AccessKeyIDKey string `json:"AccessKeyIDKey"`
@@ -229,8 +235,8 @@ var (
 )
 
 // backupFlag reads -backup: a JSON object {"bucket", "endpoint", "region"}, as
-// the operator's INFRARED_BACKUP carries it, with "prefix" and "credentials"
-// when they are set.
+// the operator's INFRARED_BACKUP carries it, with "provider", "prefix" and
+// "credentials" when they are set.
 type backupFlag struct{ b *BackupTarget }
 
 func (f backupFlag) String() string {
@@ -408,7 +414,7 @@ func main() {
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws" or "linode"`)
 	flag.BoolVar(&d.SubstrateCapable, "substrate-capable", false, "SubstrateCapable: the preflight's result")
 	flag.BoolVar(&d.Stores, "stores", false, "Stores: the platform's own Postgres and SeaweedFS")
-	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "...", "prefix": "..."} (empty: no backups)`)
+	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "...", "prefix": "...", "provider": "gcs"} (empty: no backups)`)
 	flag.Var(disabledFlag{&d.Disabled}, "disabled", `Disabled, as a JSON array of component names: ["infisical"] (empty: none)`)
 	flag.StringVar(&d.Forge, "forge", "", `Forge: "" (GitHub, as before) or "gitea"`)
 	flag.StringVar(&d.ForgeURL, "forge-url", "", "ForgeURL: the forge's root as the cluster reaches it, no trailing slash (Gitea only)")
@@ -541,6 +547,9 @@ func validate(d Data) error {
 		}
 	}
 	errs = append(errs, validateBackup(d.Backup)...)
+	if d.Backup.Provider == backupProviderGCS && d.PostgresArchive.Enabled {
+		errs = append(errs, errors.New("PostgresArchive.Enabled takes no Backup.Provider gcs: Barman's archive writes through the S3 API with a key, which Google Cloud Storage is not given here"))
+	}
 	errs = append(errs, validateForge(d.Forge, d.ForgeURL)...)
 	if err := validateRegistry(d.Registry); err != nil {
 		errs = append(errs, err)
@@ -586,11 +595,20 @@ var (
 )
 
 // The backup bucket's key, as day one reads it: from this Secret alone, and
-// an access key alone.
+// an access key alone; with Provider gcs, no key: the credential's kind is
+// serviceAccount, and the endpoint, when given, is Google Cloud Storage's.
 const (
-	backupSecret = "infrared-platform-tokens"
-	backupKind   = "accessKey"
+	backupSecret             = "infrared-platform-tokens"
+	backupKind               = "accessKey"
+	backupKindServiceAccount = "serviceAccount"
+	backupProviderGCS        = "gcs"
+	backupEndpointGCS        = "https://storage.googleapis.com"
 )
+
+// BackupProviders are the values Backup.Provider takes: empty, linode and s3
+// are S3-compatible buckets with a key, as before the field existed; gcs is
+// Google Cloud Storage, written and read by the cluster's own identities.
+var BackupProviders = []string{"", "linode", "s3", backupProviderGCS}
 
 // validateCopies checks the mirror's schedule and retention when they are
 // set, and the recipients.
@@ -730,12 +748,21 @@ func validateBackup(b BackupTarget) []error {
 	if b.Prefix != "" && !backupPrefix.MatchString(b.Prefix) {
 		errs = append(errs, fmt.Errorf("Backup.Prefix must be 1 to 63 lowercase letters, digits, dots, underscores and hyphens, starting with a letter or digit, got %q", b.Prefix))
 	}
+	if !slices.Contains(BackupProviders, b.Provider) {
+		errs = append(errs, fmt.Errorf("Backup.Provider must be one of %q, got %q", BackupProviders, b.Provider))
+	}
 	c := b.Credentials
 	if c.Secret != "" && c.Secret != backupSecret {
 		errs = append(errs, fmt.Errorf("Backup.Credentials.Secret must be %s, the one Secret the store infrared-platform reads, got %q", backupSecret, c.Secret))
 	}
-	if c.Kind != "" && c.Kind != backupKind {
+	switch {
+	case b.Provider == backupProviderGCS && c.Kind != "" && c.Kind != backupKindServiceAccount:
+		errs = append(errs, fmt.Errorf("Backup.Credentials.Kind must be %s with Backup.Provider gcs (the cluster's own identities, no key), got %q", backupKindServiceAccount, c.Kind))
+	case b.Provider != backupProviderGCS && c.Kind != "" && c.Kind != backupKind:
 		errs = append(errs, fmt.Errorf("Backup.Credentials.Kind must be %s, the one kind of credential day one reads, got %q", backupKind, c.Kind))
+	}
+	if b.Provider == backupProviderGCS && b.Endpoint != "" && b.Endpoint != backupEndpointGCS {
+		errs = append(errs, fmt.Errorf("Backup.Endpoint must be %s or empty with Backup.Provider gcs, got %q", backupEndpointGCS, b.Endpoint))
 	}
 	for name, v := range map[string]string{"AccessKeyIDKey": c.AccessKeyIDKey, "SecretKeyKey": c.SecretKeyKey} {
 		if v != "" && !secretKey.MatchString(v) {

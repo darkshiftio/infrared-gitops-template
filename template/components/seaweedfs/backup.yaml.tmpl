@@ -2,6 +2,7 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $credentials := default "infrared-platform-tokens" .Backup.Credentials.Secret -]]
+[[- $gcs := eq .Backup.Provider "gcs" -]]
 [[- if and .Stores .Backup.Bucket -]]
 # =============================================================================
 # SeaweedFS's buckets, copied to the bucket outside the cluster every hour.
@@ -44,6 +45,21 @@
 [[- end ]]
 #
 # rclone reads with the S3 identity backup (Read and List on both buckets, see
+[[- if $gcs ]]
+# identities.yaml) and writes to Google Cloud Storage as the ServiceAccount
+# seaweedfs-backup, which the cluster grants the bucket's role through
+# Workload Identity: no key in the cluster, and nothing to copy.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seaweedfs-backup
+  namespace: stores
+  annotations:
+    # Alone, before the identities (-1) and SeaweedFS (0).
+    argocd.argoproj.io/sync-wave: "-2"
+---
+[[- else ]]
 # identities.yaml) and writes with the platform's backup keys (Secret
 # [[ $credentials ]], keys [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]] and
 # [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]), copied here through the ClusterSecretStore
@@ -76,6 +92,7 @@ spec:
         key: [[ $credentials ]]
         property: [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]
 ---
+[[- end ]]
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -96,6 +113,10 @@ spec:
       template:
         spec:
           restartPolicy: Never
+[[- if $gcs ]]
+          # The bucket's identity, granted by the cluster (Workload Identity).
+          serviceAccountName: seaweedfs-backup
+[[- end ]]
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
@@ -135,6 +156,20 @@ spec:
                       name: seaweedfs-s3-backup
                       key: AWS_SECRET_ACCESS_KEY
                 # The destination: the bucket outside the cluster.
+[[- if $gcs ]]
+                # Google Cloud Storage, through rclone's own backend, as the
+                # pod's ServiceAccount: no key, no endpoint.
+                - name: RCLONE_CONFIG_DST_TYPE
+                  value: google cloud storage
+                - name: RCLONE_CONFIG_DST_ENV_AUTH
+                  value: "true"
+                # The bucket has uniform access: no object ACLs.
+                - name: RCLONE_CONFIG_DST_BUCKET_POLICY_ONLY
+                  value: "true"
+                # The identity may write objects only; the bucket exists.
+                - name: RCLONE_CONFIG_DST_NO_CHECK_BUCKET
+                  value: "true"
+[[- else ]]
                 - name: RCLONE_CONFIG_DST_TYPE
                   value: s3
                 - name: RCLONE_CONFIG_DST_PROVIDER
@@ -160,6 +195,7 @@ spec:
                     secretKeyRef:
                       name: seaweedfs-backup
                       key: ACCESS_SECRET_KEY
+[[- end ]]
               command:
                 - /bin/sh
                 - -ec

@@ -59,7 +59,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores"), and on k3s keeps VMSingle's metrics on an `emptyDir` (see "Metrics with the stores") |
-| `.Backup` | `{"Bucket": "acme-backups", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1", "Prefix": "", "Credentials": {"Secret": "", "AccessKeyIDKey": "", "SecretKeyKey": "", "Kind": ""}}` | the Installation's `spec.backup.destination`, which the operator seeds from its `INFRARED_BACKUP`: an S3-compatible bucket outside the cluster that the stores are copied to and the backups written to. An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty. `.Backup.Prefix` is the path everything is kept under in the bucket, `<prefix>` below; empty is `.ClusterName`, as before the field existed. `.Backup.Credentials` is where the bucket's key is: the Secret in `.InfraredNamespace` and its two keys, and the credential's kind; each empty field is today's, `infrared-platform-tokens`, `backup-access-key-id`, `backup-secret-access-key` and `accessKey`, and the operator may send those explicitly, which renders the same files. Day one reads no other Secret or kind (`hack/render` refuses them) |
+| `.Backup` | `{"Bucket": "acme-backups", "Provider": "", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1", "Prefix": "", "Credentials": {"Secret": "", "AccessKeyIDKey": "", "SecretKeyKey": "", "Kind": ""}}` | the Installation's `spec.backup.destination`, which the operator seeds from its `INFRARED_BACKUP`: a bucket outside the cluster that the stores are copied to and the backups written to. `.Backup.Provider` is empty, `linode` or `s3` for an S3-compatible bucket with a key, as before the field existed, or `gcs` for Google Cloud Storage, which the cluster's own identities write and read (below). An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty. `.Backup.Prefix` is the path everything is kept under in the bucket, `<prefix>` below; empty is `.ClusterName`, as before the field existed. `.Backup.Credentials` is where the bucket's key is: the Secret in `.InfraredNamespace` and its two keys, and the credential's kind; each empty field is today's, `infrared-platform-tokens`, `backup-access-key-id`, `backup-secret-access-key` and `accessKey`, and the operator may send those explicitly, which renders the same files. Day one reads no other Secret or kind (`hack/render` refuses them). With `gcs`, `Kind` is `serviceAccount`, or empty for the same, and no key is read or copied: `.Backup.Endpoint` is `https://storage.googleapis.com` or empty, and `.PostgresArchive.Enabled` is refused, since Barman's archive writes through the S3 API with a key |
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"), and `substrate-test-actors`, Substrate's test actors (see "Agent Substrate"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 | `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
 | `.ForgeURL` | `` or `http://gitea-http.infrared.svc.cluster.local:3000` | the forge's root as the cluster reaches it, without a trailing slash: repos are `<ForgeURL>/<owner>/<repo>`. Empty for GitHub |
@@ -464,6 +464,18 @@ keys `backup-access-key-id` and `backup-secret-access-key`
 (`.Backup.Credentials`), which the store `infrared-platform` copies into
 `stores` (`postgres-backup`, `seaweedfs-backup`); the store's `conditions` then
 admit `stores` as well, and `platform-tokens` renders even without a Gateway.
+
+With `.Backup.Provider` `gcs` the bucket is on Google Cloud Storage and there
+is no key: the mirror's CronJob runs as a ServiceAccount of its own,
+`stores/seaweedfs-backup`, rendered beside it, and the copy back as
+`stores/stores-restore`, and the cluster grants each the bucket's role through
+Workload Identity (the cluster's root does; nothing in this template names a
+Google identity). Both use rclone's own `google cloud storage` backend
+(`env_auth`, `bucket_policy_only`, `no_check_bucket`), the ExternalSecret
+`seaweedfs-backup` is not rendered, and `.Backup.Endpoint` is
+`https://storage.googleapis.com` or empty. The paths below keep their shape.
+`.PostgresArchive.Enabled` is refused with `gcs`: Barman's archive writes
+through the S3 API with a key. The other providers render as before.
 
 | What | How | Where | Kept |
 |---|---|---|---|

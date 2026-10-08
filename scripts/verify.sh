@@ -97,6 +97,12 @@
 #     and a daily base backup through the Barman Cloud plugin, and without it
 #     (the default) nothing of the plugin, the ObjectStore, the ScheduledBackup
 #     or Postgres's key copy; without a bucket, no backup object
+#   - backups on Google Cloud Storage (.Backup.Provider gcs): the mirror and
+#     the copy back use rclone's own backend as the ServiceAccounts
+#     seaweedfs-backup (rendered beside the CronJob) and stores-restore, which
+#     the cluster grants the bucket's role through Workload Identity; no key
+#     Secret, ExternalSecret or endpoint in stores, the WAL archive refused;
+#     the other providers render as before
 #   - the backups' settings (.Copies, .PostgresArchive): the mirror's and
 #     Postgres's schedules and retentions as set, today's when not; with
 #     recipients, no bucket or identity of their own: the mirror's run mark
@@ -251,6 +257,15 @@ yq -p json -o json '. + {"Copies": {"Recipients": ["'"$age_recipient"'"]}}' "$wo
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
   "$work/copies.json" >"$work/restore.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'"}, "PostgresServerName": "'"$server_name"'"}' "$work/substrate.json" >"$work/restore-plain.json"
+# The Google variant: the copies' Data with the bucket on Google Cloud Storage
+# (Provider gcs, the credential's kind serviceAccount, no key) and Barman's
+# archive off, which gcs refuses; and a restore from it.
+gcs_bucket=acme-google-backup
+gcs_endpoint=https://storage.googleapis.com
+yq -p json -o json '.Backup = {"Bucket": "'"$gcs_bucket"'", "Provider": "gcs", "Endpoint": "'"$gcs_endpoint"'", "Region": "us-central1",
+    "Prefix": "'"$backup_prefix"'", "Credentials": {"Kind": "serviceAccount"}} | .PostgresArchive.Enabled = false' "$work/copies.json" >"$work/gcs.json"
+yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
+  "$work/gcs.json" >"$work/gcs-restore.json"
 
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
@@ -276,6 +291,8 @@ variants=(
   "copies-noreg demo-cn k3s - -data $work/copies-noreg.json"
   "restore demo-rs k3s $zot_registry -data $work/restore.json"
   "restore-plain demo-rr k3s $zot_registry -data $work/restore-plain.json"
+  "gcs demo-gc k3s $zot_registry -data $work/gcs.json"
+  "gcs-restore demo-gr k3s $zot_registry -data $work/gcs-restore.json"
   "code-index demo-ci k3s $zot_registry -data $work/code-index.json"
   "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
   "code-index-pull demo-cq k3s - -image-registry ghcr.io/demo-org -pull-secret ghcr-pull -images $ci_images"
@@ -328,7 +345,7 @@ for v in "${variants[@]}"; do
   # The variant's edge, stores, cloud, names, backup bucket, components left
   # out and forge, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
-  stores=false cloud="" backup="" endpoint="" region="" domain="" host="" disabled="[]"
+  stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" disabled="[]"
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
@@ -347,6 +364,7 @@ for v in "${variants[@]}"; do
     backup="$(yq -p json -r '.Backup.Bucket // ""' "$data_file")"
     endpoint="$(yq -p json -r '.Backup.Endpoint // ""' "$data_file")"
     region="$(yq -p json -r '.Backup.Region // ""' "$data_file")"
+    provider="$(yq -p json -r '.Backup.Provider // ""' "$data_file")"
     domain="$(yq -p json -r '.PlatformDomain // ""' "$data_file")"
     host="$(yq -p json -r '.InfraredHost // ""' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
@@ -924,14 +942,35 @@ for v in "${variants[@]}"; do
       script="$(sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].command[2]")"
       backup_reads="Read:ate-snapshots List:ate-snapshots Read:registry List:registry"
       mirror_days="${mirror_retention:-7d}"
+      pod='.spec.jobTemplate.spec.template.spec'
+      if [ "$provider" = gcs ]; then
+        # Google Cloud Storage: rclone's own backend as the ServiceAccount
+        # seaweedfs-backup, rendered beside the CronJob, which the cluster
+        # grants the bucket's role through Workload Identity; no key, no
+        # endpoint, no provider or region of the S3 backend.
+        dst_ok() {
+          [ "$(env RCLONE_CONFIG_DST_TYPE)" = "google cloud storage" ] \
+            && [ "$(env RCLONE_CONFIG_DST_ENV_AUTH) $(env RCLONE_CONFIG_DST_BUCKET_POLICY_ONLY) $(env RCLONE_CONFIG_DST_NO_CHECK_BUCKET)" = "true true true" ] \
+            && [ -z "$(env RCLONE_CONFIG_DST_ACCESS_KEY_ID)$(env RCLONE_CONFIG_DST_SECRET_ACCESS_KEY)$(env RCLONE_CONFIG_DST_ENDPOINT)$(env RCLONE_CONFIG_DST_PROVIDER)$(env RCLONE_CONFIG_DST_REGION)" ] \
+            && [ "$(sel "$sw" "$cj | $pod.serviceAccountName")" = seaweedfs-backup ] \
+            && [ "$(sel "$sw" 'select(.kind == "ServiceAccount" and .metadata.name == "seaweedfs-backup") | .metadata.namespace + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "stores -2" ]
+        }
+        dst_words="written as the ServiceAccount seaweedfs-backup to Google Cloud Storage, no key"
+      else
+        dst_ok() {
+          [ "$(env RCLONE_CONFIG_DST_TYPE) $(env RCLONE_CONFIG_DST_ACCESS_KEY_ID)" = "s3 seaweedfs-backup" ] && [ "$(env RCLONE_CONFIG_DST_ENDPOINT)" = "$endpoint" ] \
+            && [ -z "$(sel "$sw" "$cj | $pod.serviceAccountName // \"\"")" ] \
+            && [ -z "$(sel "$sw" 'select(.kind == "ServiceAccount" and .metadata.name == "seaweedfs-backup") | .kind')" ]
+        }
+        dst_words="written with the platform's backup keys"
+      fi
       [ "$(sel "$sw" "$cj | .spec.schedule")" = "${mirror_schedule:-17 * * * *}" ] \
-        && sel "$sw" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].image" | grep -qE '^docker\.io/rclone/rclone:1\.75\.1@sha256:[0-9a-f]{64}$' \
+        && sel "$sw" "$cj | $pod.containers[0].image" | grep -qE '^docker\.io/rclone/rclone:1\.75\.1@sha256:[0-9a-f]{64}$' \
         && [ "$(env DESTINATION)" = "dst:$backup/${prefix:-$cluster}/seaweedfs" ] && [ "$(env BUCKETS)" = "${want_buckets% }" ] \
-        && [ "$(env RCLONE_CONFIG_SRC_ACCESS_KEY_ID) $(env RCLONE_CONFIG_DST_ACCESS_KEY_ID)" = "seaweedfs-s3-backup seaweedfs-backup" ] \
-        && [ "$(env RCLONE_CONFIG_DST_ENDPOINT)" = "$endpoint" ] \
+        && [ "$(env RCLONE_CONFIG_SRC_ACCESS_KEY_ID)" = seaweedfs-s3-backup ] && dst_ok \
         && grep -q -- '--backup-dir "$DESTINATION/archive/$run/$bucket"' <<<"$script" && grep -q "${mirror_days%d} \\* 24 \\* 3600" <<<"$script" \
         && [ "$(yq -p json -r '.identities[] | select(.name == "backup") | .actions | join(" ")' <<<"$ids")" = "$backup_reads" ] \
-        && ok "$variant: ${want_buckets% } copied (${mirror_schedule:-17 * * * *}) to $backup/${prefix:-$cluster}/seaweedfs, replaced objects kept $mirror_days, read as the identity backup" \
+        && ok "$variant: ${want_buckets% } copied (${mirror_schedule:-17 * * * *}) to $backup/${prefix:-$cluster}/seaweedfs, replaced objects kept $mirror_days, read as the identity backup, $dst_words" \
         || bad "$variant: the buckets' hourly copy is wrong"
       # The run's mark: with backups on it names the newest complete backup
       # under <prefix>/backups/ (BACKUPS), found before any bucket is copied
@@ -969,9 +1008,16 @@ for v in "${variants[@]}"; do
       # keys, and nothing else, from the store.
       pg_keys=""
       [ "$archive_on" != true ] || pg_keys="backup-access-key-id backup-secret-access-key "
-      [ "$(sel "$work/$variant-built/postgres.yaml" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "$pg_keys" ] \
-        && [ "$(sel "$sw" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "backup-access-key-id backup-secret-access-key " ] \
-        && ok "$variant: the backup keys come from infrared-platform-tokens${pg_keys:+, for the WAL archive too}" || bad "$variant: the backup keys are copied wrong"
+      if [ "$provider" = gcs ]; then
+        [ -z "$pg_keys" ] && [ -z "$(sel "$work/$variant-built/postgres.yaml" 'select(.kind == "ExternalSecret") | .kind')" ] \
+          && [ -z "$(sel "$sw" 'select(.kind == "ExternalSecret") | .kind')" ] \
+          && ok "$variant: no backup key is copied anywhere: Google Cloud Storage is written by the cluster's own identities" \
+          || bad "$variant: a backup key is copied for Google Cloud Storage"
+      else
+        [ "$(sel "$work/$variant-built/postgres.yaml" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "$pg_keys" ] \
+          && [ "$(sel "$sw" 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef.property' | tr '\n' ' ')" = "backup-access-key-id backup-secret-access-key " ] \
+          && ok "$variant: the backup keys come from infrared-platform-tokens${pg_keys:+, for the WAL archive too}" || bad "$variant: the backup keys are copied wrong"
+      fi
     else
       [ -z "$(sel "$cn" '.spec.sources[] | select(.chart == "plugin-barman-cloud") | .chart')" ] \
         && [ -z "$(sel "$p" 'select(.kind == "ObjectStore" or .kind == "ScheduledBackup" or .kind == "ExternalSecret") | .kind')" ] \
@@ -1140,6 +1186,19 @@ for v in "${variants[@]}"; do
     jenv() { job "$1" ".spec.template.spec.$2[] | .env[] | select(.name == \"$3\") | (.value // .valueFrom.secretKeyRef.name)"; }
     wait_sh="$(job stores-restore '.spec.template.spec.initContainers[0].command[2]')"
     copy_sh="$(job stores-restore '.spec.template.spec.initContainers[1].command[2]')"
+    # The copy outside: the S3 backend with the platform's backup key, or on
+    # Google Cloud Storage rclone's own backend as the Job's ServiceAccount.
+    if [ "$provider" = gcs ]; then
+      outside_ok() {
+        [ "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_TYPE)" = "google cloud storage" ] \
+          && [ "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ENV_AUTH) $(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_BUCKET_POLICY_ONLY) $(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_NO_CHECK_BUCKET)" = "true true true" ] \
+          && [ -z "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ACCESS_KEY_ID)$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_SECRET_ACCESS_KEY)$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ENDPOINT)$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_PROVIDER)" ]
+      }
+      outside_words="from Google Cloud Storage as the ServiceAccount stores-restore"
+    else
+      outside_ok() { [ "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_TYPE) $(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ACCESS_KEY_ID)" = "s3 seaweedfs-backup" ]; }
+      outside_words="with the platform's backup key"
+    fi
     # shellcheck disable=SC2016 # the wait's own words, matched as they render
     [ "$(sel "$r" 'select(.kind == "Job" and .metadata.annotations["argocd.argoproj.io/hook"] == null) | .metadata.name' | tr '\n' ' ')" = "stores-restore " ] \
       && [ "$(job stores-restore '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = 0 ] \
@@ -1153,11 +1212,11 @@ for v in "${variants[@]}"; do
       && grep -qF 'if ! listed="$(rclone lsf --max-depth 1 "$SOURCE/$bucket")"; then' <<<"$copy_sh" && ! grep -q '2>/dev/null' <<<"$copy_sh" \
       && [ "$(jenv stores-restore initContainers BUCKETS)" = "${want_buckets% }" ] \
       && [ "$(jenv stores-restore initContainers SOURCE)" = "outside:$backup/${prefix:-$cluster}/seaweedfs/current" ] \
-      && [ "$(jenv stores-restore initContainers RCLONE_CONFIG_OUTSIDE_ACCESS_KEY_ID) $(jenv stores-restore initContainers RCLONE_CONFIG_SEAWEEDFS_ACCESS_KEY_ID)" = "seaweedfs-backup seaweedfs-s3-restore" ] \
+      && outside_ok && [ "$(jenv stores-restore initContainers RCLONE_CONFIG_SEAWEEDFS_ACCESS_KEY_ID)" = seaweedfs-s3-restore ] \
       && [ "$(jenv stores-restore containers POINT) $(jenv stores-restore containers MARKER)" = "$restoring_point buckets" ] \
       && [ "$(line "$r" 'select(.kind == "Role" and .metadata.name == "stores-restore") | .rules[] | (.resourceNames // [] | join(",")) + ":" + (.verbs | join(","))')" = ":create restore-stores:get,patch" ] \
       && [ "$(sel "$r" 'select(.kind == "Job" and .metadata.name == "stores-restore-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_SERVICES") | .value)')" = "PreSync stores/postgres-rw" ] \
-      && ok "$variant: one Job, no index reset: it waits for the mark postgres, then copies every bucket back without overwriting, a failed listing failing it, and marks buckets in stores/restore-stores for $restoring_point" \
+      && ok "$variant: one Job, no index reset: it waits for the mark postgres, then copies every bucket back $outside_words without overwriting, a failed listing failing it, and marks buckets in stores/restore-stores for $restoring_point" \
       || bad "$variant: the stores' restore Job is wrong"
     # The waits: SeaweedFS for Postgres's records (the mark postgres), Zot and
     # Substrate for the buckets, each a PreSync hook reading that one ConfigMap

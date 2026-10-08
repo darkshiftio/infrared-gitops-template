@@ -1,4 +1,5 @@
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
+[[- $gcs := eq .Backup.Provider "gcs" -]]
 [[- if and .Stores .Backup.Bucket .Restore.Point -]]
 # =============================================================================
 # A restore, from [[ .Restore.Point ]]: the stores come back.
@@ -137,6 +138,20 @@ spec:
               value: "ate-snapshots registry"
             - name: SOURCE
               value: [[ printf "outside:%s/%s/seaweedfs/current" .Backup.Bucket $prefix | quote ]]
+[[- if $gcs ]]
+            # The source: the copy outside the cluster, on Google Cloud
+            # Storage, read through rclone's own backend as the ServiceAccount
+            # stores-restore, which the cluster grants the bucket's role
+            # through Workload Identity: no key, no endpoint.
+            - name: RCLONE_CONFIG_OUTSIDE_TYPE
+              value: google cloud storage
+            - name: RCLONE_CONFIG_OUTSIDE_ENV_AUTH
+              value: "true"
+            - name: RCLONE_CONFIG_OUTSIDE_BUCKET_POLICY_ONLY
+              value: "true"
+            - name: RCLONE_CONFIG_OUTSIDE_NO_CHECK_BUCKET
+              value: "true"
+[[- else ]]
             # The source: the copy outside the cluster, with the platform's
             # backup keys (Secret seaweedfs-backup, components/seaweedfs).
             - name: RCLONE_CONFIG_OUTSIDE_TYPE
@@ -163,6 +178,7 @@ spec:
                 secretKeyRef:
                   name: seaweedfs-backup
                   key: ACCESS_SECRET_KEY
+[[- end ]]
             # The destination: SeaweedFS, as the identity restore.
             - name: RCLONE_CONFIG_SEAWEEDFS_TYPE
               value: s3

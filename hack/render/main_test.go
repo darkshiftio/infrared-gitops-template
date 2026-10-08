@@ -219,6 +219,9 @@ func TestBackupAndDisabledFlags(t *testing.T) {
 		t.Error("-backup took an unknown field")
 	}
 	// INFRARED_BACKUP's prefix, when the install sets one.
+	if err := bf.Set(`{"bucket": "acme-google-backup", "provider": "gcs"}`); err != nil || b != (BackupTarget{Bucket: "acme-google-backup", Provider: "gcs"}) {
+		t.Errorf("-backup with a provider: %v, %+v", err, b)
+	}
 	if err := bf.Set(`{"bucket": "acme-backups", "prefix": "acme-mgmt"}`); err != nil || b != (BackupTarget{Bucket: "acme-backups", Prefix: "acme-mgmt"}) {
 		t.Errorf("-backup with a prefix loaded %+v, %v", b, err)
 	}
@@ -558,6 +561,23 @@ func TestValidateCopiesRetentionRestore(t *testing.T) {
 			d.Restore = Restore{Point: "20261006T010500Z", Artifact: "lke-tmp1/backups/20261006T010500Z.irbackup"}
 		},
 		"restore, the point alone": func(d *Data) { stores(d); d.Restore = Restore{Point: "20261006T010500Z"} },
+		// Google Cloud Storage: no key; the endpoint and the kind may be given or left empty.
+		"gcs": func(d *Data) {
+			stores(d)
+			d.Backup = BackupTarget{Bucket: "acme-google-backup", Provider: "gcs", Endpoint: "https://storage.googleapis.com", Region: "us-central1",
+				Prefix: "acme-mgmt", Credentials: BackupCredentials{Kind: "serviceAccount"}}
+		},
+		"gcs, the provider alone": func(d *Data) { stores(d); d.Backup = BackupTarget{Bucket: "acme-google-backup", Provider: "gcs"} },
+		"gcs, the operator's key names along": func(d *Data) {
+			stores(d)
+			d.Backup = BackupTarget{Bucket: "acme-google-backup", Provider: "gcs", Credentials: BackupCredentials{
+				AccessKeyIDKey: "backup-access-key-id", SecretKeyKey: "backup-secret-access-key", Kind: "serviceAccount"}}
+		},
+		"linode, spelled out": func(d *Data) {
+			stores(d)
+			d.Backup = BackupTarget{Bucket: "acme-backups", Provider: "linode", Endpoint: "https://us-east-1.linodeobjects.com", Region: "us-east-1",
+				Credentials: BackupCredentials{Kind: "accessKey"}}
+		},
 	} {
 		d := base
 		mutate(&d)
@@ -609,6 +629,21 @@ func TestValidateCopiesRetentionRestore(t *testing.T) {
 			stores(d)
 			d.Restore = Restore{Point: "20261006T010500Z", MirrorRun: "20261006T001700Z"}
 		},
+		"a provider nobody offers": func(d *Data) { stores(d); d.Backup.Provider = "azure" },
+		"gcs with a key":           func(d *Data) { stores(d); d.Backup.Provider = "gcs"; d.Backup.Credentials.Kind = "accessKey" },
+		"gcs with another endpoint": func(d *Data) {
+			stores(d)
+			d.Backup.Provider, d.Backup.Endpoint = "gcs", "https://objects.example.com"
+		},
+		"gcs with the WAL archive": func(d *Data) {
+			stores(d)
+			d.Backup.Provider, d.PostgresArchive.Enabled = "gcs", true
+		},
+		"linode with a service account": func(d *Data) {
+			stores(d)
+			d.Backup.Provider, d.Backup.Credentials.Kind = "linode", "serviceAccount"
+		},
+		"a service account without gcs": func(d *Data) { stores(d); d.Backup.Credentials.Kind = "serviceAccount" },
 	} {
 		d := base
 		mutate(&d)

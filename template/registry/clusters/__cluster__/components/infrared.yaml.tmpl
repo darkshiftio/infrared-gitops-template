@@ -159,7 +159,12 @@ spec:
 [[- if or .Backup.Bucket $settings ]]
 [[- if .Backup.Bucket ]]
           # The bucket outside the cluster that the stores are copied to
+[[- if eq .Backup.Provider "gcs" ]]
+          # (INFRARED_BACKUP): Google Cloud Storage, written by the cluster's
+          # own identities; no key.
+[[- else ]]
           # (INFRARED_BACKUP). Its key stays in the install's Secret.
+[[- end ]]
 [[- end ]]
           backup:
 [[- if .Backup.Bucket ]]
