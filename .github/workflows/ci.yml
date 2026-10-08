@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # The org's self-hosted runners on google-ephem1 while GitHub-hosted ones are off (workspace TODO 191).
+    runs-on: darkshift
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
