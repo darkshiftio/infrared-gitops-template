@@ -1,0 +1,53 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "platform-tokens" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) ]]
+[[- if not $on -]]
+# platform-tokens is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndex) -]]
+# The platform's tokens (components/platform-tokens): the ClusterSecretStore
+# `infrared-platform`, which reads the Secret `infrared-platform-tokens` that
+# the Infrared chart keeps in [[ .InfraredNamespace ]], and the account it reads
+# it with. Each component that needs a token copies it into its own namespace
+# with an ExternalSecret. Wave 11: right after External Secrets (10), whose CRDs
+# it uses.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-tokens
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: secrets
+  annotations:
+    argocd.argoproj.io/sync-wave: "11"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/platform-tokens
+  destination:
+    server: https://kubernetes.default.svc
+    # The chart's release namespace: it exists before this repo does.
+    namespace: [[ .InfraredNamespace ]]
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# The platform's tokens are copied by External Secrets only for the components
+# that use them: the edge when it is a Gateway (the Installation's spec.edge:
+# gateway), the stores' backups (INFRARED_STORES and INFRARED_BACKUP), Agent
+# Substrate's pull secret, and the code index (codeIndex.enabled). This cluster
+# has none of them, so this file holds no objects.
+[[- end ]]

@@ -1,0 +1,15 @@
+[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+# The edge (the `edge` Application, wave 13). Objects in envoy-gateway-system,
+# except Infrared's route, which lives next to Infrared in
+# [[ .InfraredNamespace ]]; every one names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - wait.yaml
+  - gateway.yaml
+  - certificate.yaml
+  - routes.yaml
+[[- else -]]
+# The edge is not a Gateway with a name to serve, so this component holds no
+# objects and no Application points at it.
+[[- end ]]

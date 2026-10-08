@@ -1,0 +1,83 @@
+[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+# =============================================================================
+# The edge's own routes. Every Gateway API default is written out (parentRef
+# group and kind, the PathPrefix / match, backendRef group, kind and weight), or
+# Argo CD would keep them OutOfSync.
+# =============================================================================
+# Plain HTTP, every name: a redirect to HTTPS, nothing served in the clear.
+#
+# It is also where the edge's DNS records come from. It names no host, so it
+# takes each listener's own:
+[[- if .PlatformDomain ]]
+#   [[ printf "*.%s" .PlatformDomain ]]  one proxied wildcard record, for every zone
+[[- end ]]
+[[- if .InfraredHost ]]
+#   [[ .InfraredHost ]]  Infrared's own record
+[[- end ]]
+# external-dns publishes only routes with the label below, at the Gateway's
+# addresses: the ExternalIP of each node with a ready Envoy (gateway.yaml).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+  namespace: envoy-gateway-system
+  labels:
+    infrared.darkshift.io/dns: edge
+spec:
+  parentRefs:
+[[- if .PlatformDomain ]]
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      sectionName: http
+[[- end ]]
+[[- if .InfraredHost ]]
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      sectionName: infrared-http
+[[- end ]]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+[[- if .InfraredHost ]]
+---
+# Infrared at https://[[ .InfraredHost ]]: the UI's Service, which serves the UI
+# and proxies /api to the API and /mcp to the MCP server. The chart names it
+# after the release, `infrared`.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: infrared
+  namespace: [[ .InfraredNamespace ]]
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: envoy-gateway-system
+      sectionName: infrared-https
+  hostnames:
+    - [[ .InfraredHost | quote ]]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: infrared
+          port: 80
+          weight: 1
+[[- end ]]
+[[- else -]]
+# The edge is not a Gateway with a name to serve: no routes.
+[[- end ]]

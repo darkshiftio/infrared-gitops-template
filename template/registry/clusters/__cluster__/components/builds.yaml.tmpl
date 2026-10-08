@@ -1,9 +1,13 @@
-[[- if .BuildRegistry -]]
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "builds" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# builds is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if .BuildRegistry -]]
 # Product image builds with kpack (components/builds): the ClusterStore,
 # ClusterStack and ClusterBuilder `infrared-builder`, namespace `builds` where
 # products' kpack Images live, and the jobs that keep its registry and GitHub
 # credentials fresh. Wave 26: right after kpack (25), whose CRDs it uses.
-# Builds push to [[ .BuildRegistry ]].
+# Builds push to [[ .BuildRegistry ]][[ if .Registry ]], the registry inside the cluster[[ end ]].
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

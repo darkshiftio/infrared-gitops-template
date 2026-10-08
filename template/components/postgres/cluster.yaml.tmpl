@@ -1,0 +1,77 @@
+[[- if .Stores -]]
+# =============================================================================
+# postgres: the platform's one Postgres, a CloudNativePG Cluster.
+# =============================================================================
+# One instance, on one volume that holds both its data and its WAL. Every
+# consumer gets a database and a role of its own on it (one file each, beside
+# this one), and nothing else in the cluster runs a Postgres.
+[[- if eq .Cloud "linode" ]]
+#
+# The volume is a Linode Block Storage volume of 20 GiB, from the Retain class
+# of Linode's volume driver (linode-block-storage-retain), which the cluster
+# brings: it is installed with the nodes, not by this template. It is the only
+# object here that names a Linode class: each volume is a service on the Linode
+# account, which holds a limited number. A node that goes away takes nothing
+# with it; the instance starts again on another node with the same volume.
+# Retain keeps the volume when its claim is deleted, so a deleted Cluster loses
+# no data; a person deletes such a volume.
+[[- else ]]
+#
+# The volume is 20 GiB from the cluster's default StorageClass.
+[[- end ]]
+#
+# One instance cannot move while a disruption budget protects it, so there is
+# none: a node drain restarts Postgres elsewhere, a minute or so of downtime.
+# =============================================================================
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: stores
+spec:
+  description: The platform's one Postgres, a database and a role for each consumer
+  instances: 1
+  # PostgreSQL 18.6 with the standard extensions (pgvector among them), by digest.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie@sha256:f89a40f4d74aa6e0900917eaf6299b125a6382eb02fd4ee5d46f55bcbf7e5726
+  enablePDB: false
+  # The first consumer's database and role are made with the cluster; the
+  # DatabaseRole and Database in seaweedfs.yaml take them over from there.
+  bootstrap:
+    initdb:
+      database: seaweedfs
+      owner: seaweedfs
+      secret:
+        name: postgres-seaweedfs
+  postgresql:
+    parameters:
+      # SeaweedFS's filers keep their connection pools unbounded.
+      max_connections: "300"
+  storage:
+    size: 20Gi
+[[- if eq .Cloud "linode" ]]
+    storageClass: linode-block-storage-retain
+[[- end ]]
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+[[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
+  # Every WAL segment to the bucket outside the cluster, as it is written
+  # (backup.yaml).
+[[- if .PostgresServerName ]]
+  # Under this install's own server name, never another install's.
+[[- end ]]
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: backup
+[[- with .PostgresServerName ]]
+        serverName: [[ . | quote ]]
+[[- end ]]
+[[- end ]]
+[[- else -]]
+# The platform's own stores are off (INFRARED_STORES): no Postgres.
+[[- end ]]

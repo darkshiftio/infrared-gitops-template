@@ -1,0 +1,20 @@
+[[- if .Stores -]]
+# The platform's one Postgres (the `postgres` Application, wave 17), in the
+# namespace stores: the roles' Secrets and the wait (prepare.yaml), the
+# CloudNativePG Cluster, and a role and a database for each consumer; with
+# backups, the copies to the outside bucket (backup.yaml). Every object names
+# its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - prepare.yaml
+  - cluster.yaml
+  - seaweedfs.yaml
+  - substrate.yaml
+[[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
+  - backup.yaml
+[[- end ]]
+[[- else -]]
+# The platform's own stores are off (INFRARED_STORES), so this component holds
+# no objects and no Application points at it.
+[[- end ]]

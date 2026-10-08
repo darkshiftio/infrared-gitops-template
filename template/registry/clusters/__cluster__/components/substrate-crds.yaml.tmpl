@@ -1,0 +1,63 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "substrate-crds" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# substrate-crds is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Stores .SubstrateCapable .Registry -]]
+# Agent Substrate, the agent runtime, arrives in four Applications, waves 20 to
+# 23, each labelled infrared.darkshift.io/layer: agent-runtime:
+#
+#   20  substrate-crds     its CRDs and the admission policy on SandboxConfigs
+#   21  substrate-podcert  the pod-certificate controller and its two CAs
+#   22  substrate          the control plane: API, controller, atelet, router,
+#                          egress, and the policy that admits only Infrared's
+#                          operator to the API and the router
+#   23  substrate-actors   the platform's worker pool, the copy of its actor
+#                          images into the registry inside the cluster, and
+#                          its ActorTemplates
+#
+# This is the first (components/substrate-crds): WorkerPool, SandboxConfig and
+# CSIDriverConfig, vendored from the pinned commit. Each later one waits, in a
+# PreSync hook, for what it needs from the one before it.
+#
+# No resources finalizer: removing this Application leaves the CRDs, and with
+# them every WorkerPool and SandboxConfig.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: substrate-crds
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: agent-runtime
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/substrate-crds
+  destination:
+    server: https://kubernetes.default.svc
+    # Everything here is cluster-scoped; the namespace is the control plane's,
+    # which the `substrate` Application makes.
+    namespace: ate-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it (SubstrateCapable), with the platform's own stores (INFRARED_STORES)
+# and the registry inside the cluster (INFRARED_REGISTRY), so this file holds no
+# objects.
+[[- end ]]

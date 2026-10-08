@@ -1,0 +1,164 @@
+[[- if and .BuildRegistry .Registry -]]
+# =============================================================================
+# Before the builder: the registry answers, and the platform's credential.
+# =============================================================================
+# The ClusterBuilder (wave 1) pushes its image to [[ .Registry ]] as the user
+# platform, with the Secret kpack/registry-push, which the Infrared operator
+# writes once the namespace kpack exists. A push that fails is retried by kpack
+# with a delay that doubles each time, so on a fresh cluster, where every
+# Application syncs at once, the builder could wait many minutes after both are
+# there. This hook holds the sync, up to half an hour, until
+[[- if .Stores ]] Zot's Service has a
+# ready endpoint and[[ end ]] the Secret exists. It is a Sync hook, at wave -1: the
+# namespace builds is this component's own, at wave -3.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: registry-wait
+  namespace: builds
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-2"
+---
+# Read only: EndpointSlices, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-wait-builds
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-wait-builds
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-wait-builds
+subjects:
+  - kind: ServiceAccount
+    name: registry-wait
+    namespace: builds
+---
+# get on the platform's push credential, to see that it exists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: builds-registry-wait
+  namespace: kpack
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["registry-push"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: builds-registry-wait
+  namespace: kpack
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: builds-registry-wait
+subjects:
+  - kind: ServiceAccount
+    name: registry-wait
+    namespace: builds
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: registry-wait
+  namespace: builds
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: registry-wait
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: WAIT_SERVICES
+              value: "[[ if .Stores ]]registry/zot[[ end ]]"
+            - name: WAIT_SECRETS
+              value: "kpack/registry-push"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Each list is space-separated; an empty one waits for nothing.
+              answering() {
+                kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \
+                  -o jsonpath='{.items[*].endpoints[*].conditions.ready}' 2>/dev/null | grep -qw true
+              }
+              present() {
+                kubectl -n "${1%%/*}" get secret "${1#*/}" -o name >/dev/null 2>&1
+              }
+              for svc in $WAIT_SERVICES; do
+                until answering "$svc"; do echo "waiting for a ready endpoint of the Service $svc"; sleep 5; done
+              done
+              for secret in $WAIT_SECRETS; do
+                until present "$secret"; do echo "waiting for the Secret $secret"; sleep 5; done
+              done
+              echo "the registry and the platform's credential are there"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# Builds push to the registry inside the cluster only with a registry address
+# (INFRARED_REGISTRY): nothing to wait for.
+[[- end ]]

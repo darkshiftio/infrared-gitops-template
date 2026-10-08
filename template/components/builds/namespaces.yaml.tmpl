@@ -1,7 +1,13 @@
 [[- if .BuildRegistry -]]
 # builds: every product's kpack Image lives here, so every build pod runs here,
+[[- if .Registry ]]
+# under Pod Security `restricted`. Also home of each organization's
+# ServiceAccount builder-<org>, which the Infrared operator makes[[ if ne .Forge "gitea" ]], and the
+# github-token job[[ end ]].
+[[- else ]]
 # under Pod Security `restricted`. Also home of the ServiceAccount `builder`
 # (builds and the ClusterBuilder push with it) and the github-token job.
+[[- end ]]
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -11,7 +17,7 @@ metadata:
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/warn: restricted
-[[- if contains ".dkr.ecr." .BuildRegistry ]]
+[[- if and (contains ".dkr.ecr." .BuildRegistry) (not .Registry) ]]
 ---
 # build-credentials: the ECR login job, and nothing else.
 #

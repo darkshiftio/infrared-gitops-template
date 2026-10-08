@@ -1,0 +1,45 @@
+[[- if .Stores -]]
+# =============================================================================
+# The consumer seaweedfs: a role and a database of its own.
+# =============================================================================
+# SeaweedFS's filer metadata: every file's and bucket's entry. The filers
+# (components/seaweedfs) sign in as seaweedfs with the Secret postgres-seaweedfs.
+#
+# The role signs in with the password in postgres-seaweedfs, which the PreSync hook
+# makes once (prepare.yaml). Removing either object here leaves the role and
+# the database in Postgres (reclaim policy retain).
+# =============================================================================
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: seaweedfs
+  namespace: stores
+  annotations:
+    # After the Cluster (0), before the database it owns (2).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: postgres
+  name: seaweedfs
+  login: true
+  passwordSecret:
+    name: postgres-seaweedfs
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: seaweedfs
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  cluster:
+    name: postgres
+  name: seaweedfs
+  owner: seaweedfs
+  ensure: present
+  databaseReclaimPolicy: retain
+[[- else -]]
+# The platform's own stores are off (INFRARED_STORES): no database for seaweedfs.
+[[- end ]]

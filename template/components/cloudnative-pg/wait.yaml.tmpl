@@ -1,0 +1,140 @@
+[[- if and .Stores .Backup.Bucket .PostgresArchive.Enabled -]]
+# =============================================================================
+# Before the plugin: cert-manager's webhook, which admits its certificates.
+# =============================================================================
+# On a fresh cluster every Application syncs at once (README, "Order on a fresh
+# cluster"). This PreSync hook waits, up to half an hour, until cert-manager's
+# CRDs are established and its webhook has a ready endpoint.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudnative-pg-wait
+  namespace: cnpg-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+---
+# Read only: CRDs, EndpointSlices and ClusterSecretStores, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-wait-cloudnative-pg
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["clustersecretstores"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-wait-cloudnative-pg
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-wait-cloudnative-pg
+subjects:
+  - kind: ServiceAccount
+    name: cloudnative-pg-wait
+    namespace: cnpg-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cloudnative-pg-wait
+  namespace: cnpg-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: cloudnative-pg-wait
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: WAIT_CRDS
+              value: "issuers.cert-manager.io certificates.cert-manager.io"
+            - name: WAIT_SERVICES
+              value: "cert-manager/cert-manager-webhook"
+            - name: WAIT_STORES
+              value: ""
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Each list is space-separated; an empty one waits for nothing.
+              established() {
+                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+              }
+              answering() {
+                kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \
+                  -o jsonpath='{.items[*].endpoints[*].conditions.ready}' 2>/dev/null | grep -qw true
+              }
+              store_ready() {
+                [ "$(kubectl get clustersecretstore "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
+              }
+              for crd in $WAIT_CRDS; do
+                until established "$crd"; do echo "waiting for the CRD $crd"; sleep 5; done
+              done
+              for svc in $WAIT_SERVICES; do
+                until answering "$svc"; do echo "waiting for a ready endpoint of the Service $svc"; sleep 5; done
+              done
+              for store in $WAIT_STORES; do
+                until store_ready "$store"; do echo "waiting for the ClusterSecretStore $store to be Ready"; sleep 5; done
+              done
+              echo "everything this component needs answers"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else if and .Stores .Backup.Bucket -]]
+# No WAL archive (spec.backup.postgres.archive, off by default), so the plugin
+# and its wait are not here.
+[[- else -]]
+# Backups are off (INFRARED_BACKUP), so the plugin and its wait are not here.
+[[- end ]]

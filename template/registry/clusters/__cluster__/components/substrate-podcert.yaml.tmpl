@@ -1,0 +1,56 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "substrate-podcert" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# substrate-podcert is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Stores .SubstrateCapable .Registry -]]
+# Agent Substrate's pod-certificate controller (components/substrate-podcert),
+# in the namespace podcertificate-controller-system. It signs the short-lived
+# certificates every Substrate component presents to the others, through the
+# cluster's certificates.k8s.io/v1beta1 PodCertificateRequests, and publishes
+# their trust bundles as ClusterTrustBundles. Wave 21, after the CRDs (20).
+#
+# A PreSync hook makes its two CAs once, which Substrate's installer does by
+# hand, and reports when they expire.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: substrate-podcert
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: agent-runtime
+  annotations:
+    argocd.argoproj.io/sync-wave: "21"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/substrate-podcert
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: podcertificate-controller-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: baseline
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it (SubstrateCapable), with the platform's own stores (INFRARED_STORES)
+# and the registry inside the cluster (INFRARED_REGISTRY), so this file holds no
+# objects.
+[[- end ]]

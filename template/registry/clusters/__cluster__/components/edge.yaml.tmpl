@@ -1,0 +1,62 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "edge" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# edge is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+# The edge (components/edge): one Gateway behind Cloudflare's proxy, its origin
+# certificate, the redirect from port 80, and Infrared's own route. Wave 13,
+# after Envoy Gateway and the origin issuer (11) and external-dns (12).
+[[- if .PlatformDomain ]]
+# Zones answer at <zone>.[[ .PlatformDomain ]].
+[[- end ]]
+[[- if .InfraredHost ]]
+# Infrared answers at https://[[ .InfraredHost ]].
+[[- end ]]
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: edge
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: edge
+  annotations:
+    argocd.argoproj.io/sync-wave: "13"
+    # The API server fills in Gateway API defaults; a server-side diff counts
+    # them as in sync, and the manifests write them out as well.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/edge
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: envoy-gateway-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else if eq .Edge "gateway" -]]
+# The edge's Gateway needs a name to serve: the Installation's
+# spec.previews.domain (zones) or spec.previews.signInURL (Infrared). Neither is
+# set, so this file holds no objects. Envoy Gateway, external-dns and the origin
+# issuer run, idle.
+[[- else -]]
+# The edge's Gateway, certificate and routes are rendered only when the edge is
+# a Gateway (the Installation's spec.edge: gateway). This cluster's edge is
+# Traefik, so this file holds no objects.
+[[- end ]]

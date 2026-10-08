@@ -1,0 +1,313 @@
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
+[[- if and .Stores .SubstrateCapable .Registry $testActors -]]
+# =============================================================================
+# The platform's ActorTemplates, in the atespace platform.
+# =============================================================================
+# An ActorTemplate is a record in Substrate's database, made through its API,
+# and immutable: a changed one is a new template, so each name carries its
+# version. This Sync hook makes the atespace platform and the templates below
+# when they are absent, then waits for each one's golden snapshot, the warmed-up
+# state every new actor of it starts from. Run again, it changes nothing; it
+# fails, saying so, when a template of the same name names other images, which
+# means the name's version was not bumped.
+#
+#   template     image                                what for
+#   counter-v1   counter, Substrate's counter demo    the counter test: two
+#                                                     counters, in memory and on
+#                                                     disk, through a suspend
+#   sandbox-v1   sandbox, Substrate's sandbox demo    the fence check: runs the
+#                                                     command it is sent, from
+#                                                     inside an actor
+#
+# Each runs in gVisor (SandboxConfig gvisor-default) on the WorkerPool platform,
+# keeps a Full snapshot of memory and disk in SeaweedFS's bucket ate-snapshots,
+# under platform/<template>/, and names its image on localhost, which atelet
+# pulls from the registry inside the cluster ([[ .Registry ]]) by digest. No
+# template carries an egress policy: an actor reaches nothing outside its
+# sandbox.
+#
+# The hook calls the API with grpcurl, as the ServiceAccount substrate-templates
+# (a token for the audience api.ate-system.svc), from a pod labelled
+# infrared.darkshift.io/substrate-client, which the API's NetworkPolicy admits.
+# Wave 2, after the images are in the registry (1).
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: substrate-actor-templates
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  counter-v1.json: |
+    {
+      "actorTemplate": {
+        "metadata": {"atespace": "platform", "name": "counter-v1"},
+        "workerSelector": {"matchLabels": {"infrared.darkshift.io/worker-pool": "platform"}},
+        "containers": [
+          {
+            "name": "counter",
+            "image": "localhost/platform/substrate/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698",
+            "command": ["/ko-app/counter"],
+            "wakeupProbe": {"httpGet": {"path": "/readyz", "port": 80}},
+            "volumeMounts": [{"name": "data", "mountPath": "/home/counter"}]
+          }
+        ],
+        "volumes": [{"name": "data", "durableDir": {}}],
+        "resources": {"limits": [{"name": "cpu", "quantity": "1"}, {"name": "memory", "quantity": "512Mi"}]},
+        "snapshotConfig": {
+          "onPause": "SNAPSHOT_CONTENT_SCOPE_FULL",
+          "onCommit": "SNAPSHOT_CONTENT_SCOPE_FULL",
+          "storageLocation": "s3://ate-snapshots/platform/counter-v1/"
+        },
+        "sandboxConfig": {"sandboxClass": "SANDBOX_CLASS_GVISOR", "configName": "gvisor-default"}
+      }
+    }
+  sandbox-v1.json: |
+    {
+      "actorTemplate": {
+        "metadata": {"atespace": "platform", "name": "sandbox-v1"},
+        "workerSelector": {"matchLabels": {"infrared.darkshift.io/worker-pool": "platform"}},
+        "containers": [
+          {
+            "name": "sandbox",
+            "image": "localhost/platform/substrate/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481",
+            "env": [{"name": "PORT", "value": "80"}]
+          }
+        ],
+        "resources": {"limits": [{"name": "cpu", "quantity": "500m"}, {"name": "memory", "quantity": "256Mi"}]},
+        "snapshotConfig": {
+          "onPause": "SNAPSHOT_CONTENT_SCOPE_FULL",
+          "onCommit": "SNAPSHOT_CONTENT_SCOPE_FULL",
+          "storageLocation": "s3://ate-snapshots/platform/sandbox-v1/"
+        },
+        "sandboxConfig": {"sandboxClass": "SANDBOX_CLASS_GVISOR", "configName": "gvisor-default"}
+      }
+    }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-templates
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+# Read the WorkerPool platform, to wait for a ready worker: nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: substrate-templates
+  namespace: ate-workers
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: ["ate.dev"]
+    resources: ["workerpools"]
+    resourceNames: ["platform"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: substrate-templates
+  namespace: ate-workers
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: substrate-templates
+subjects:
+  - kind: ServiceAccount
+    name: substrate-templates
+    namespace: ate-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: substrate-templates
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        # Admitted to the API by its NetworkPolicy (components/substrate).
+        infrared.darkshift.io/substrate-client: "true"
+    spec:
+      serviceAccountName: substrate-templates
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # grpcurl, a static binary, for the container below.
+        - name: tools
+          # grpcurl v1.9.3 (fullstorydev), alpine: a busybox shell to copy it.
+          image: docker.io/fullstorydev/grpcurl:v1.9.3-alpine@sha256:4614424ed58e9b9837c48b6b8eadb9ef40491d5af3499bcc8b378e9c64a9e4a9
+          command: ["/bin/sh", "-ec", "cp /bin/grpcurl /tools/grpcurl"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+      containers:
+        - name: templates
+          # alpine/k8s 1.37.0: kubectl, jq and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: ATESPACE
+              value: platform
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # ate <method>: one call to Substrate's API, the request on stdin,
+              # the answer on stdout. The token is read at each call and never
+              # put on a command line. grpcurl exits 64 plus the gRPC code.
+              ate() {
+                ATE_TOKEN="$(cat /run/ate-token/token)" /tools/grpcurl -max-time 60 \
+                  -cacert /run/ate-ca/trust-bundle.pem -H 'authorization: Bearer ${ATE_TOKEN}' -expand-headers \
+                  -d @ api.ate-system.svc:443 "ateapi.Control/$1"
+              }
+              tries=0
+              until echo '{}' | ate ListAtespaces >/dev/null 2>/tmp/err; do
+                tries=$((tries + 1))
+                [ "$tries" -lt 120 ] || { cat /tmp/err >&2; exit 1; }
+                echo "waiting for Substrate's API to answer"
+                sleep 5
+              done
+
+              if printf '{"atespace":{"metadata":{"name":"%s"}}}' "$ATESPACE" | ate CreateAtespace >/dev/null 2>/tmp/err; then
+                echo "created the atespace $ATESPACE"
+              else
+                rc=$?
+                [ "$rc" = 70 ] || { cat /tmp/err >&2; exit 1; } # 70: AlreadyExists
+                echo "the atespace $ATESPACE exists"
+              fi
+
+              until [ "$(kubectl -n ate-workers get workerpool platform -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" -ge 1 ] 2>/dev/null; do
+                echo "waiting for a ready worker in the WorkerPool ate-workers/platform"
+                sleep 5
+              done
+
+              for f in /templates/*.json; do
+                name="$(jq -r .actorTemplate.metadata.name "$f")"
+                want="$(jq -c '[.actorTemplate.containers[].image]' "$f")"
+                ref="$(printf '{"actorTemplate":{"atespace":"%s","name":"%s"}}' "$ATESPACE" "$name")"
+                if got="$(echo "$ref" | ate GetActorTemplate 2>/tmp/err)"; then
+                  have="$(echo "$got" | jq -c '[.containers[].image]')"
+                  if [ "$have" != "$want" ]; then
+                    echo "the ActorTemplate $ATESPACE/$name names $have, not $want: a template cannot change, so a new one takes a new version in its name" >&2
+                    exit 1
+                  fi
+                  echo "the ActorTemplate $ATESPACE/$name exists"
+                else
+                  rc=$?
+                  [ "$rc" = 69 ] || { cat /tmp/err >&2; exit 1; } # 69: NotFound
+                  if ate CreateActorTemplate <"$f" >/dev/null 2>/tmp/err; then
+                    echo "created the ActorTemplate $ATESPACE/$name"
+                  else
+                    rc=$?
+                    [ "$rc" = 70 ] || { cat /tmp/err >&2; exit 1; }
+                  fi
+                fi
+                waited=0
+                while :; do
+                  golden="$(echo "$ref" | ate GetActorTemplate 2>/dev/null | jq -c '.status.goldenSnapshotStatus // {}' || true)"
+                  if [ -n "$(echo "$golden" | jq -r '.goldenTag.name // empty' 2>/dev/null)" ]; then
+                    echo "the ActorTemplate $ATESPACE/$name has its golden snapshot: $want"
+                    break
+                  fi
+                  failed="$(echo "$golden" | jq -r '.errorMessage // empty' 2>/dev/null)"
+                  [ -z "$failed" ] || { echo "the ActorTemplate $ATESPACE/$name failed: $failed" >&2; exit 1; }
+                  waited=$((waited + 5))
+                  [ "$waited" -lt 900 ] || { echo "no golden snapshot for $ATESPACE/$name after 15 minutes" >&2; exit 1; }
+                  sleep 5
+                done
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+              readOnly: true
+            - name: templates
+              mountPath: /templates
+              readOnly: true
+            - name: ate-ca
+              mountPath: /run/ate-ca
+              readOnly: true
+            - name: ate-token
+              mountPath: /run/ate-token
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tools
+          emptyDir: {}
+        - name: templates
+          configMap:
+            name: substrate-actor-templates
+        # The API's serving certificate is signed by the pod-certificate
+        # controller's servicedns CA, published as a ClusterTrustBundle.
+        - name: ate-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
+        - name: ate-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 600
+                  path: token
+        - name: tmp
+          emptyDir: {}
+[[- else if and .Stores .SubstrateCapable .Registry -]]
+# Substrate's test actors are off: the install names substrate-test-actors among
+# the components it leaves out, as the Infrared chart does unless its value
+# substrate.testActors is true. They are the platform's only ActorTemplates, so
+# nothing is made here: no atespace, no ActorTemplate. sandbox-v1 runs any command
+# it is sent, which is why they are off by default.
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no ActorTemplates.
+[[- end ]]

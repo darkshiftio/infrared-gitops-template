@@ -1,0 +1,304 @@
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $prefix := default .ClusterName .Backup.Prefix -]]
+[[- $credentials := default "infrared-platform-tokens" .Backup.Credentials.Secret -]]
+[[- $gcs := eq .Backup.Provider "gcs" -]]
+[[- if and .Stores .Backup.Bucket -]]
+# =============================================================================
+# SeaweedFS's buckets, copied to the bucket outside the cluster every hour.
+# =============================================================================
+[[- if .Copies.Mirror.Schedule ]]
+# On the install's schedule, [[ .Copies.Mirror.Schedule ]] (UTC), rclone makes the copy of each
+# bucket match it:
+[[- else ]]
+# Every hour, at 17 past, rclone makes the copy of each bucket match it:
+[[- end ]]
+#
+#   [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/current/<bucket>/          the bucket as it is
+#   [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/archive/<run>/<bucket>/    what that run replaced or deleted
+#   [[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs/runs/<run>.json            that the run finished
+#
+# A run is named by its start, e.g. 20261002T221700Z. What a run replaces or
+[[- if .Copies.Mirror.Retention ]]
+# deletes is kept for [[ .Copies.Mirror.Retention ]], so any object of that time can be
+# brought back; archives and marks older than that are deleted.
+[[- else ]]
+# deletes is kept for seven days, so any object of the last seven days can be
+# brought back; archives and marks older than that are deleted. A copy of every
+# object at every hour would take 168 times the buckets' size.
+[[- end ]]
+[[- if $backups ]]
+#
+# The install's backups are one artifact each, which the Infrared operator
+# writes straight to [[ .Backup.Bucket ]]/[[ $prefix ]]/backups/: <stamp>.irbackup, encrypted,
+# and its manifest <stamp>.json. A run's mark names the newest complete backup
+# when the run started (backup), both objects there and the artifact the size
+# its manifest says, so the buckets in current/ are never older than that
+# backup: a restore pairs a backup with a run that names it or a newer one.
+[[- end ]]
+[[- if $restore ]]
+#
+# A restore, from [[ .Restore.Point ]], copies the buckets back from current/ (the
+# stores-restore Application). Until it marks the ConfigMap restore-stores
+# (key buckets), a run copies nothing and fails: the new, empty buckets would
+# empty the copy the restore reads.
+[[- end ]]
+#
+# rclone reads with the S3 identity backup (Read and List on both buckets, see
+[[- if $gcs ]]
+# identities.yaml) and writes to Google Cloud Storage as the ServiceAccount
+# seaweedfs-backup, which the cluster grants the bucket's role through
+# Workload Identity: no key in the cluster, and nothing to copy.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seaweedfs-backup
+  namespace: stores
+  annotations:
+    # Alone, before the identities (-1) and SeaweedFS (0).
+    argocd.argoproj.io/sync-wave: "-2"
+---
+[[- else ]]
+# identities.yaml) and writes with the platform's backup keys (Secret
+# [[ $credentials ]], keys [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]] and
+# [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]), copied here through the ClusterSecretStore
+# infrared-platform. Nothing prints a key.
+# =============================================================================
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: seaweedfs-backup
+  namespace: stores
+  annotations:
+    # Alone, before the identities (-1) and SeaweedFS (0).
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: seaweedfs-backup
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: ACCESS_KEY_ID
+      remoteRef:
+        key: [[ $credentials ]]
+        property: [[ default "backup-access-key-id" .Backup.Credentials.AccessKeyIDKey ]]
+    - secretKey: ACCESS_SECRET_KEY
+      remoteRef:
+        key: [[ $credentials ]]
+        property: [[ default "backup-secret-access-key" .Backup.Credentials.SecretKeyKey ]]
+---
+[[- end ]]
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: seaweedfs-backup
+  namespace: stores
+spec:
+  schedule: [[ default "17 * * * *" .Copies.Mirror.Schedule | quote ]]
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # Within the hour, so runs never overlap.
+      activeDeadlineSeconds: 3300
+      template:
+        spec:
+          restartPolicy: Never
+[[- if $gcs ]]
+          # The bucket's identity, granted by the cluster (Workload Identity).
+          serviceAccountName: seaweedfs-backup
+[[- end ]]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: copy
+              image: docker.io/rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: BUCKETS
+                  value: "ate-snapshots registry"
+                - name: DESTINATION
+                  value: [[ printf "dst:%s/%s/seaweedfs" .Backup.Bucket $prefix | quote ]]
+[[- if $backups ]]
+                # Where the operator writes the backups, for the run's mark.
+                - name: BACKUPS
+                  value: [[ printf "dst:%s/%s/backups" .Backup.Bucket $prefix | quote ]]
+[[- end ]]
+                # The source: SeaweedFS, as the identity backup.
+                - name: RCLONE_CONFIG_SRC_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_SRC_PROVIDER
+                  value: SeaweedFS
+                - name: RCLONE_CONFIG_SRC_ENDPOINT
+                  value: http://seaweedfs-s3.stores.svc:8333
+                - name: RCLONE_CONFIG_SRC_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-s3-backup
+                      key: AWS_ACCESS_KEY_ID
+                - name: RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-s3-backup
+                      key: AWS_SECRET_ACCESS_KEY
+                # The destination: the bucket outside the cluster.
+[[- if $gcs ]]
+                # Google Cloud Storage, through rclone's own backend, as the
+                # pod's ServiceAccount: no key, no endpoint.
+                - name: RCLONE_CONFIG_DST_TYPE
+                  value: google cloud storage
+                - name: RCLONE_CONFIG_DST_ENV_AUTH
+                  value: "true"
+                # The bucket has uniform access: no object ACLs.
+                - name: RCLONE_CONFIG_DST_BUCKET_POLICY_ONLY
+                  value: "true"
+                # The identity may write objects only; the bucket exists.
+                - name: RCLONE_CONFIG_DST_NO_CHECK_BUCKET
+                  value: "true"
+[[- else ]]
+                - name: RCLONE_CONFIG_DST_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_DST_PROVIDER
+                  value: [[ if .Backup.Endpoint ]]Other[[ else ]]AWS[[ end ]]
+[[- if .Backup.Endpoint ]]
+                - name: RCLONE_CONFIG_DST_ENDPOINT
+                  value: [[ .Backup.Endpoint | quote ]]
+[[- end ]]
+[[- if .Backup.Region ]]
+                - name: RCLONE_CONFIG_DST_REGION
+                  value: [[ .Backup.Region | quote ]]
+[[- end ]]
+                # The keys may write objects only; the bucket exists.
+                - name: RCLONE_CONFIG_DST_NO_CHECK_BUCKET
+                  value: "true"
+                - name: RCLONE_CONFIG_DST_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-backup
+                      key: ACCESS_KEY_ID
+                - name: RCLONE_CONFIG_DST_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-backup
+                      key: ACCESS_SECRET_KEY
+[[- end ]]
+              command:
+                - /bin/sh
+                - -ec
+                - |
+[[- if $restore ]]
+                  # The restore from [[ .Restore.Point ]] reads current/: until it has
+                  # copied every bucket back, copying these would empty it.
+                  if [ "$(cat /restore-stores/point 2>/dev/null)" != [[ .Restore.Point | quote ]] ] || [ ! -s /restore-stores/buckets ]; then
+                    echo "the restore from [[ .Restore.Point ]] has not copied the buckets back yet (stores/restore-stores): nothing copied" >&2
+                    exit 1
+                  fi
+[[- end ]]
+                  run="$(date -u +%Y%m%dT%H%M%SZ)"
+[[- if $backups ]]
+                  # The newest complete backup as the run starts, before any
+                  # bucket is copied: its artifact and its manifest both there,
+                  # the artifact the size the manifest's own "size" says. None
+                  # yet, or a listing that fails, names none ("").
+                  backup=""
+                  listing="$(rclone lsf --files-only --format ps --separator ' ' "$BACKUPS/" 2>/dev/null || true)"
+                  manifest_size() {
+                    tr -d ' \t\r\n' | awk '{
+                      s = $0; d = 0
+                      for (i = 1; i <= length(s); i++) {
+                        c = substr(s, i, 1)
+                        if (c == "\"") {
+                          j = index(substr(s, i + 1), "\"")
+                          if (j == 0) exit
+                          key = substr(s, i + 1, j - 1); i += j
+                          if (d == 1 && key == "size" && substr(s, i + 1, 1) == ":") {
+                            v = substr(s, i + 2); sub(/[^0-9].*$/, "", v); print v; exit
+                          }
+                        } else if (c == "{" || c == "[") d++
+                        else if (c == "}" || c == "]") d--
+                      }
+                    }'
+                  }
+                  for stamp in $(printf '%s\n' "$listing" | sed -n 's/^\([0-9]\{8\}T[0-9]\{6\}Z\)\.json .*$/\1/p' | sort -r); do
+                    size="$(printf '%s\n' "$listing" | awk -v f="$stamp.irbackup" '$1 == f {print $2}')"
+                    [ -n "$size" ] || continue
+                    if [ "$(rclone cat "$BACKUPS/$stamp.json" 2>/dev/null | manifest_size)" = "$size" ]; then
+                      backup="$stamp"
+                      break
+                    fi
+                  done
+[[- end ]]
+                  for bucket in $BUCKETS; do
+                    rclone sync "src:$bucket" "$DESTINATION/current/$bucket" \
+                      --backup-dir "$DESTINATION/archive/$run/$bucket" \
+                      --fast-list --stats-one-line --stats 5m -v
+                  done
+[[- if .Copies.Mirror.Retention ]]
+                  # [[ .Copies.Mirror.Retention ]]: archives and marks named before the cutoff go.
+[[- else ]]
+                  # Seven days: archives and marks named before the cutoff go.
+[[- end ]]
+                  cutoff="$(date -u -d "@$(( $(date -u +%s) - [[ trimSuffix "d" (default "7d" .Copies.Mirror.Retention) ]] * 24 * 3600 ))" +%Y%m%d%H%M%S)"
+                  older() { awk -v name="$(printf '%s' "$1" | tr -dc 0-9)" -v cutoff="$cutoff" 'BEGIN { exit !(name < cutoff) }'; }
+                  for dir in $(rclone lsf --dirs-only "$DESTINATION/archive/" 2>/dev/null); do
+                    if older "$dir"; then rclone purge "$DESTINATION/archive/${dir%/}"; fi
+                  done
+                  for mark in $(rclone lsf --files-only "$DESTINATION/runs/" 2>/dev/null); do
+                    if older "$mark"; then rclone deletefile "$DESTINATION/runs/$mark"; fi
+                  done
+[[- if $backups ]]
+                  printf '{"run": "%s", "finished": "%s", "buckets": "%s", "backup": "%s"}\n' \
+                    "$run" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUCKETS" "$backup" | rclone rcat "$DESTINATION/runs/$run.json"
+                  echo "copied $BUCKETS to $DESTINATION, run $run, after the backup ${backup:-(none yet)}"
+[[- else ]]
+                  printf '{"run": "%s", "finished": "%s", "buckets": "%s"}\n' \
+                    "$run" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUCKETS" | rclone rcat "$DESTINATION/runs/$run.json"
+                  echo "copied $BUCKETS to $DESTINATION, run $run"
+[[- end ]]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 512Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+[[- if $restore ]]
+                - name: restore-stores
+                  mountPath: /restore-stores
+                  readOnly: true
+[[- end ]]
+          volumes:
+            - name: tmp
+              emptyDir: {}
+[[- if $restore ]]
+            # The restore's markers, read at each run's start; absent before
+            # the restore's first one.
+            - name: restore-stores
+              configMap:
+                name: restore-stores
+                optional: true
+[[- end ]]
+[[- else -]]
+# Backups are off (INFRARED_BACKUP), or there are no stores: nothing to copy.
+[[- end ]]

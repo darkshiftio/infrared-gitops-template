@@ -1,0 +1,51 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "postgres" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# postgres is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if .Stores -]]
+# The platform's one Postgres (components/postgres): a CloudNativePG Cluster of
+# one instance in the namespace stores, with a role and a database for each
+# consumer. Wave 17, after CloudNativePG (16).
+#
+# No resources finalizer: removing this Application leaves the Cluster and its
+# data running, until a person deletes them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: databases
+  annotations:
+    argocd.argoproj.io/sync-wave: "17"
+    # CloudNativePG's webhook fills in defaults; a server-side diff counts them
+    # as in sync.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/postgres
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: stores
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# The platform's one Postgres runs only with its own stores (the operator's
+# INFRARED_STORES), so this file holds no objects.
+[[- end ]]

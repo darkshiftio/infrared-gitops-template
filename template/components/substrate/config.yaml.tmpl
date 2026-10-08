@@ -1,0 +1,24 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# The OTLP settings every control plane component reads through envFrom, in
+# place of upstream's ate-otel-config.yaml, which names GKE's managed collector.
+# This install runs no OpenTelemetry collector, so the endpoint is empty: atelet
+# starts no relay for the workers, the controller gives the workers no
+# endpoint, and the router's Envoy traces nothing (each is how Substrate reads
+# an empty endpoint). The components' Prometheus metrics stay on port 9090.
+#
+# Wave -1: every container here names it in envFrom, and does not start
+# without it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ate-otel-config
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no telemetry settings.
+[[- end ]]

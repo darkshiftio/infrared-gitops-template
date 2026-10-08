@@ -1,3 +1,5 @@
+[[- /* Builds push to the registry inside the cluster: builds on, and a registry address. */ -]]
+[[- $internal := and .BuildRegistry .Registry -]]
 # components/builds
 [[ if not .BuildRegistry ]]
 **Builds are off on [[ .ClusterName ]]**: Infrared has no build registry (chart
@@ -6,7 +8,8 @@ file in this directory holds no objects and no Application points at it. Set
 the registry and re-hydrate the template to turn builds on; the rest of this
 page describes what then runs.
 [[ else ]]
-Builds push to **`[[ .BuildRegistry ]]`**.
+Builds push to **`[[ .BuildRegistry ]]`**[[ if $internal ]], the registry inside the cluster (Zot,
+`components/zot`)[[ end ]].
 [[ end ]]
 Product image builds with [kpack](https://github.com/buildpacks-community/kpack)
 on the management cluster. The `builds` Application (sync wave 26, right after
@@ -15,16 +18,50 @@ on the management cluster. The `builds` Application (sync wave 26, right after
 | Object | What |
 |---|---|
 | Namespace `builds` | Pod Security `restricted`. Every product's kpack `Image`, and so every build pod, lives here. |
+[[- if not $internal ]]
 | Namespace `build-credentials` | ECR registries only. Pod Security `privileged`, for the ECR login job's hostNetwork (see `namespaces.yaml`). |
+[[- end ]]
 | ClusterStore `paketo` | Paketo `go`, `nodejs` and `web-servers` buildpacks, pinned by tag and digest. |
 | ClusterStack `noble` | Paketo's Ubuntu 24.04 build and run images, pinned. |
+[[- if $internal ]]
+| ClusterBuilder `infrared-builder` | Order `go`, `web-servers`, `nodejs`; pushed to `[[ .Registry ]]/platform/kpack-builder` as the user `platform`. |
+| ServiceAccount `kpack/infrared-builder` | What the ClusterBuilder pushes with; lists `registry-push`, the user `platform`'s credential, which the Infrared operator writes. |
+| ServiceAccount `builds/builder-<org>` | The Infrared operator's, one per organization: what its builds run as; lists `registry-push-<org>` and `[[ if eq .Forge "gitea" ]]gitea-git[[ else ]]github-git[[ end ]]`. |
+| Job `builds/registry-wait` | Once per sync, before the builder: waits until [[ if .Stores ]]Zot answers and [[ end ]]`kpack/registry-push` exists. |
+[[- if ne .Forge "gitea" ]]
+| CronJob `builds/github-token` | Every 45m (and once per sync) writes `builds/github-git` and `builds/git-credentials` from Infrared's GitHub App for the org. |
+[[- end ]]
+[[- else ]]
 | ClusterBuilder `infrared-builder` | Order `go`, `web-servers`, `nodejs`; pushed to `<build registry>/kpack-builder`. |
+[[- if eq .Forge "gitea" ]]
+| ServiceAccount `builds/builder` | What builds and the ClusterBuilder run as; lists `registry-push` and `gitea-git`. |
+| CronJob `build-credentials/ecr-login` | ECR only: every 6h (and once per sync) writes `builds/registry-push` from the node's IAM role. |
+[[- else ]]
 | ServiceAccount `builds/builder` | What builds and the ClusterBuilder run as; lists `registry-push` and `github-git`. |
 | CronJob `build-credentials/ecr-login` | ECR only: every 6h (and once per sync) writes `builds/registry-push` from the node's IAM role. |
 | CronJob `builds/github-token` | Every 45m (and once per sync) writes `builds/github-git` and `builds/git-credentials` from Infrared's GitHub App for the org. |
+[[- end ]]
+[[- end ]]
 
 ## Registry credentials
+[[ if $internal ]]
+The registry inside the cluster, Zot at `[[ .Registry ]]`, admits a push only
+from a user its rules allow (`components/zot/base.yaml`), and nothing here is
+made by hand: the Infrared operator mints every credential.
 
+- `kpack/registry-push`: the user `platform`, which alone writes under
+  `platform/`. The ClusterBuilder pushes the builder with it, as
+  `kpack/infrared-builder`. No platform credential lives in `builds`, where an
+  organization's gitops repo may create any object.
+- `builds/registry-push-<org>`: the organization's own user, which writes only
+  under `<org>/`, listed by the ServiceAccount `builds/builder-<org>`.
+
+Each is a `kubernetes.io/dockerconfigjson` Secret for `[[ .Registry ]]`, with
+the annotation `kpack.io/docker: [[ .Registry ]]`. Anything in the cluster
+pulls without a login. Zot makes a repository on its first push, so none is
+made beforehand. Builds name the registry by its address, never by a name:
+their tools speak plain HTTP only to a private address.
+[[ else ]]
 `builds/registry-push` is a `kubernetes.io/dockerconfigjson` Secret with the
 annotation `kpack.io/docker: <registry host>`.
 
@@ -46,9 +83,18 @@ annotation `kpack.io/docker: <registry host>`.
 **Repositories must exist before the first push**: ECR does not create them
 on push. Create `<build registry>/kpack-builder` (the builder image) and one
 `<build registry>/<product>` per product.
-
+[[ end ]]
 ## Source credentials
-
+[[ if eq .Forge "gitea" ]]
+The org's repos are on Gitea, at `[[ .ForgeURL ]]`. kpack clones with
+`builds/gitea-git`: `kubernetes.io/basic-auth`, the org's bot user with its
+read-only token as the password, annotation `kpack.io/git: [[ .ForgeURL ]]`.
+The operator writes it from the org's GitProvider `gitea` (Secret `gitea`,
+key `read-token`, in namespace `ir-org-[[ .OrgName ]]`) once this namespace
+exists, so nothing here makes a token, and there is no `github-token` job.
+A build that fetches private dependencies itself has no `git-credentials`
+binding on Gitea yet.
+[[- else ]]
 `github-token` signs a JWT for Infrared's own GitHub App for the org (App ID
 and installation ID from the GitProvider `github`, private key from Secret
 `github-app`, key `private-key.pem`, both in namespace
@@ -65,11 +111,12 @@ and installation ID from the GitProvider `github`, private key from Secret
 The App must be installed on the repositories a product builds from. Until
 the org's App is installed (no installation ID yet) the job logs a notice and
 succeeds; the next run picks it up.
+[[- end ]]
 
 ## What a product adds
 
 A kpack `Image` in namespace `builds`, built by `infrared-builder` as
-`builder`, tagged `<build registry>/<product>`. It lives in the gitops repo at
+`builder[[ if $internal ]]-<org>[[ end ]]`, tagged `<build registry>/[[ if $internal ]]<org>/[[ end ]]<product>`. It lives in the gitops repo at
 `products/<product>/build/image.yaml` (see the repo README, "Products"):
 
 ```yaml
@@ -79,14 +126,14 @@ metadata:
   name: <product>
   namespace: builds
 spec:
-  tag: [[ if .BuildRegistry ]][[ .BuildRegistry ]][[ else ]]<build registry>[[ end ]]/<product>
-  serviceAccountName: builder
+  tag: [[ if .BuildRegistry ]][[ .BuildRegistry ]][[ else ]]<build registry>[[ end ]]/[[ if $internal ]]<org>/[[ end ]]<product>
+  serviceAccountName: builder[[ if $internal ]]-<org>[[ end ]]
   builder:
     kind: ClusterBuilder
     name: infrared-builder
   source:
     git:
-      url: https://github.com/<owner>/<repo>
+      url: [[ if eq .Forge "gitea" ]][[ .ForgeURL ]]/<owner>/<repo>.git[[ else ]]https://github.com/<owner>/<repo>[[ end ]]
       revision: main
   build:
     # Only when the build fetches private dependencies itself.

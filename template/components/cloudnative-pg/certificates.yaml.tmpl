@@ -1,0 +1,72 @@
+[[- if and .Stores .Backup.Bucket .PostgresArchive.Enabled -]]
+# =============================================================================
+# The Barman Cloud plugin's certificates.
+# =============================================================================
+# CloudNativePG and the plugin speak mTLS. The plugin's chart makes these
+# objects itself, in the same wave as the Deployment that mounts their Secrets;
+# a refused certificate would then leave the sync waiting for ever on that
+# Deployment. So the chart's are off (certificate.create*: false) and these,
+# the same, come first: the issuer (-2), then the certificates (-1). The names
+# of the Secrets are fixed: the plugin's Service and Deployment name them.
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: barman-cloud-selfsigned
+  namespace: cnpg-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: barman-cloud-server
+  namespace: cnpg-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  commonName: barman-cloud
+  dnsNames:
+    - barman-cloud
+  duration: 2160h
+  renewBefore: 360h
+  isCA: false
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: barman-cloud-selfsigned
+  secretName: barman-cloud-server-tls
+  usages:
+    - server auth
+  privateKey:
+    rotationPolicy: Always
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: barman-cloud-client
+  namespace: cnpg-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  commonName: barman-cloud-client
+  duration: 2160h
+  renewBefore: 360h
+  isCA: false
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: barman-cloud-selfsigned
+  secretName: barman-cloud-client-tls
+  usages:
+    - client auth
+  privateKey:
+    rotationPolicy: Always
+[[- else if and .Stores .Backup.Bucket -]]
+# No WAL archive (spec.backup.postgres.archive, off by default): no plugin, no
+# certificates.
+[[- else -]]
+# Backups are off (INFRARED_BACKUP): no plugin, no certificates.
+[[- end ]]

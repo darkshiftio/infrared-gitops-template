@@ -1,0 +1,35 @@
+[[- if eq .Edge "gateway" -]]
+# external-dns's Cloudflare token: the key cloudflare-api-token of the Secret
+# infrared-platform-tokens ([[ .InfraredNamespace ]]), copied through the
+# ClusterSecretStore infrared-platform (components/platform-tokens) into
+# external-dns/cloudflare-api-token, key api-token. The values the API server
+# would fill in are written out, so Argo CD compares like with like.
+#
+# Wave -1, alone: External Secrets' webhook admits it, so it is applied, and
+# synced, before external-dns (the chart, wave 0) that reads its Secret. A
+# refused apply then fails the sync, which Argo CD retries, instead of leaving
+# it waiting for a Deployment that cannot start.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cloudflare-api-token
+  namespace: external-dns
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: cloudflare-api-token
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: api-token
+      remoteRef:
+        key: infrared-platform-tokens
+        property: cloudflare-api-token
+[[- else -]]
+# external-dns runs only when the edge is a Gateway: no token to copy.
+[[- end ]]

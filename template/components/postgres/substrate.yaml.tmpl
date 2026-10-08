@@ -1,0 +1,45 @@
+[[- if .Stores -]]
+# =============================================================================
+# The consumer substrate: a role and a database of its own.
+# =============================================================================
+# Agent Substrate's records, ready before Substrate is installed: its install
+# only points at this database and copies the Secret postgres-substrate.
+#
+# The role signs in with the password in postgres-substrate, which the PreSync hook
+# makes once (prepare.yaml). Removing either object here leaves the role and
+# the database in Postgres (reclaim policy retain).
+# =============================================================================
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: substrate
+  namespace: stores
+  annotations:
+    # After the Cluster (0), before the database it owns (2).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: postgres
+  name: substrate
+  login: true
+  passwordSecret:
+    name: postgres-substrate
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: substrate
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  cluster:
+    name: postgres
+  name: substrate
+  owner: substrate
+  ensure: present
+  databaseReclaimPolicy: retain
+[[- else -]]
+# The platform's own stores are off (INFRARED_STORES): no database for substrate.
+[[- end ]]

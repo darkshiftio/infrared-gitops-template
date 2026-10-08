@@ -1,0 +1,179 @@
+[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+# =============================================================================
+# The Envoy fleet: one Envoy on every node, on the node's own ports 80 and 443.
+# =============================================================================
+# No load balancer, ever: a LoadBalancer Service would make the cloud bill for
+# one (a NodeBalancer on Linode). Each Envoy binds its node's ports 80 and 443
+# with hostPort instead, and the cluster's firewall decides who may reach them:
+# only Cloudflare, which proxies every name this Gateway serves.
+#
+# Envoy listens on 10080 and 10443 inside its pod (Envoy Gateway adds 10000 to
+# a port below 1024, so Envoy needs no capability to bind it); the patch maps
+# the node's 80 and 443 to those. A DaemonSet that holds host ports cannot
+# surge, so a rollout replaces one node's Envoy at a time.
+#
+# The Service is NodePort with externalTrafficPolicy Local, never LoadBalancer.
+# Its node ports are only what makes Envoy Gateway report the ExternalIP of
+# every node with a ready Envoy as the Gateway's addresses, which external-dns
+# publishes; the firewall keeps them closed from outside.
+# =============================================================================
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: edge
+  namespace: envoy-gateway-system
+  annotations:
+    # Before the GatewayClass that names it, so no Gateway of the class is
+    # ever given the default proxy (a Deployment behind a LoadBalancer).
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDaemonSet:
+        strategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxUnavailable: 1
+            maxSurge: 0
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: envoy
+                      ports:
+                        - name: http-host
+                          containerPort: 10080
+                          hostPort: 80
+                          protocol: TCP
+                        - name: https-host
+                          containerPort: 10443
+                          hostPort: 443
+                          protocol: TCP
+      envoyService:
+        type: NodePort
+        externalTrafficPolicy: Local
+  # Envoy's own default, written out as the API server would store it.
+  logging:
+    level:
+      default: warn
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: edge
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: edge
+    namespace: envoy-gateway-system
+---
+# =============================================================================
+# The Gateway `edge`: every name the cluster serves.
+# =============================================================================
+# One certificate, edge-tls (certificate.yaml), for every HTTPS listener.
+# Plain HTTP only redirects to HTTPS (routes.yaml), so its listeners admit
+# routes from this namespace alone.
+[[- if .PlatformDomain ]]
+#
+# Zones: https://<zone>.[[ .PlatformDomain ]], one level down, which is all the
+# wildcard certificate and the wildcard record cover. Routes attach to the
+# listener `https` from a zone's namespace only, which Infrared labels
+# infrared.darkshift.io/zone.
+[[- end ]]
+[[- if .InfraredHost ]]
+#
+# Infrared: https://[[ .InfraredHost ]], on listeners of its own. A listener
+# for an exact name takes the name from a wildcard one, so no route elsewhere
+# can answer for Infrared, and only Infrared's namespace may attach.
+[[- end ]]
+#
+# Every Gateway API default is written out, so Argo CD compares like with like.
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: edge
+  listeners:
+[[- if .PlatformDomain ]]
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: [[ printf "*.%s" .PlatformDomain | quote ]]
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: [[ printf "*.%s" .PlatformDomain | quote ]]
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: edge-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - key: infrared.darkshift.io/zone
+                operator: Exists
+[[- end ]]
+[[- if .InfraredHost ]]
+    - name: infrared-http
+      protocol: HTTP
+      port: 80
+      hostname: [[ .InfraredHost | quote ]]
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: infrared-https
+      protocol: HTTPS
+      port: 443
+      hostname: [[ .InfraredHost | quote ]]
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: edge-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+[[- end ]]
+---
+# No request timeout at the edge. Envoy's own default is 15 seconds a request,
+# which would cut Infrared's longer API calls and its MCP stream (the UI's nginx
+# allows 120 seconds and an hour) and any zone's long request. Traefik, the
+# other edge, sets none either.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: edge
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+  timeout:
+    http:
+      requestTimeout: 0s
+[[- else -]]
+# The edge is not a Gateway with a name to serve: no Gateway.
+[[- end ]]

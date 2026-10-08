@@ -1,3 +1,9 @@
+[[- $disabled := " " ]][[ range .Disabled ]][[ $disabled = printf "%s%s " $disabled . ]][[ end -]]
+[[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
+[[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $prefix := default .ClusterName .Backup.Prefix -]]
+[[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
+[[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -21,8 +27,45 @@ components/
   appprojects/             AppProjects platform and infrared
   argocd/                  Argo CD, vendored and pinned; Argo CD manages itself from here
   builds/                  kpack builder and build credentials[[ if not .BuildRegistry ]] (off: no build registry)[[ end ]]
+[[- if $codeIndex ]]
+  code-index/              Infrared's code index: Zoekt and the code service, the cache on the pod's own disk
+[[- end ]]
+[[- if eq .Edge "gateway" ]]
+  edge/                    the Gateway, its origin certificate and the edge's routes
+  external-dns/            external-dns's Cloudflare token, copied from the platform's tokens
+[[- end ]]
   infisical/               creates the Secret infisical/infisical-secrets on first sync
   kpack/                   kpack, vendored and pinned
+[[- if eq .Edge "gateway" ]]
+  platform-tokens/         ClusterSecretStore infrared-platform, over the Secret infrared-platform-tokens
+[[- end ]]
+[[- if .Stores ]]
+  postgres/                the platform's one Postgres: a CloudNativePG Cluster, a role and a database per consumer
+  seaweedfs/               SeaweedFS's S3 identities and the hook that makes their keys
+[[- if .Registry ]]
+  stores-credentials/      ClusterSecretStore infrared-stores, over the stores' own Secrets
+  zot/                     the registry inside the cluster: its waits, the base of its config, its S3 keys
+[[- if .SubstrateCapable ]]
+  substrate-crds/          Agent Substrate's CRDs and the admission policy on SandboxConfigs, vendored and pinned
+  substrate-podcert/       its pod-certificate controller, and the hook that makes its two CAs
+  substrate/               its control plane (API, controller, atelet, router, egress), vendored and pinned, and its fence
+[[- if $testActors ]]
+  substrate-actors/        the platform's worker pool, its actor images and its ActorTemplates
+[[- else ]]
+  substrate-actors/        the platform's worker pool; Substrate's test actors are off
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- if and $backups (not .Registry) ]]
+  stores-credentials/      ClusterSecretStore infrared-stores, over the stores' own Secrets
+[[- end ]]
+[[- if $restore ]]
+  stores-restore/          a restore in progress: the buckets' copy back, once Postgres's records are back
+[[- end ]]
+[[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
+  cloudnative-pg/          the Barman Cloud plugin's certificates
+[[- end ]]
+[[- end ]]
 products/                  yours: one directory per product (see "Products")
 ```
 
@@ -31,26 +74,110 @@ products/                  yours: one directory per product (see "Products")
 | Wave | Application | What |
 |---|---|---|
 | 0 | `appprojects` | AppProjects `platform` and `infrared` |
+[[- if not (contains " cert-manager " $disabled) ]]
 | 10 | `cert-manager` | cert-manager, CRDs included |
+[[- end ]]
+[[- if not (contains " external-secrets " $disabled) ]]
 | 10 | `external-secrets` | External Secrets Operator |
-[[- if eq .ClusterFlavor "eks" ]]
+[[- end ]]
+[[- if and (eq .ClusterFlavor "eks") (not (contains " aws-load-balancer-controller " $disabled)) ]]
 | 10 | `aws-load-balancer-controller` | AWS Load Balancer Controller (EKS Pod Identity) |
 [[- end ]]
+[[- if eq .Edge "gateway" ]]
+[[- if not (contains " platform-tokens " $disabled) ]]
+| 11 | `platform-tokens` | ClusterSecretStore `infrared-platform`: the platform's tokens, from the Secret `infrared-platform-tokens` |
+[[- end ]]
+[[- if not (contains " envoy-gateway " $disabled) ]]
+| 11 | `envoy-gateway` | Envoy Gateway, the edge's controller, and its CRDs |
+[[- end ]]
+[[- if not (contains " origin-ca-issuer " $disabled) ]]
+| 11 | `origin-ca-issuer` | Cloudflare's origin issuer, for the edge's certificate |
+[[- end ]]
+[[- if not (contains " external-dns " $disabled) ]]
+| 12 | `external-dns` | the edge's DNS records in Cloudflare, proxied, owned by `[[ .ClusterName ]]` |
+[[- end ]]
+[[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
+| 13 | `edge` | Gateway `edge`, its origin certificate, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+[[- end ]]
+[[- end ]]
+[[- if not (contains " infisical " $disabled) ]]
 | 15 | `infisical` | Infisical, self-hosted, with bundled postgres and redis |
+[[- end ]]
+[[- if .Stores ]]
+[[- if not (contains " cloudnative-pg " $disabled) ]]
+| 16 | `cloudnative-pg` | CloudNativePG, the operator behind the platform's one Postgres[[ if and .Backup.Bucket .PostgresArchive.Enabled ]], and its Barman Cloud plugin for backups[[ end ]] |
+[[- end ]]
+[[- if not (contains " postgres " $disabled) ]]
+| 17 | `postgres` | the platform's one Postgres (namespace `stores`), with a role and a database for each consumer[[ if and .Backup.Bucket .PostgresArchive.Enabled ]]; its WAL and a [[ if .PostgresArchive.Schedule ]]base backup on `[[ .PostgresArchive.Schedule ]]`[[ else ]]daily base backup[[ end ]] to `s3://[[ .Backup.Bucket ]]/[[ $prefix ]]/postgres`, kept [[ if .PostgresArchive.Retention ]][[ .PostgresArchive.Retention ]][[ else ]]7 days[[ end ]][[ end ]][[ if $backups ]]; each consumer's database dumped into every backup[[ end ]][[ if $restore ]]; started empty, each consumer's database then restored from the backup's dump[[ end ]] |
+[[- end ]]
+[[- if not (contains " seaweedfs " $disabled) ]]
+| 18 | `seaweedfs` | SeaweedFS, the platform's object store (namespace `stores`): S3, buckets `ate-snapshots` and `registry`[[ if .Backup.Bucket ]], copied [[ if .Copies.Mirror.Schedule ]]on `[[ .Copies.Mirror.Schedule ]]`[[ else ]]every hour[[ end ]] to `[[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs`, what a copy replaces kept [[ if .Copies.Mirror.Retention ]][[ .Copies.Mirror.Retention ]][[ else ]]7 days[[ end ]][[ if $backups ]], each run's mark naming the newest backup in `[[ .Backup.Bucket ]]/[[ $prefix ]]/backups` before it[[ end ]][[ end ]] |
+[[- end ]]
+[[- if and $restore (not (contains " stores-restore " $disabled)) ]]
+| 18 | `stores-restore` | a restore, from [[ .Restore.Point ]], in progress: once the Infrared chart's restore has brought Postgres's records back, every bucket copied back from the copy outside; gone once the restore is complete |
+[[- end ]]
+[[- if and $backups (not .Registry) (not (contains " stores-credentials " $disabled)) ]]
+| 19 | `stores-credentials` | ClusterSecretStore `infrared-stores`: the stores' credentials, each by name, for the namespaces that use them |
+[[- end ]]
+[[- if .Registry ]]
+[[- if not (contains " stores-credentials " $disabled) ]]
+| 19 | `stores-credentials` | ClusterSecretStore `infrared-stores`: the stores' credentials, each by name, for the namespaces that use them |
+[[- end ]]
+[[- if not (contains " zot " $disabled) ]]
+| 20 | `zot` | Zot, the registry inside the cluster, at `[[ .Registry ]]` (namespace `registry`), every layer in SeaweedFS's bucket `registry` |
+[[- end ]]
+[[- if .SubstrateCapable ]]
+[[- if not (contains " substrate-crds " $disabled) ]]
+| 20 | `substrate-crds` | Agent Substrate's CRDs: WorkerPool, SandboxConfig, CSIDriverConfig |
+[[- end ]]
+[[- if not (contains " substrate-podcert " $disabled) ]]
+| 21 | `substrate-podcert` | Substrate's pod-certificate controller and its two CAs (namespace `podcertificate-controller-system`) |
+[[- end ]]
+[[- if not (contains " substrate " $disabled) ]]
+| 22 | `substrate` | Substrate's control plane (namespace `ate-system`): records in the Postgres database `substrate`, snapshots in the bucket `ate-snapshots`; only Infrared's operator reaches its API and router |
+[[- end ]]
+[[- if not (contains " substrate-actors " $disabled) ]]
+[[- if $testActors ]]
+| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`), the actor images copied to `[[ .Registry ]]/platform/substrate/`, and the ActorTemplates `counter-v1` and `sandbox-v1` in the atespace `platform` |
+[[- else ]]
+| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`). Substrate's test actors, the ActorTemplates `counter-v1` and `sandbox-v1`, are off: the Installation names `substrate-test-actors` among its disabled components, as the Infrared chart does unless its value `substrate.testActors` is true |
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- if not (contains " kpack " $disabled) ]]
 | 25 | `kpack` | kpack, the in-cluster image builder |
-[[- if .BuildRegistry ]]
+[[- end ]]
+[[- if and .BuildRegistry (not (contains " builds " $disabled)) ]]
 | 26 | `builds` | ClusterBuilder `infrared-builder` and build credentials; pushes to `[[ .BuildRegistry ]]` |
 [[- end ]]
-| 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana |
+[[- if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
+| 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana[[ if and (eq .ClusterFlavor "k3s") .Stores ]]. The metrics are on the pod's own disk, so they start empty after a node loss or a pod restart[[ end ]] |
+[[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
+[[- if and $codeIndex (not (contains " code-index " $disabled)) ]]
+| 41 | `code-index` | Infrared's code index (namespace `code-index`): the repositories its record names, at their pinned commits, searchable by infrared-api alone. Its record (the Secret `code-index-settings`) and its credential for private repositories (the Secret `code-index-credentials`) are the install's, copied from `[[ .InfraredNamespace ]]/infrared-platform-tokens` |
+[[- end ]]
 | 100 | `argocd` | Argo CD, managing itself |
+[[- $left := "" ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ if $left ]][[ $left = printf "%s, `%s`" $left . ]][[ else ]][[ $left = printf "`%s`" . ]][[ end ]][[ end ]][[ end ]]
+[[- if $left ]]
+
+Left out on purpose, as the Installation's disabled components:
+[[- printf " %s" $left ]].
+[[- end ]]
 
 Every Application here carries the label
 `app.kubernetes.io/part-of: infrared-gitops`; Infrared finds them by it.
 
 ## Getting in
-
+[[ if and (eq .Edge "gateway") .InfraredHost ]]
+Infrared answers at **https://[[ .InfraredHost ]]**, through Cloudflare's
+proxy.[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
+Everything else is reached by port-forward.
+[[- else ]]
 Everything is reached by port-forward; nothing is exposed.
+[[- end ]]
 
 ```bash
 # Infrared
@@ -59,14 +186,14 @@ kubectl -n [[ .InfraredNamespace ]] port-forward svc/infrared 8080:80        # h
 # Argo CD (user admin)
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 kubectl -n argocd port-forward svc/argocd-server 8081:80                     # http://localhost:8081
-
+[[ if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
 # Grafana (user admin)
 kubectl -n monitoring get secret victoria-metrics-k8s-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 kubectl -n monitoring port-forward svc/victoria-metrics-k8s-stack-grafana 3000:80
-
+[[ end ]][[ if not (contains " infisical " $disabled) ]]
 # Infisical
 kubectl -n infisical port-forward svc/infisical-infisical-standalone-infisical 8082:8080
-```
+[[ end ]]```
 
 ## Products
 
@@ -78,11 +205,20 @@ products/<product>/
   zones/<zone>/values.yaml one directory per zone: its chart values and image pin
 ```
 [[ if .BuildRegistry ]]
+[[- if .Registry ]]
+`build/image.yaml` is a kpack `Image` in namespace `builds` with
+`serviceAccountName: builder-<org>`, builder ClusterBuilder `infrared-builder`
+and tag `[[ .BuildRegistry ]]/<org>/<product>`; see
+`components/builds/README.md`. Infrared makes each organization's
+ServiceAccount and push credential, and the registry inside the cluster makes
+the repository on its first push.
+[[- else ]]
 `build/image.yaml` is a kpack `Image` in namespace `builds` with
 `serviceAccountName: builder`, builder ClusterBuilder `infrared-builder` and
 tag `[[ .BuildRegistry ]]/<product>`; see `components/builds/README.md`. The
 registry repository `[[ .BuildRegistry ]]/<product>` must exist first (ECR
 does not create repositories on push).
+[[- end ]]
 [[ else ]]
 Builds are off on this cluster (no build registry), so there is nothing to
 build `build/image.yaml` yet; see `components/builds/README.md`.
@@ -135,4 +271,6 @@ Nothing secret is in this repo. The Secrets Infrared needs
 (`infrared-setup`, `infrared-session`, `infrared-mcp-token`, `infrared-mcp-access`,
 `infrared-api-tokens` in `[[ .InfraredNamespace ]]`) were created by the first
 `helm install`, and the `infrared` Application tells the chart they exist.
+[[- if not (contains " infisical " $disabled) ]]
 `infisical-secrets` is generated once, on the first sync, and never rotated.
+[[- end ]]

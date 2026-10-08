@@ -1,0 +1,47 @@
+[[- if and .Stores .Backup.Bucket .Copies.Recipients -]]
+# =============================================================================
+# The roles the backup dumps the platform's Postgres as, every hour.
+# =============================================================================
+# The Infrared operator's backup Job, in [[ .InfraredNamespace ]], dumps each consumer
+# database of the platform's Postgres with pg_dump, as that database's own role,
+# into the backup's one artifact. The store copies each role's Secret
+# (username, password) from stores/postgres-<role> into [[ .InfraredNamespace ]], under
+# the same name:
+#
+#   Secret              role and database
+#   postgres-substrate  substrate, Agent Substrate's records
+#
+# The database seaweedfs, the object store's file index, is not dumped: a
+# restore copies the buckets back, which makes the index again. A new consumer
+# database adds its role's Secret here and to the store's Role.
+#
+# Wave 2, alone: after the store (1), whose webhook admits it.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-substrate
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-stores
+  target:
+    name: postgres-substrate
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: username
+      remoteRef:
+        key: postgres-substrate
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: postgres-substrate
+        property: password
+[[- else -]]
+# No age recipient is set (spec.backup.recipients), or there are no stores or
+# backup bucket: the Infrared operator makes no backup, so no role to copy.
+[[- end ]]

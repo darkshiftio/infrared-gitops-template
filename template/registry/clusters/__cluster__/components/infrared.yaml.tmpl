@@ -41,13 +41,44 @@ spec:
           managementCluster:
             name: [[ .ClusterName ]]
           gitops:
-            templateVersion: [[ .TemplateVersion ]]
+            templateVersion: [[ if hasPrefix "v" .TemplateVersion ]][[ .TemplateVersion ]][[ else ]][[ .TemplateVersion | quote ]][[ end ]]
 [[- if .ImagePullSecret ]]
           imagePullSecrets:
             - name: [[ .ImagePullSecret ]]
 [[- else ]]
           imagePullSecrets: []
 [[- end ]]
+[[- if .ImageRegistry ]]
+          # Infrared's own images as the install pinned them (the operator's
+          # INFRARED_IMAGE_REGISTRY and INFRARED_IMAGES), so adoption keeps every
+          # image in that registry, by digest.
+          image:
+            registry: [[ .ImageRegistry | quote ]]
+[[- end ]]
+[[- with index .Images "operator" ]][[ if or .Tag .Digest ]]
+          operator:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
+[[- with index .Images "api" ]][[ if or .Tag .Digest ]]
+          api:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
+[[- with index .Images "ui" ]][[ if or .Tag .Digest ]]
+          ui:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
+[[- with index .Images "runner" ]][[ if or .Tag .Digest ]]
+          runner:
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
           setup:
             existingSecret: infrared-setup
           session:
@@ -57,11 +88,173 @@ spec:
             # The bearer token MCP clients send to /mcp.
             access:
               existingSecret: infrared-mcp-access
+[[- with index .Images "mcp" ]][[ if or .Tag .Digest ]]
+            image:
+              tag: [[ .Tag | quote ]]
+              digest: [[ .Digest | quote ]]
+[[- end ]][[ end ]]
           # The registry prefix kpack builds product images into; empty leaves
           # the builds component out. Rendered from the operator's own
           # INFRARED_BUILD_REGISTRY so adoption keeps it.
           builds:
             registry: [[ .BuildRegistry | quote ]]
+[[- $rr := .RegistryRetention ]]
+[[- $retention := or $rr.UntaggedAfter $rr.KeepTags $rr.KeepNewest $rr.GCInterval $rr.GCDelay ]]
+[[- if or .Registry $retention ]]
+[[- if .Registry ]]
+          # The registry inside the cluster (INFRARED_REGISTRY), whose users,
+          # rules and push credentials the operator mints.
+[[- end ]]
+[[- if $retention ]]
+          # Zot's garbage collection and retention as the install set them
+          # (INFRARED_REGISTRY_RETENTION); what is unset keeps the template's.
+[[- end ]]
+          registry:
+[[- if .Registry ]]
+            address: [[ .Registry | quote ]]
+[[- end ]]
+[[- if $retention ]]
+            retention:
+[[- with $rr.UntaggedAfter ]]
+              untaggedAfter: [[ . | quote ]]
+[[- end ]]
+[[- if $rr.KeepTags ]]
+              keepTags:
+[[- range $rr.KeepTags ]]
+                - [[ . | quote ]]
+[[- end ]]
+[[- end ]]
+[[- with $rr.KeepNewest ]]
+              keepNewest: [[ . ]]
+[[- end ]]
+[[- with $rr.GCInterval ]]
+              gcInterval: [[ . | quote ]]
+[[- end ]]
+[[- with $rr.GCDelay ]]
+              gcDelay: [[ . | quote ]]
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- if eq .Edge "gateway" ]]
+          # The Installation's edge and previews as the install set them
+          # (INFRARED_EDGE, INFRARED_PREVIEWS). The operator writes each only
+          # while the Installation's own is empty. A Traefik install's are the
+          # Installation's alone, often set by hand, so they are not carried.
+          installation:
+            edge: gateway
+[[- if and .PlatformDomain .InfraredHost ]]
+            previews:
+              domain: [[ .PlatformDomain | quote ]]
+              signInURL: [[ printf "https://%s" .InfraredHost | quote ]]
+[[- end ]]
+[[- end ]]
+[[- if .Stores ]]
+          # The platform's stores (INFRARED_STORES), which the operator reads at
+          # every render of this repo.
+          stores:
+            enabled: true
+[[- end ]]
+[[- $c := .Copies ]]
+[[- $settings := or $c.Recipients $c.Mirror.Schedule $c.Mirror.Retention .PostgresArchive.Enabled ]]
+[[- if or .Backup.Bucket $settings ]]
+[[- if .Backup.Bucket ]]
+          # The bucket outside the cluster that the stores are copied to
+[[- if eq .Backup.Provider "gcs" ]]
+          # (INFRARED_BACKUP): Google Cloud Storage, written by the cluster's
+          # own identities; no key.
+[[- else ]]
+          # (INFRARED_BACKUP). Its key stays in the install's Secret.
+[[- end ]]
+[[- end ]]
+          backup:
+[[- if .Backup.Bucket ]]
+            bucket: [[ .Backup.Bucket | quote ]]
+[[- if .Backup.Endpoint ]]
+            endpoint: [[ .Backup.Endpoint | quote ]]
+[[- end ]]
+[[- if .Backup.Region ]]
+            region: [[ .Backup.Region | quote ]]
+[[- end ]]
+[[- if .Backup.Prefix ]]
+            prefix: [[ .Backup.Prefix | quote ]]
+[[- end ]]
+[[- end ]]
+[[- if $settings ]]
+            # The backups' settings as the install set them (INFRARED_COPIES):
+            # the age recipients each backup is encrypted to, the mirror's
+            # schedule, how long backups and what the mirror replaces are
+            # kept, and Postgres's WAL archive. What is unset keeps the chart's
+            # and the template's defaults.
+[[- if $c.Recipients ]]
+            recipients:
+[[- range $c.Recipients ]]
+              - [[ . | quote ]]
+[[- end ]]
+[[- end ]]
+[[- if $c.Mirror.Schedule ]]
+            mirror:
+              schedule: [[ $c.Mirror.Schedule | quote ]]
+[[- end ]]
+[[- if $c.Mirror.Retention ]]
+            retention: [[ $c.Mirror.Retention | quote ]]
+[[- end ]]
+[[- if .PostgresArchive.Enabled ]]
+            postgres:
+              archive: true
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- $kept := false ]][[ range .Disabled ]][[ if ne . "substrate-test-actors" ]][[ $kept = true ]][[ end ]][[ end ]]
+[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
+[[- if $kept ]]
+          # The components the install leaves out (INFRARED_DISABLED_COMPONENTS).
+          components:
+            disabled:
+[[- range .Disabled ]][[ if ne . "substrate-test-actors" ]]
+              - [[ . | quote ]]
+[[- end ]][[ end ]]
+[[- end ]]
+[[- if and .Stores .Registry $testActors ]]
+          # Substrate's test actors are on (substrate.testActors). With the
+          # stores and a registry the chart leaves them out unless it is true,
+          # naming substrate-test-actors among the components left out, which
+          # is never carried above; so adoption keeps them on only with it.
+          substrate:
+            testActors: true
+[[- end ]]
+[[- $ci := index .Images "code-index" ]]
+[[- if and .ImageRegistry (or $ci.Tag $ci.Digest) ]]
+          # Infrared's code index is on (codeIndex.enabled), at the image the
+          # install pinned. The chart hands that image to the operator among
+          # Infrared's own (INFRARED_IMAGES, code-index) only while it is on, so
+          # adoption keeps it on only with this.
+          codeIndex:
+            enabled: true
+            image:
+              tag: [[ $ci.Tag | quote ]]
+              digest: [[ $ci.Digest | quote ]]
+          # Its record and its GitHub App are in the install's Secret
+          # infrared-platform-tokens, which the chart writes at the install
+          # alone (codeIndex.knowledge and platformTokens). This keeps Argo CD's
+          # render from making that Secret again, whatever the org's values
+          # file says, so it never replaces the install's tokens.
+          platformTokens:
+            existingSecret: infrared-platform-tokens
+[[- end ]]
+[[- if eq .Forge "gitea" ]]
+          # Gitea, the install's forge, which the chart runs. The install made
+          # its site admin's Secret, and like the Secrets above it is never
+          # rendered again, so adoption keeps its password.
+          gitea:
+            enabled: true
+[[- if eq .Cloud "linode" ]]
+            # Its data on a Linode volume that outlives its claim, as installed.
+            persistence:
+              storageClass: linode-block-storage-retain
+[[- end ]]
+          giteaAdmin:
+            existingSecret: infrared-gitea-admin
+[[- end ]]
     # This gitops repo, only as $values for the file above.
     - repoURL: [[ .GitopsRepoURL ]]
       targetRevision: [[ .DefaultBranch ]]

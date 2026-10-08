@@ -1,4 +1,4 @@
-[[- if contains ".dkr.ecr." .BuildRegistry -]]
+[[- if and (contains ".dkr.ecr." .BuildRegistry) (not .Registry) -]]
 # =============================================================================
 # ecr-login: ECR push credentials for kpack, from the node's IAM role. No
 # long-lived keys.
@@ -205,5 +205,6 @@ spec:
             sizeLimit: 16Mi
 [[- else -]]
 # No ECR login: builds is off, or the build registry is not ECR (the org
-# creates builds/registry-push itself; see README.md).
+# creates builds/registry-push itself; see README.md)[[ if and .BuildRegistry .Registry ]], or builds push
+# to the registry inside the cluster[[ end ]].
 [[- end ]]

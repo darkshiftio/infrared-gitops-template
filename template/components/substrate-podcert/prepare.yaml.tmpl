@@ -1,0 +1,277 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# Before the pod-certificate controller: its two CAs, made once.
+# =============================================================================
+# Substrate's installer makes these by hand (ate-setup, create.go); here this
+# PreSync hook does. The controller signs every Substrate component's
+# short-lived certificate with them:
+#
+#   Secret                 signs
+#   service-dns-ca-pool    serving certificates (the API's api.ate-system.svc)
+#   pod-identity-ca-pool   the components' client identities (SPIFFE)
+#
+# Each is a CA pool as Substrate's localca reads it: key pool, one Ed25519 CA
+# with id 1, active for signing, its root valid 365 days; tls.crt and tls.key,
+# the same root. OpenSSL makes them in memory, in the hook's own pod. The hook
+# writes a Secret only when it is absent and never replaces one: a new root
+# would orphan every certificate issued from the old. A key it does not write
+# goes with the pod.
+#
+# Each Secret is labelled infrared.darkshift.io/substrate-ca and carries its
+# root's expiry in the annotation infrared.darkshift.io/not-after, which the
+# hook prints at every sync. Nothing rotates them yet.
+[[- if .ImagePullSecret ]]
+#
+# Then it waits, up to half an hour, for the store infrared-platform, which
+# copies the pull secret (pull-secret.yaml).
+[[- end ]]
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-podcert-prepare
+  namespace: podcertificate-controller-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+---
+# Read only: CRDs and ClusterSecretStores, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-wait-substrate-podcert
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["clustersecretstores"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-wait-substrate-podcert
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-wait-substrate-podcert
+subjects:
+  - kind: ServiceAccount
+    name: substrate-podcert-prepare
+    namespace: podcertificate-controller-system
+---
+# Make the CA Secrets once; read them to see whether they exist. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: substrate-podcert-prepare
+  namespace: podcertificate-controller-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["service-dns-ca-pool", "pod-identity-ca-pool"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: substrate-podcert-prepare
+  namespace: podcertificate-controller-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: substrate-podcert-prepare
+subjects:
+  - kind: ServiceAccount
+    name: substrate-podcert-prepare
+    namespace: podcertificate-controller-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: substrate-podcert-prepare
+  namespace: podcertificate-controller-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: substrate-podcert-prepare
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Candidate CAs, in memory. prepare below keeps a Secret that exists.
+        - name: generate
+          # alpine/openssl 3.5.9: OpenSSL and a busybox shell.
+          image: docker.io/alpine/openssl:3.5.9@sha256:59c5cb51e536d40587667229468b007a2a6cae1705397e59e5f7774c08b74029
+          workingDir: /work
+          env:
+            - name: HOME
+              value: /work
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              umask 077
+              # A root as Substrate's localca.GenerateCA makes it: a random
+              # common name, CA, critical key usage digitalSignature and
+              # keyCertSign, 365 days.
+              cat >ca.cnf <<'CNF'
+              [req]
+              distinguished_name = dn
+              x509_extensions = ca
+              prompt = no
+              [dn]
+              CN = substrate
+              [ca]
+              basicConstraints = critical,CA:TRUE
+              keyUsage = critical,digitalSignature,keyCertSign
+              subjectKeyIdentifier = hash
+              CNF
+              # A PEM file's body is the base64 of its DER, as Go's JSON
+              # encodes []byte.
+              body() { sed '/^-----/d' "$1" | tr -d '\n'; }
+              ca() {
+                name=$1
+                shift
+                mkdir "$name"
+                openssl genpkey "$@" -out "$name/tls.key"
+                openssl req -x509 -new -config ca.cnf -key "$name/tls.key" -days 365 \
+                  -subj "/CN=$(openssl rand -hex 16)" -out "$name/tls.crt"
+                printf '{"CAs":[{"ID":"1","SigningKeyPKCS8":"%s","RootCertificateDER":"%s"}],"ActiveForSigning":"1"}' \
+                  "$(body "$name/tls.key")" "$(body "$name/tls.crt")" >"$name/pool"
+                openssl x509 -in "$name/tls.crt" -noout -enddate -dateopt iso_8601 | sed 's/^notAfter=//' >"$name/not-after"
+              }
+              ca service-dns-ca-pool -algorithm ed25519
+              ca pod-identity-ca-pool -algorithm ed25519
+              echo "candidate CAs made"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      containers:
+        - name: prepare
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: WAIT_CRDS
+              value: "[[ if .ImagePullSecret ]]externalsecrets.external-secrets.io[[ end ]]"
+            - name: WAIT_STORES
+              value: "[[ if .ImagePullSecret ]]infrared-platform[[ end ]]"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Each CA, made once and never replaced. Nothing prints a key.
+              for name in service-dns-ca-pool pod-identity-ca-pool; do
+                if kubectl get secret "$name" -o name >/dev/null 2>&1; then
+                  echo "$name exists; leaving it alone"
+                else
+                  kubectl create -f - >/dev/null <<EOF
+              apiVersion: v1
+              kind: Secret
+              type: kubernetes.io/tls
+              metadata:
+                name: $name
+                labels:
+                  infrared.darkshift.io/substrate-ca: "true"
+                annotations:
+                  infrared.darkshift.io/not-after: "$(cat "/work/$name/not-after")"
+              data:
+                pool: $(base64 -w 0 <"/work/$name/pool")
+                tls.crt: $(base64 -w 0 <"/work/$name/tls.crt")
+                tls.key: $(base64 -w 0 <"/work/$name/tls.key")
+              EOF
+                  echo "created $name"
+                fi
+                expires="$(kubectl get secret "$name" -o jsonpath='{.metadata.annotations.infrared\.darkshift\.io/not-after}')"
+                echo "CA podcertificate-controller-system/$name expires ${expires:-on a date nobody recorded}"
+              done
+              # Each list is space-separated; an empty one waits for nothing.
+              established() {
+                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+              }
+              store_ready() {
+                [ "$(kubectl get clustersecretstore "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
+              }
+              for crd in $WAIT_CRDS; do
+                until established "$crd"; do echo "waiting for the CRD $crd"; sleep 5; done
+              done
+              for store in $WAIT_STORES; do
+                until store_ready "$store"; do echo "waiting for the ClusterSecretStore $store to be Ready"; sleep 5; done
+              done
+              echo "everything this component needs answers"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The candidate keys never touch a disk.
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no CAs to make.
+[[- end ]]

@@ -1,4 +1,4 @@
-[[- if .BuildRegistry -]]
+[[- if and .BuildRegistry (ne .Forge "gitea") -]]
 # =============================================================================
 # github-token: short-lived GitHub credentials for kpack, from Infrared's own
 # GitHub App for the org.
@@ -268,6 +268,9 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+[[- else if .BuildRegistry -]]
+# The org's repos are on Gitea, not GitHub: kpack clones with builds/gitea-git,
+# which the operator writes, so no github-token job.
 [[- else -]]
 # builds is off (no build registry): no github-token job.
 [[- end ]]

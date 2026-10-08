@@ -1,0 +1,115 @@
+[[- $r := .RegistryRetention -]]
+[[- if and .Stores .Registry -]]
+# =============================================================================
+# zot-base: the base of Zot's config, which the Infrared operator completes.
+# =============================================================================
+# Zot reads /etc/zot/config.json from the Secret registry/zot-config, which the
+# operator writes: this config.json, with one rule per organization added under
+# http.accessControl.repositories ("<org>/**", user <org>). It writes the users'
+# bcrypt hashes to the Secret registry/zot-auth, key htpasswd: infrared,
+# platform, then each organization. The operator reads this ConfigMap at every
+# pass and writes neither Secret until it exists. Zot rereads both files within
+# seconds of a change, without a restart. Neither Secret is in this repo.
+#
+#   storage  every layer and manifest in SeaweedFS's bucket registry, under
+#            /zot. Zot's own database, the users' API keys among it, is in
+#            /var/lib/registry on the pod's own disk: a new pod reads the
+#            repositories back from the bucket, and forgets the keys. Each
+#            repository holds its own layers (dedupe off), so deleting one
+#            organization's repositories frees its layers and nobody else's.
+[[- if or $r.UntaggedAfter $r.KeepTags $r.KeepNewest $r.GCInterval $r.GCDelay ]]
+#            Garbage is collected, untagged images deleted and tags kept as
+#            the install's registry.retention says (below); what it leaves
+#            unset keeps the defaults: every hour, after a day, every v-tag
+#            and the ten newest tags.
+[[- else ]]
+#            Garbage is collected every hour; untagged images go after a day,
+#            and each repository keeps every v-tag and its ten newest tags.
+[[- end ]]
+#   http     plain HTTP on port 5000. compat docker2s2 admits Docker schema 2
+#            manifests, which the Paketo images builds start from are: without
+#            it Zot refuses them.
+#   auth     htpasswd, and API keys (a publishing step's credential).
+#   rules    anyone in the cluster may pull anything, with or without a login.
+#            Only user platform writes under platform/, and each organization's
+#            user under its own path. User infrared, the operator, may read and
+#            delete anywhere. The longest matching path wins, so every rule
+#            repeats the read rights.
+#   log      info: Zot's default, debug, logs every storage call.
+#
+# The S3 keys are not here: Zot's S3 driver reads AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY from its environment, the Secret zot-s3 (s3-keys.yaml).
+# Every key below is Zot v2.1.21's (`zot verify` accepts this file).
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-base
+  namespace: registry
+  annotations:
+    # First: the operator writes Zot's config from it, which the wait at -1
+    # holds the sync for.
+    argocd.argoproj.io/sync-wave: "-3"
+data:
+  config.json: |
+    {
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "dedupe": false,
+        "gc": true,
+        "gcDelay": [[ default "1h" $r.GCDelay | quote ]],
+        "gcInterval": [[ default "1h" $r.GCInterval | quote ]],
+        "retention": {
+          "delay": [[ default "24h" $r.UntaggedAfter | quote ]],
+          "policies": [
+            {
+              "repositories": ["**"],
+              "deleteUntagged": true,
+              "keepTags": [
+                {"patterns": [[ if $r.KeepTags ]][[ "[" ]][[ range $i, $p := $r.KeepTags ]][[ if $i ]], [[ end ]][[ quote $p ]][[ end ]][[ "]" ]][[ else ]]["^v[0-9]"][[ end ]]},
+                {"patterns": [".*"], "mostRecentlyPushedCount": [[ if $r.KeepNewest ]][[ $r.KeepNewest ]][[ else ]]10[[ end ]]}
+              ]
+            }
+          ]
+        },
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot",
+          "bucket": "registry",
+          "region": "us-east-1",
+          "regionendpoint": "http://seaweedfs-s3.stores.svc:8333",
+          "forcepathstyle": true,
+          "secure": false
+        }
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "5000",
+        "compat": ["docker2s2"],
+        "auth": {
+          "htpasswd": {"path": "/etc/zot-auth/htpasswd"},
+          "apikey": true
+        },
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "anonymousPolicy": ["read"],
+              "defaultPolicy": ["read"]
+            },
+            "platform/**": {
+              "anonymousPolicy": ["read"],
+              "defaultPolicy": ["read"],
+              "policies": [
+                {"users": ["platform"], "actions": ["read", "create", "update", "delete"]}
+              ]
+            }
+          },
+          "adminPolicy": {"users": ["infrared"], "actions": ["read", "delete"]}
+        }
+      },
+      "log": {"level": "info"}
+    }
+[[- else -]]
+# The registry inside the cluster runs only with a registry address and the
+# platform's own stores: no config.
+[[- end ]]
