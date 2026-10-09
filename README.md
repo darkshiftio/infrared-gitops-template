@@ -46,10 +46,10 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.DefaultBranch` | `main` | `targetRevision` of every git-sourced Application |
 | `.TemplateVersion` | `v0.1.0` | the tag of this repo that was rendered |
 | `.InfraredVersion` | `v0.1.0` | the Infrared appVersion |
-| `.InfraredChartRepo` | `ghcr.io/darkshiftio/charts` | OCI chart repo, **no `oci://`** |
+| `.InfraredChartRepo` | `us-central1-docker.pkg.dev/darkshift-preprod/infrared/charts` | OCI chart repo, **no `oci://`** (the operator's `INFRARED_CHART_REPO`, chart value `gitops.chartRepository`); the operator registers it with Argo CD (see "What the operator does after rendering") |
 | `.InfraredChartVersion` | `0.1.0` | the `infrared` chart version to pin |
 | `.InfraredNamespace` | `infrared` | where the release lives |
-| `.ImagePullSecret` | `` or `infrared-pull` | name of a pull Secret in `.InfraredNamespace`, empty for none |
+| `.ImagePullSecret` | `` or `infrared-pull` | name of a pull Secret in `.InfraredNamespace`, empty for none; with `.RegistryToken`, the Secret the token is written to |
 | `.BuildRegistry` (JSON `buildRegistry`) | `` or `123456789012.dkr.ecr.us-east-1.amazonaws.com/acme` | registry prefix kpack pushes product images to (the operator's `INFRARED_BUILD_REGISTRY`, chart value `builds.registry`); empty turns builds off |
 | `.Edge` | `` \| `traefik` \| `gateway` | the Installation's `spec.edge`. `` and `traefik` both mean Traefik, as before; `gateway` turns on the edge (see "The edge"). Test it with `eq .Edge "gateway"`, never `if .Edge` |
 | `.PlatformDomain` | `` or `preprod.example.com` | the Installation's `spec.previews.domain`; in gateway mode zones answer at `<zone>.<PlatformDomain>` |
@@ -69,6 +69,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.RegistryRetention` | `{"UntaggedAfter": "24h", "KeepTags": ["^v[0-9]"], "KeepNewest": 10, "GCInterval": "1h", "GCDelay": "1h"}` | the operator's `INFRARED_REGISTRY_RETENTION` (chart value `registry.retention`): Zot's garbage collection and retention (see "The registry"). Every zero field keeps today's literal, shown here |
 | `.Restore` | `{"Point": "20261006T010500Z", "Artifact": "20261006T010500Z.irbackup", "MirrorRun": "20261006T011700Z"}` | the restore in progress, which the operator reads from the ConfigMap `infrared/infrared-restore` while its phase is `ObjectsRestored` or `Failed`, and zero otherwise: `Point` is the stamp of the backup restored, `Artifact` its object under `<prefix>/backups/`, `MirrorRun` the mirror run the buckets come back from, a run after the point. With the stores and a backup bucket it brings the stores back (see "Restore") |
 | `.PostgresServerName` | `` or `postgres-20261003T060000Z` | the server name the platform's Postgres archives under, `<Backup.Bucket>/<prefix>/postgres/<name>/`. The operator chooses one per install, and on a restore a new one: it must name an empty prefix, and it never changes for the life of the install. Empty archives under `postgres`, the Cluster's name, as before the field existed |
+| `.SubstrateRegistry` | `` or `us-central1-docker.pkg.dev/darkshift-preprod/infrared/substrate` | the operator's `INFRARED_SUBSTRATE_REGISTRY`: the registry path Agent Substrate's images are pulled and copied from, holding each image of `scripts/substrate-images.json` under its own name by the same tag and digest; no scheme, tag or trailing slash. Empty is `ghcr.io/darkshiftio/substrate`, as before the field existed (see "Agent Substrate") |
+| `.RegistryToken` | `{"GCPServiceAccount": "", "Registry": ""}` or `{"GCPServiceAccount": "registry-reader@darkshift-preprod.iam.gserviceaccount.com", "Registry": "us-central1-docker.pkg.dev"}` | the operator's `INFRARED_REGISTRY_TOKEN`, the Infrared chart's `registryToken`: `.ImagePullSecret` is not a lasting credential but an access token of the Google service account `GCPServiceAccount` for the registry host `Registry`, which the chart's CronJob rewrites every 30 minutes (Workload Identity; no key). The template carries it in the `infrared` Application, leaves the chart's `imagePullSecrets` empty there (the chart names the Secret itself), and copies the pull secret into other namespaces every 5 minutes instead of every hour. Both fields or neither, and only with an `.ImagePullSecret`. The zero value is none, as before the field existed |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -118,8 +120,12 @@ carries (`make verify` checks it).
 2. Writes the Argo CD repository Secrets: one for the gitops repo itself, and
    **`argocd/infrared-oci-charts`** (labels
    `argocd.argoproj.io/secret-type: repository`; `type: helm`,
-   `url: ghcr.io/darkshiftio/charts`, `enableOCI: "true"`, credentials when
-   the charts are private). The template does not create either.
+   `url: <.InfraredChartRepo>`, `enableOCI: "true"`, and the credential for
+   its registry from `.ImagePullSecret` when one is set). The template does
+   not create either: it registers no repository of the `infrared` chart, so
+   there is one entry for that URL, the operator's. The operator writes the
+   charts' Secret again at every reconcile, so a pull secret that changes, a
+   registry token above all, reaches Argo CD within one resync.
 3. Applies **`registry/clusters/<cluster>/registry.yaml`**, the root
    Application `registry-<cluster>`. Everything else follows from it.
 
@@ -168,6 +174,8 @@ set, so a cluster without it renders the same file as before:
 | `.Registry` | `registry.address` |
 | `.RegistryRetention`, each field that is set | `registry.retention` (`untaggedAfter`, `keepTags`, `keepNewest`, `gcInterval`, `gcDelay`) |
 | `.Images` `code-index`, with `.ImageRegistry` | `codeIndex: {enabled: true, image: {tag, digest}}`, and `platformTokens.existingSecret: infrared-platform-tokens` (see "The code index") |
+| `.InfraredChartRepo`, always | `gitops.chartRepository` |
+| `.RegistryToken` | `registryToken: {gcpServiceAccount, registry}`, and `imagePullSecrets: []` in place of `.ImagePullSecret`, which the chart derives from the token |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -620,7 +628,7 @@ and its bundled Postgres.
 |---|---|
 | Records | The database `substrate` on the platform's Postgres, as the role `substrate` (`stores/postgres-substrate`), schema `public`, TLS as SeaweedFS's filers use it (`sslmode=require`). Its DSN is the Secret `ate-system/ate-api-server-secret-envvars`, made by an ExternalSecret through `infrared-stores`. |
 | Snapshots | The bucket `ate-snapshots`, as the S3 identity `ate-snapshots` (`stores/seaweedfs-s3-ate-snapshots`, copied to `ate-system/ate-s3-credentials` through `infrared-stores`), path-style at `http://seaweedfs-s3.stores.svc:8333`, for the API and atelet. A template's snapshots go under `platform/<template>/`. |
-| Substrate's images | ghcr, by digest. With an `.ImagePullSecret`, the store `infrared-platform` copies that Secret into `podcertificate-controller-system`, `ate-system`, `ate-workers` and, for the copy of the test actors' images, `registry`; the workers pull with it through the ServiceAccount `default` of `ate-workers`, because a WorkerPool cannot name a pull secret. The router's Envoy (`envoyproxy/envoy`) and the SandboxConfig's pause image (`registry.k8s.io/pause`) are upstream's, by digest, and atelet fetches gVisor from Google's public bucket, as upstream's `gvisor-default` names it. |
+| Substrate's images | ghcr (`ghcr.io/darkshiftio/substrate`), by digest; with `.SubstrateRegistry`, that registry path instead, by the same tags and digests: the kustomizations of `substrate` and `substrate-podcert` rename the vendored images (kustomize `images`), and the WorkerPool's image and the copy of the test actors' images name it directly. On GKE the nodes pull from Artifact Registry as their own service account; the copy into the registry inside the cluster reads with the pull secret, a registry token (`.RegistryToken`) there. With an `.ImagePullSecret`, the store `infrared-platform` copies that Secret into `podcertificate-controller-system`, `ate-system`, `ate-workers` and, for the copy of the test actors' images, `registry`; the workers pull with it through the ServiceAccount `default` of `ate-workers`, because a WorkerPool cannot name a pull secret. The router's Envoy (`envoyproxy/envoy`) and the SandboxConfig's pause image (`registry.k8s.io/pause`) are upstream's, by digest, and atelet fetches gVisor from Google's public bucket, as upstream's `gvisor-default` names it. |
 | Actor images | atelet pulls them itself, without a login and without the nodes' registry mirrors. It runs with `--gcp-auth-for-image-pulls=false` and `--localhost-registry-replacement=<Registry>`: an image named on `localhost` (or a loopback address) is pulled from the registry inside the cluster, over plain HTTP. A template names `localhost/platform/substrate/<image>:<tag>@sha256:...`, so an immutable template never holds the registry's address, and the pull takes the path the Substrate spike proved with its node registry. |
 
 The hooks do what Substrate's installer (`ate-setup`) does by hand, and each is

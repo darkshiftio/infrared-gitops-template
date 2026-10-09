@@ -41,6 +41,21 @@ resources:
   - atenet-router.yaml
   - atenet-egress.yaml
   - sandboxconfig-gvisor.yaml
+[[- if .SubstrateRegistry ]]
+# Substrate's images from [[ .SubstrateRegistry ]] (INFRARED_SUBSTRATE_REGISTRY), each
+# by the same tag and digest as on ghcr.
+images:
+  - name: ghcr.io/darkshiftio/substrate/ateapi
+    newName: [[ .SubstrateRegistry ]]/ateapi
+  - name: ghcr.io/darkshiftio/substrate/atecontroller
+    newName: [[ .SubstrateRegistry ]]/atecontroller
+  - name: ghcr.io/darkshiftio/substrate/atelet
+    newName: [[ .SubstrateRegistry ]]/atelet
+  - name: ghcr.io/darkshiftio/substrate/atenet
+    newName: [[ .SubstrateRegistry ]]/atenet
+  - name: ghcr.io/darkshiftio/substrate/envoy-dataplane
+    newName: [[ .SubstrateRegistry ]]/envoy-dataplane
+[[- end ]]
 patches:
   # Argo CD makes the namespace (CreateNamespace, with its Pod Security label),
   # before the PreSync hook that runs in it.

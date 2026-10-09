@@ -4,8 +4,9 @@
 # The actor images, copied into the registry inside the cluster.
 # =============================================================================
 # atelet pulls an actor's image itself, without a login and without the nodes'
-# registry mirrors, so it cannot pull the private images on ghcr. This Sync
-# hook copies the two the platform's templates run (templates.yaml) from ghcr
+# registry mirrors, so it cannot pull the private images on
+# [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]. This Sync
+# hook copies the two the platform's templates run (templates.yaml) from there
 # into [[ .Registry ]], under platform/substrate/, as the registry's user platform
 # (the operator's Secret registry/platform-push), with crane:
 #
@@ -129,7 +130,7 @@ spec:
           image: gcr.io/go-containerregistry/crane:v0.22.1@sha256:1f968817b95790bed063f71175aa6b8ff879fa17064020415f3e18bb6e6a36e1
           args:
             - copy
-            - ghcr.io/darkshiftio/substrate/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698
+            - [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698
             - "[[ .Registry ]]/platform/substrate/counter:one-install-ce05e5d-7e86cab"
           env:
             - name: DOCKER_CONFIG
@@ -157,7 +158,7 @@ spec:
           image: gcr.io/go-containerregistry/crane:v0.22.1@sha256:1f968817b95790bed063f71175aa6b8ff879fa17064020415f3e18bb6e6a36e1
           args:
             - copy
-            - ghcr.io/darkshiftio/substrate/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481
+            - [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481
             - "[[ .Registry ]]/platform/substrate/sandbox:one-install-ce05e5d-7e86cab"
           env:
             - name: DOCKER_CONFIG

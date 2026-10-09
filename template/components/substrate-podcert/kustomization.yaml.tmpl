@@ -13,6 +13,13 @@ resources:
   - pull-secret.yaml
 [[- end ]]
   - pod-certificate-controller.yaml
+[[- if .SubstrateRegistry ]]
+# Substrate's images from [[ .SubstrateRegistry ]] (INFRARED_SUBSTRATE_REGISTRY), each
+# by the same tag and digest as on ghcr.
+images:
+  - name: ghcr.io/darkshiftio/substrate/podcertcontroller
+    newName: [[ .SubstrateRegistry ]]/podcertcontroller
+[[- end ]]
 patches:
   # Argo CD makes the namespace (CreateNamespace), before the PreSync hook that
   # runs in it.

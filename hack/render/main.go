@@ -139,6 +139,29 @@ type Data struct {
 	// empty prefix and never changes for the life of the install. Empty means
 	// postgres, the Cluster's own name, as before the field existed.
 	PostgresServerName string `json:"PostgresServerName"`
+	// SubstrateRegistry is the operator's INFRARED_SUBSTRATE_REGISTRY: the
+	// registry path Agent Substrate's images are pulled and copied from, which
+	// holds each image of scripts/substrate-images.json under its own name, by
+	// the same tag and digest, e.g.
+	// us-central1-docker.pkg.dev/darkshift-preprod/infrared/substrate. Empty
+	// means ghcr.io/darkshiftio/substrate, as before the field existed.
+	SubstrateRegistry string `json:"SubstrateRegistry"`
+	// RegistryToken is the operator's INFRARED_REGISTRY_TOKEN, the Infrared
+	// chart's registryToken: the install's pull secret (ImagePullSecret) is an
+	// access token of the Google service account GCPServiceAccount for the
+	// registry host Registry, which the chart rewrites every 30 minutes, not a
+	// lasting credential. The template carries it in the infrared Application,
+	// whose imagePullSecrets it leaves empty (the chart names the Secret
+	// itself), and copies the pull secret every 5 minutes instead of every
+	// hour. The zero value is none, as before the field existed.
+	RegistryToken RegistryToken `json:"RegistryToken"`
+}
+
+// RegistryToken is the chart's registryToken: the Google service account
+// whose access token is the pull secret, and the registry host it is for.
+type RegistryToken struct {
+	GCPServiceAccount string `json:"GCPServiceAccount"`
+	Registry          string `json:"Registry"`
 }
 
 // Copies is spec.backup's mirror and recipients: Copies.Mirror is the
@@ -400,7 +423,7 @@ func main() {
 	flag.StringVar(&d.DefaultBranch, "branch", "main", "DefaultBranch")
 	flag.StringVar(&d.TemplateVersion, "template-version", "v0.1.0", "TemplateVersion")
 	flag.StringVar(&d.InfraredVersion, "infrared-version", "v0.1.0", "InfraredVersion")
-	flag.StringVar(&d.InfraredChartRepo, "chart-repo", "ghcr.io/darkshiftio/charts", "InfraredChartRepo (no oci:// prefix)")
+	flag.StringVar(&d.InfraredChartRepo, "chart-repo", "us-central1-docker.pkg.dev/darkshift-preprod/infrared/charts", "InfraredChartRepo (no oci:// prefix)")
 	flag.StringVar(&d.InfraredChartVersion, "chart-version", "0.1.0", "InfraredChartVersion")
 	flag.StringVar(&d.InfraredNamespace, "namespace", "infrared", "InfraredNamespace")
 	flag.StringVar(&d.ImagePullSecret, "pull-secret", "", "ImagePullSecret (empty for none)")
@@ -428,6 +451,10 @@ func main() {
 	flag.Var(jsonFlag[Restore]{&d.Restore, "restore"}, "restore",
 		`Restore: {"point": "20261006T010500Z", "artifact": "20261006T010500Z.irbackup", "mirrorRun": "20261006T011700Z"} (empty: no restore)`)
 	flag.StringVar(&d.PostgresServerName, "postgres-server-name", "", "PostgresServerName: the server name Postgres archives under (empty: postgres)")
+	flag.StringVar(&d.SubstrateRegistry, "substrate-registry", "",
+		"SubstrateRegistry: the registry path Substrate's images come from (empty: ghcr.io/darkshiftio/substrate)")
+	flag.Var(jsonFlag[RegistryToken]{&d.RegistryToken, "registry-token"}, "registry-token",
+		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"} (empty: none)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -501,6 +528,8 @@ func mergeDataFile(d *Data, path string) error {
 		"registry-retention":   func() { d.RegistryRetention = explicit.RegistryRetention },
 		"restore":              func() { d.Restore = explicit.Restore },
 		"postgres-server-name": func() { d.PostgresServerName = explicit.PostgresServerName },
+		"substrate-registry":   func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
+		"registry-token":       func() { d.RegistryToken = explicit.RegistryToken },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -561,7 +590,30 @@ func validate(d Data) error {
 	if d.PostgresServerName != "" && !serverName.MatchString(d.PostgresServerName) {
 		errs = append(errs, fmt.Errorf("PostgresServerName must be 1 to 63 letters, digits, dots, underscores and hyphens, starting with a lowercase letter, got %q", d.PostgresServerName))
 	}
+	if d.SubstrateRegistry != "" && !registryPath.MatchString(d.SubstrateRegistry) {
+		errs = append(errs, fmt.Errorf("SubstrateRegistry must be a registry host and path, no scheme, tag or trailing slash, e.g. us-central1-docker.pkg.dev/acme/infrared/substrate, got %q", d.SubstrateRegistry))
+	}
+	errs = append(errs, validateRegistryToken(d.RegistryToken, d.ImagePullSecret)...)
 	return errors.Join(errs...)
+}
+
+// validateRegistryToken checks the registry token: none, or a Google service
+// account and a registry host together, with the pull secret it writes.
+func validateRegistryToken(t RegistryToken, pullSecret string) []error {
+	if t == (RegistryToken{}) {
+		return nil
+	}
+	var errs []error
+	if !gcpServiceAccount.MatchString(t.GCPServiceAccount) {
+		errs = append(errs, fmt.Errorf("RegistryToken.GCPServiceAccount must be a Google service account, <name>@<project>.iam.gserviceaccount.com, got %q", t.GCPServiceAccount))
+	}
+	if !registryHost.MatchString(t.Registry) {
+		errs = append(errs, fmt.Errorf("RegistryToken.Registry must be a registry host, no scheme or path, e.g. us-central1-docker.pkg.dev, got %q", t.Registry))
+	}
+	if pullSecret == "" {
+		errs = append(errs, errors.New("RegistryToken needs ImagePullSecret, the Secret the token is written to"))
+	}
+	return errs
 }
 
 var (
@@ -592,6 +644,12 @@ var (
 	backupPrefix = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	// secretKey is a key of a Secret's data.
 	secretKey = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
+	// registryHost is a registry's DNS name, with a port or without.
+	registryHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
+	// registryPath is a registry host and a repository path under it.
+	registryPath = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)+$`)
+	// gcpServiceAccount is a Google service account's email.
+	gcpServiceAccount = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`)
 )
 
 // The backup bucket's key, as day one reads it: from this Secret alone, and

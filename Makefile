@@ -39,6 +39,14 @@ SUBSTRATE_CAPABLE ?= false
 # PULL_SECRET: the install's image pull Secret in the infrared namespace, which
 # Substrate's namespaces copy; empty for none.
 PULL_SECRET ?=
+# SUBSTRATE_REGISTRY: where Substrate's images come from (empty: ghcr); and
+# REGISTRY_TOKEN (JSON, as INFRARED_REGISTRY_TOKEN): the pull secret is a Google
+# access token the chart rewrites every 30 minutes. E.g.
+# make render STORES=true REGISTRY=10.43.0.50:5000 SUBSTRATE_CAPABLE=true PULL_SECRET=registry-token \
+#   SUBSTRATE_REGISTRY=us-central1-docker.pkg.dev/darkshift-preprod/infrared/substrate \
+#   REGISTRY_TOKEN='{"gcpServiceAccount": "registry-reader@darkshift-preprod.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}'
+SUBSTRATE_REGISTRY ?=
+REGISTRY_TOKEN     ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -49,7 +57,8 @@ render:
 		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" \
 		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
-		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)"
+		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
+		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)'
 
 ## verify: the gate CI runs
 verify:

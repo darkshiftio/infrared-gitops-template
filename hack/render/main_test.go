@@ -652,3 +652,75 @@ func TestValidateCopiesRetentionRestore(t *testing.T) {
 		}
 	}
 }
+
+// The registry token and Substrate's registry load from the operator's Data by
+// their Go names and from their flags, and validate together: the token needs
+// a Google service account, a registry host and the pull secret it writes.
+func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "imagePullSecret": "registry-token",
+		"SubstrateRegistry": "us-central1-docker.pkg.dev/acme/infrared/substrate",
+		"RegistryToken": {"GCPServiceAccount": "registry-reader@acme-preprod.iam.gserviceaccount.com", "Registry": "us-central1-docker.pkg.dev"}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	want := RegistryToken{GCPServiceAccount: "registry-reader@acme-preprod.iam.gserviceaccount.com", Registry: "us-central1-docker.pkg.dev"}
+	if d.SubstrateRegistry != "us-central1-docker.pkg.dev/acme/infrared/substrate" || d.RegistryToken != want {
+		t.Errorf("loaded SubstrateRegistry %q, RegistryToken %+v", d.SubstrateRegistry, d.RegistryToken)
+	}
+	var tok RegistryToken
+	tf := jsonFlag[RegistryToken]{&tok, "registry-token"}
+	if err := tf.Set(`{"gcpServiceAccount": "registry-reader@acme-preprod.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}`); err != nil || tok != want {
+		t.Errorf("-registry-token loaded %+v, %v", tok, err)
+	}
+	if err := tf.Set(`{"serviceAccount": "x"}`); err == nil {
+		t.Error("-registry-token took an unknown field")
+	}
+
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "us-central1-docker.pkg.dev/acme/infrared/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for name, mutate := range map[string]func(*Data){
+		"none":               func(*Data) {},
+		"substrate registry": func(d *Data) { d.SubstrateRegistry = "us-central1-docker.pkg.dev/acme/infrared/substrate" },
+		"a registry with a port": func(d *Data) {
+			d.SubstrateRegistry = "registry.example.com:5000/substrate"
+		},
+		"token": func(d *Data) { d.ImagePullSecret, d.RegistryToken = "registry-token", want },
+	} {
+		d := base
+		mutate(&d)
+		if err := validate(d); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, mutate := range map[string]func(*Data){
+		"substrate registry with a scheme": func(d *Data) { d.SubstrateRegistry = "https://ghcr.io/acme/substrate" },
+		"substrate registry with a slash":  func(d *Data) { d.SubstrateRegistry = "ghcr.io/acme/substrate/" },
+		"substrate registry with a tag":    func(d *Data) { d.SubstrateRegistry = "ghcr.io/acme/substrate:v1" },
+		"substrate registry, a host alone": func(d *Data) { d.SubstrateRegistry = "ghcr.io" },
+		"token without a pull secret":      func(d *Data) { d.RegistryToken = want },
+		"token without a registry": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{GCPServiceAccount: want.GCPServiceAccount}
+		},
+		"token without a service account": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{Registry: want.Registry}
+		},
+		"token with a registry path": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{want.GCPServiceAccount, "us-central1-docker.pkg.dev/acme"}
+		},
+		"token for a user, not a service account": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{"someone@example.com", want.Registry}
+		},
+	} {
+		d := base
+		mutate(&d)
+		if err := validate(d); err == nil {
+			t.Errorf("%s: validated", name)
+		}
+	}
+}
