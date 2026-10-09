@@ -150,7 +150,8 @@ type Data struct {
 	// chart's registryToken: the install's pull secret (ImagePullSecret) is an
 	// access token for the registry host Registry, of the Google service
 	// account GCPServiceAccount or, on AWS, an ECR token of the cluster's role
-	// in AWSRegion (AWSRoleARN when the chart names one for IRSA), which the
+	// in AWSRegion (AWSRoleARN when the chart names one for IRSA; AWSHostNetwork
+	// when its Job reads the node's role on the node's network), which the
 	// chart rewrites every 30 minutes, not a lasting credential. The template carries it in the infrared Application,
 	// whose imagePullSecrets it leaves empty (the chart names the Secret
 	// itself), and copies the pull secret every 5 minutes instead of every
@@ -166,7 +167,10 @@ type RegistryToken struct {
 	GCPServiceAccount string `json:"GCPServiceAccount"`
 	AWSRegion         string `json:"AWSRegion,omitempty"`
 	AWSRoleARN        string `json:"AWSRoleARN,omitempty"`
-	Registry          string `json:"Registry"`
+	// AWSHostNetwork: the chart's token Job runs on the node's network, to
+	// reach an EC2 node's role where the instance metadata answers one hop.
+	AWSHostNetwork bool   `json:"AWSHostNetwork,omitempty"`
+	Registry       string `json:"Registry"`
 }
 
 // Copies is spec.backup's mirror and recipients: Copies.Mirror is the
@@ -459,7 +463,7 @@ func main() {
 	flag.StringVar(&d.SubstrateRegistry, "substrate-registry", "",
 		"SubstrateRegistry: the registry path Substrate's images come from (empty: ghcr.io/darkshiftio/substrate)")
 	flag.Var(jsonFlag[RegistryToken]{&d.RegistryToken, "registry-token"}, "registry-token",
-		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
+		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "awsHostNetwork": false (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -612,9 +616,9 @@ func validateRegistryToken(t RegistryToken, pullSecret string) []error {
 	}
 	var errs []error
 	switch {
-	case t.GCPServiceAccount != "" && (t.AWSRegion != "" || t.AWSRoleARN != ""):
-		errs = append(errs, errors.New("RegistryToken names a Google service account and an AWS region or role: one or the other"))
-	case t.AWSRegion != "" || t.AWSRoleARN != "":
+	case t.GCPServiceAccount != "" && (t.AWSRegion != "" || t.AWSRoleARN != "" || t.AWSHostNetwork):
+		errs = append(errs, errors.New("RegistryToken names a Google service account and an AWS region, role or host network: one or the other"))
+	case t.AWSRegion != "" || t.AWSRoleARN != "" || t.AWSHostNetwork:
 		if !awsRegion.MatchString(t.AWSRegion) {
 			errs = append(errs, fmt.Errorf("RegistryToken.AWSRegion must be an AWS region, e.g. us-east-1, got %q", t.AWSRegion))
 		} else if !ecrHost.MatchString(t.Registry) || !strings.HasSuffix(t.Registry, ".dkr.ecr."+t.AWSRegion+".amazonaws.com") {

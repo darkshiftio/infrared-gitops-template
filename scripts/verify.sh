@@ -291,6 +291,9 @@ yq -p json -o json '. + {"Cloud": "", "imagePullSecret": "registry-token", "infr
     "SubstrateRegistry": "'"$ecr_host"'/substrate",
     "RegistryToken": {"AWSRegion": "us-east-1", "AWSRoleARN": "arn:aws:iam::123456789012:role/infrared-registry-token", "Registry": "'"$ecr_host"'"}}' \
   "$work/substrate.json" >"$work/registry-token-aws.json"
+# The same on EC2 nodes: the node's own role, no IRSA, read on the node's network.
+yq -p json -o json '.RegistryToken = {"AWSRegion": "us-east-1", "AWSHostNetwork": true, "Registry": "'"$ecr_host"'"}' \
+  "$work/registry-token-aws.json" >"$work/registry-token-aws-ec2.json"
 
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
@@ -314,6 +317,7 @@ variants=(
   "substrate-pull demo-sl k3s - -stores -registry $zot_registry -substrate-capable -pull-secret ghcr-pull"
   "registry-token demo-rt k3s $zot_registry -data $work/registry-token.json"
   "registry-token-aws demo-ra k3s $zot_registry -data $work/registry-token-aws.json"
+  "registry-token-aws-ec2 demo-re k3s $zot_registry -data $work/registry-token-aws-ec2.json"
   "copies demo-cp k3s $zot_registry -data $work/copies.json"
   "copies-noreg demo-cn k3s - -data $work/copies-noreg.json"
   "restore demo-rs k3s $zot_registry -data $work/restore.json"
@@ -458,7 +462,7 @@ for v in "${variants[@]}"; do
   # registry token, by flag or in the -data file.
   chart_repo="$(sed -n -E 's/.*-chart-repo ([^ ]+).*/\1/p' <<<"${extra:-}")"
   sub_registry="$(sed -n -E 's/.*-substrate-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
-  token_gsa="" token_host="" token_region="" token_role=""
+  token_gsa="" token_host="" token_region="" token_role="" token_hostnet=""
   if [ -n "$data_file" ]; then
     chart_repo="$(jq -r '.infraredChartRepo // .InfraredChartRepo // ""' "$data_file")"
     sub_registry="$(jq -r '.SubstrateRegistry // ""' "$data_file")"
@@ -466,6 +470,7 @@ for v in "${variants[@]}"; do
     token_host="$(jq -r '.RegistryToken.Registry // ""' "$data_file")"
     token_region="$(jq -r '.RegistryToken.AWSRegion // ""' "$data_file")"
     token_role="$(jq -r '.RegistryToken.AWSRoleARN // ""' "$data_file")"
+    token_hostnet="$(jq -r '.RegistryToken.AWSHostNetwork // false' "$data_file")"
   fi
   [ -n "$chart_repo" ] || chart_repo=us-central1-docker.pkg.dev/darkshift-preprod/infrared/charts
   sub_reg="${sub_registry:-ghcr.io/darkshiftio/substrate}"
@@ -601,6 +606,7 @@ for v in "${variants[@]}"; do
   if [ -n "$token_region" ]; then
     aws_token="region: \"$token_region\""
     [ -n "$token_role" ] && aws_token="$aws_token, roleArn: \"$token_role\""
+    [ "$token_hostnet" = true ] && aws_token="$aws_token, hostNetwork: true"
     want="${want}registryToken: {aws: {$aws_token}, registry: \"$token_host\"}"$'\n'
   fi
   if [ -n "$zot_addr" ] || [ "$retention_app" != "{}" ]; then
