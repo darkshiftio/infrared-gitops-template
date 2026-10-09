@@ -24,10 +24,10 @@ metadata:
 spec:
   project: infrared
   sources:
-    # An OCI helm repository: no oci:// prefix. The chart is public on ghcr and
-    # components/argocd registers the repository (no credentials); the operator
-    # adds argocd/infrared-oci-charts only when an image pull secret is set.
-    # OCI charts use the bare chart version; the pin changes in PRs.
+    # An OCI helm repository: no oci:// prefix. The operator registers it with
+    # Argo CD (argocd/infrared-oci-charts), with the install's pull secret's
+    # credential for its registry when one is set. OCI charts use the bare
+    # chart version; the pin changes in PRs.
     - repoURL: [[ .InfraredChartRepo ]]
       chart: infrared
       targetRevision: [[ .InfraredChartVersion ]]
@@ -42,7 +42,19 @@ spec:
             name: [[ .ClusterName ]]
           gitops:
             templateVersion: [[ if hasPrefix "v" .TemplateVersion ]][[ .TemplateVersion ]][[ else ]][[ .TemplateVersion | quote ]][[ end ]]
-[[- if .ImagePullSecret ]]
+            # The repository above (INFRARED_CHART_REPO), so adoption keeps it.
+            chartRepository: [[ .InfraredChartRepo | quote ]]
+[[- if .RegistryToken.GCPServiceAccount ]]
+          # The registry token (INFRARED_REGISTRY_TOKEN): the chart's CronJob
+          # writes [[ .ImagePullSecret ]], an access token of this Google service
+          # account for [[ .RegistryToken.Registry ]], every 30 minutes, and
+          # names it the install's pull secret itself, so imagePullSecrets
+          # stays empty.
+          registryToken:
+            gcpServiceAccount: [[ .RegistryToken.GCPServiceAccount | quote ]]
+            registry: [[ .RegistryToken.Registry | quote ]]
+          imagePullSecrets: []
+[[- else if .ImagePullSecret ]]
           imagePullSecrets:
             - name: [[ .ImagePullSecret ]]
 [[- else ]]

@@ -43,6 +43,13 @@
 #     own in its component (the edge race of a first install)
 #   - every chart or repo a platform Application pulls from is a source of the
 #     AppProject platform, and nothing renders a LoadBalancer Service
+#   - the infrared chart's repository is InfraredChartRepo, carried as the
+#     chart's gitops.chartRepository, and the template registers none of it
+#     with Argo CD (the operator does, with the pull secret's credential)
+#   - the registry token (RegistryToken): the infrared Application carries
+#     registryToken and names no pull secret; Substrate's images all come from
+#     SubstrateRegistry by the pins' tags and digests, none from ghcr; the pull
+#     secret's copies refresh every 5 minutes, and every hour without it
 #   - nothing renders where the org's own files live (products/, product-*,
 #     products-project.yaml, values/)
 #   - with Edge "" or traefik, a platform domain, Infrared's host, a cloud and
@@ -266,6 +273,16 @@ yq -p json -o json '.Backup = {"Bucket": "'"$gcs_bucket"'", "Provider": "gcs", "
     "Prefix": "'"$backup_prefix"'", "Credentials": {"Kind": "serviceAccount"}} | .PostgresArchive.Enabled = false' "$work/copies.json" >"$work/gcs.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
   "$work/gcs.json" >"$work/gcs-restore.json"
+# The registry token: Substrate's Data on GKE (Cloud ""), the chart and
+# Substrate's images on a private Artifact Registry, and the pull secret an
+# access token of a Google service account the chart rewrites every 30 minutes
+# (the chart's registryToken), the shape of a Google install.
+ar_host=us-central1-docker.pkg.dev
+ar_repo=$ar_host/acme-preprod/infrared
+token_gsa="registry-reader@acme-preprod.iam.gserviceaccount.com"
+yq -p json -o json '. + {"Cloud": "", "imagePullSecret": "registry-token", "infraredChartRepo": "'"$ar_repo"'/charts",
+    "SubstrateRegistry": "'"$ar_repo"'/substrate",
+    "RegistryToken": {"GCPServiceAccount": "'"$token_gsa"'", "Registry": "'"$ar_host"'"}}' "$work/substrate.json" >"$work/registry-token.json"
 
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
@@ -287,6 +304,7 @@ variants=(
   "substrate-off demo-so k3s $zot_registry -data $work/substrate-off.json"
   "substrate-plain demo-ss k3s - -stores -registry $zot_registry -substrate-capable"
   "substrate-pull demo-sl k3s - -stores -registry $zot_registry -substrate-capable -pull-secret ghcr-pull"
+  "registry-token demo-rt k3s $zot_registry -data $work/registry-token.json"
   "copies demo-cp k3s $zot_registry -data $work/copies.json"
   "copies-noreg demo-cn k3s - -data $work/copies-noreg.json"
   "restore demo-rs k3s $zot_registry -data $work/restore.json"
@@ -427,6 +445,19 @@ for v in "${variants[@]}"; do
   code_index=false ci_pull=false
   if [ -n "$image_registry" ] && { [ -n "$pin_tag" ] || [ -n "$pin_digest" ]; }; then code_index=true; fi
   [ "$code_index" = true ] && [ -n "$pull_secret" ] && ci_pull=true
+  # The chart's repository, where Substrate's images come from, and the
+  # registry token, by flag or in the -data file.
+  chart_repo="$(sed -n -E 's/.*-chart-repo ([^ ]+).*/\1/p' <<<"${extra:-}")"
+  sub_registry="$(sed -n -E 's/.*-substrate-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
+  token_gsa="" token_host=""
+  if [ -n "$data_file" ]; then
+    chart_repo="$(jq -r '.infraredChartRepo // .InfraredChartRepo // ""' "$data_file")"
+    sub_registry="$(jq -r '.SubstrateRegistry // ""' "$data_file")"
+    token_gsa="$(jq -r '.RegistryToken.GCPServiceAccount // ""' "$data_file")"
+    token_host="$(jq -r '.RegistryToken.Registry // ""' "$data_file")"
+  fi
+  [ -n "$chart_repo" ] || chart_repo=us-central1-docker.pkg.dev/darkshift-preprod/infrared/charts
+  sub_reg="${sub_registry:-ghcr.io/darkshiftio/substrate}"
 
   # Leftover template syntax, only in files that came from a .tmpl (vendored
   # upstream files are copied verbatim and are none of our business).
@@ -512,7 +543,12 @@ for v in "${variants[@]}"; do
       && ok "$variant: VMSingle's data $([ "$vm_empty" = true ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
       || bad "$variant: VMSingle's storage is $vmsingle, want $want_vm, or another part of the stack asks for a claim"
   fi
-  if [ -n "$pull_secret" ]; then
+  if [ -n "$token_gsa" ]; then
+    # The chart derives its pull secret from registryToken: none named here.
+    [ "$(yq -r '.spec.sources[0].helm.valuesObject.imagePullSecrets | length' "$reg/components/infrared.yaml")" = 0 ] \
+      && ok "$variant: the infrared Application names no pull secret: the chart's registryToken is it" \
+      || bad "$variant: imagePullSecrets should be empty with the registry token"
+  elif [ -n "$pull_secret" ]; then
     [ "$(yq -r '.spec.sources[0].helm.valuesObject.imagePullSecrets[0].name' "$reg/components/infrared.yaml")" = "$pull_secret" ] \
       || bad "$variant: imagePullSecrets not rendered into the infrared Application"
   else
@@ -521,6 +557,11 @@ for v in "${variants[@]}"; do
   fi
   [ "$(yq -r '.spec.sources[0].helm.valuesObject.builds.registry' "$reg/components/infrared.yaml")" = "$registry" ] \
     || bad "$variant: infrared Application builds.registry is not \"$registry\""
+  # The chart's repository, which Argo CD pulls the chart from, carried as the
+  # chart's gitops.chartRepository so adoption keeps the operator's.
+  [ "$(yq -r '.spec.sources[0] | .repoURL + " " + .helm.valuesObject.gitops.chartRepository' "$reg/components/infrared.yaml")" = "$chart_repo $chart_repo" ] \
+    && ok "$variant: the infrared Application pulls the chart from $chart_repo and carries it" \
+    || bad "$variant: the infrared Application's chart repository or gitops.chartRepository is not $chart_repo"
   # The install's settings that Argo CD's render of the chart has to keep once
   # it adopts the release, each carried only when it is set: exactly these
   # keys, with these values. The edge and its previews only in gateway mode.
@@ -545,12 +586,13 @@ for v in "${variants[@]}"; do
     [ "$cloud" = linode ] && gitea_class=", persistence: {storageClass: linode-block-storage-retain}"
     want="${want}gitea: {enabled: true$gitea_class}"$'\n'"giteaAdmin: {existingSecret: infrared-gitea-admin}"$'\n'
   fi
+  [ -n "$token_gsa" ] && want="${want}registryToken: {gcpServiceAccount: \"$token_gsa\", registry: \"$token_host\"}"$'\n'
   if [ -n "$zot_addr" ] || [ "$retention_app" != "{}" ]; then
     want="${want}registry: $(jq -cn --arg a "$zot_addr" --argjson r "$retention_app" '{} + (if $a != "" then {address: $a} else {} end) + (if $r != {} then {retention: $r} else {} end)')"$'\n'
   fi
   want="$(yq -o json -I0 'sort_keys(..)' <<<"${want:-"{}"}")"
   got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject
-      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|copies|substrate|codeIndex|platformTokens)$"))) | sort_keys(..)' \
+      | with_entries(select(.key | test("^(installation|stores|backup|components|gitea|giteaAdmin|registry|registryToken|copies|substrate|codeIndex|platformTokens)$"))) | sort_keys(..)' \
     "$reg/components/infrared.yaml")"
   [ "$got" = "$want" ] && ok "$variant: infrared Application carries the install's settings: $got" \
     || bad "$variant: infrared Application carries $got, want $want"
@@ -1276,17 +1318,23 @@ for v in "${variants[@]}"; do
       && ok "$variant: substrate-crds holds the three CRDs and the SandboxConfig admission policy" || bad "$variant: substrate-crds holds the wrong objects"
     # Every image by digest; Substrate's own are the pins, the router's Envoy
     # and the hooks' tools are upstream's. Nothing is left to ko.
-    pins="$(jq -r '.images[].ref' "$substrate_pins" | sort -u)"
+    pins="$(jq -r '.images[].ref' "$substrate_pins" | sed "s#^ghcr.io/darkshiftio/substrate/#$sub_reg/#" | sort -u)"
     images="$(for b in "$sp" "$s" "$sa"; do
         sel "$b" '(.spec.template.spec // .spec.jobTemplate.spec.template.spec // {}) | ((.initContainers // []) + (.containers // []))[] | .image'
       done | sort -u)"
     unpinned="$(grep -vE '@sha256:[0-9a-f]{64}$' <<<"$images" || true)"
-    strays="$(grep '^ghcr.io/darkshiftio/substrate/' <<<"$images" | grep -vxF "$pins" || true)"
+    strays="$(grep -E '^(ghcr.io/darkshiftio/substrate|'"$sub_reg"')/' <<<"$images" | grep -vxF "$pins" || true)"
     worker="$(sel "$sa" 'select(.kind == "WorkerPool") | .spec.workerImage')"
     [ -z "$unpinned" ] && [ -z "$strays" ] && grep -qxF -- "$worker" <<<"$pins" \
       && [ -z "$(grep -rl 'ko://' "$out"/components/substrate* || true)" ] \
-      && ok "$variant: every Substrate image by digest, its own ($(grep -c '^ghcr.io/darkshiftio/substrate/' <<<"$images") and the workers') from scripts/substrate-images.json" \
+      && ok "$variant: every Substrate image by digest, its own ($(grep -cF "$sub_reg/" <<<"$images") and the workers') from scripts/substrate-images.json, on $sub_reg" \
       || bad "$variant: Substrate's images: unpinned '$unpinned', not the pins '$strays', workers '$worker'"
+    # From another registry, none of Substrate's images is left on ghcr.
+    if [ -n "$sub_registry" ]; then
+      [ -z "$(grep -lF 'ghcr.io/darkshiftio/substrate/' "$sp" "$s" "$sa" || true)" ] \
+        && ok "$variant: no Substrate image left on ghcr: all on $sub_registry" \
+        || bad "$variant: a Substrate image is still pulled from ghcr, not $sub_registry"
+    fi
     # Upstream's base less its GKE-only PodMonitoring.
     [ -z "$(grep -rlE '^kind: PodMonitoring|^apiVersion: monitoring.googleapis.com' "$out" "$sb" 2>/dev/null || true)" ] \
       && ok "$variant: no PodMonitoring (GKE Managed Prometheus)" || bad "$variant: a PodMonitoring is rendered"
@@ -1390,8 +1438,8 @@ for v in "${variants[@]}"; do
           && [ "$(jq -r '.actorTemplate.sandboxConfig | .sandboxClass + " " + .configName' <<<"$j")" \
               = "SANDBOX_CLASS_GVISOR $(sel "$s" 'select(.kind == "SandboxConfig" and .spec.sandboxClass == "gvisor") | .metadata.name')" ] \
           && [[ "$image" == localhost/platform/substrate/*:*@sha256:* ]] \
-          && grep -qxF -- "ghcr.io/darkshiftio/substrate/$rest" <<<"$pins" \
-          && grep -qxF -- "ghcr.io/darkshiftio/substrate/$rest $zot_addr/platform/substrate/${rest%@*}" <<<"$copies" \
+          && grep -qxF -- "$sub_reg/$rest" <<<"$pins" \
+          && grep -qxF -- "$sub_reg/$rest $zot_addr/platform/substrate/${rest%@*}" <<<"$copies" \
           || tfail="$tfail $name"
       done
       [ -z "$tfail" ] && [ -n "$copies" ] && [ "$(sel "$sa" 'select(.kind == "WorkerPool") | .metadata.name + " " + .spec.sandboxClass')" = "platform gvisor" ] \
@@ -1496,7 +1544,14 @@ for v in "${variants[@]}"; do
   projects="$out/components/appprojects/appprojects.yaml"
   allowed="$(sel "$projects" 'select(.kind == "AppProject" and .metadata.name == "platform") | .spec.sourceRepos[]')"
   registered="$(yq -N -r 'select(.kind == "Secret" and .metadata.labels["argocd.argoproj.io/secret-type"] == "repository"
-    and .stringData.enableOCI == "true") | .stringData.url' "$out/components/argocd/infrared-charts-repo.yaml" "$projects")"
+    and .stringData.enableOCI == "true") | .stringData.url' "$projects")"
+  # The operator alone registers the infrared chart's repository
+  # (argocd/infrared-oci-charts), with the pull secret's credential: a second
+  # entry for the same URL without one could be the one Argo CD reads.
+  [ -z "$(kubectl kustomize "$out/components/argocd" | yq -N -r 'select(.kind == "Secret" and .metadata.labels["argocd.argoproj.io/secret-type"] != null) | .metadata.name')" ] \
+    && [ -z "$(grep -rlF -- "url: $chart_repo" "$out" || true)" ] \
+    && ok "$variant: the template registers no repository of the infrared chart; the operator does" \
+    || bad "$variant: the template registers the infrared chart's repository, beside the operator's"
   repos="$(for f in "$reg"/components/*.yaml; do
       holds_objects "$f" || continue
       [ "$(sel "$f" '.spec.project')" = platform ] || continue
@@ -1510,6 +1565,24 @@ for v in "${variants[@]}"; do
     esac
   done
   ok "$variant: AppProject platform allows every repository its Applications use ($(wc -w <<<"$repos" | tr -d ' '))"
+
+  # The pull secret's copies follow it every hour, or every 5 minutes when it
+  # is a registry token, which the chart rewrites every 30 minutes and which
+  # is good for an hour.
+  if [ -n "$pull_secret" ]; then
+    want_refresh=1h0m0s
+    [ -n "$token_gsa" ] && want_refresh=5m0s
+    refreshes="$(for b in "$work/$variant-built"/*.yaml; do
+        sel "$b" 'select(.kind == "ExternalSecret" and .spec.target.name == "'"$pull_secret"'") | .metadata.namespace + "=" + .spec.refreshInterval'
+      done | { grep -v '^$' || true; } | sort | tr '\n' ' ')"
+    if [ -z "$refreshes" ]; then
+      ok "$variant: no copy of the pull secret"
+    elif [ -z "$(tr ' ' '\n' <<<"$refreshes" | grep -v '^$' | grep -v "=$want_refresh\$" || true)" ]; then
+      ok "$variant: the pull secret's copies refresh every $want_refresh: $refreshes"
+    else
+      bad "$variant: the pull secret's copies refresh at $refreshes, want $want_refresh"
+    fi
+  fi
 
   # No LoadBalancer: on Linode one is a NodeBalancer, billed monthly. An
   # EnvoyProxy without a Service type gets one by default.

@@ -38,7 +38,7 @@ metadata:
 spec:
   replicas: 3
   sandboxClass: gvisor
-  workerImage: ghcr.io/darkshiftio/substrate/ateom-gvisor:one-install-ce05e5d-7e86cab@sha256:e463ac66c11ade2e3e5d7c2939dddcdb8d2e27273d75e650881e084011cfd190
+  workerImage: [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]/ateom-gvisor:one-install-ce05e5d-7e86cab@sha256:e463ac66c11ade2e3e5d7c2939dddcdb8d2e27273d75e650881e084011cfd190
   template:
     nodeSelector:
       ate.dev/substrate-version: "one-install-ce05e5d-7e86cab"
