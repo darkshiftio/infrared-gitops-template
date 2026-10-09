@@ -54,6 +54,22 @@ spec:
             gcpServiceAccount: [[ .RegistryToken.GCPServiceAccount | quote ]]
             registry: [[ .RegistryToken.Registry | quote ]]
           imagePullSecrets: []
+[[- else if .RegistryToken.Registry ]]
+[[- /* AWS: read only by an operator that knows the AWS fields, since an older
+     one sets Registry only with GCPServiceAccount. */]]
+          # The registry token (INFRARED_REGISTRY_TOKEN): the chart's CronJob
+          # writes [[ .ImagePullSecret ]], an ECR token for [[ .RegistryToken.Registry ]]
+          # from the cluster's AWS role[[ if .RegistryToken.AWSRoleARN ]] ([[ .RegistryToken.AWSRoleARN ]])[[ end ]], every
+          # 30 minutes, and names it the install's pull secret itself, so
+          # imagePullSecrets stays empty.
+          registryToken:
+            aws:
+              region: [[ .RegistryToken.AWSRegion | quote ]]
+[[- if .RegistryToken.AWSRoleARN ]]
+              roleArn: [[ .RegistryToken.AWSRoleARN | quote ]]
+[[- end ]]
+            registry: [[ .RegistryToken.Registry | quote ]]
+          imagePullSecrets: []
 [[- else if .ImagePullSecret ]]
           imagePullSecrets:
             - name: [[ .ImagePullSecret ]]

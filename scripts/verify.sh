@@ -283,6 +283,14 @@ token_gsa="registry-reader@acme-preprod.iam.gserviceaccount.com"
 yq -p json -o json '. + {"Cloud": "", "imagePullSecret": "registry-token", "infraredChartRepo": "'"$ar_repo"'/charts",
     "SubstrateRegistry": "'"$ar_repo"'/substrate",
     "RegistryToken": {"GCPServiceAccount": "'"$token_gsa"'", "Registry": "'"$ar_host"'"}}' "$work/substrate.json" >"$work/registry-token.json"
+# The registry token on AWS: the chart and Substrate's images in ECR, and the
+# pull secret an ECR token of the cluster's role (an IRSA role here) the chart
+# rewrites every 30 minutes, the shape of an install on EKS or EC2.
+ecr_host=123456789012.dkr.ecr.us-east-1.amazonaws.com
+yq -p json -o json '. + {"Cloud": "", "imagePullSecret": "registry-token", "infraredChartRepo": "'"$ecr_host"'/charts",
+    "SubstrateRegistry": "'"$ecr_host"'/substrate",
+    "RegistryToken": {"AWSRegion": "us-east-1", "AWSRoleARN": "arn:aws:iam::123456789012:role/infrared-registry-token", "Registry": "'"$ecr_host"'"}}' \
+  "$work/substrate.json" >"$work/registry-token-aws.json"
 
 # <variant> <cluster> <flavor> <build registry> [extra render flags]
 ecr_registry=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
@@ -305,6 +313,7 @@ variants=(
   "substrate-plain demo-ss k3s - -stores -registry $zot_registry -substrate-capable"
   "substrate-pull demo-sl k3s - -stores -registry $zot_registry -substrate-capable -pull-secret ghcr-pull"
   "registry-token demo-rt k3s $zot_registry -data $work/registry-token.json"
+  "registry-token-aws demo-ra k3s $zot_registry -data $work/registry-token-aws.json"
   "copies demo-cp k3s $zot_registry -data $work/copies.json"
   "copies-noreg demo-cn k3s - -data $work/copies-noreg.json"
   "restore demo-rs k3s $zot_registry -data $work/restore.json"
@@ -449,12 +458,14 @@ for v in "${variants[@]}"; do
   # registry token, by flag or in the -data file.
   chart_repo="$(sed -n -E 's/.*-chart-repo ([^ ]+).*/\1/p' <<<"${extra:-}")"
   sub_registry="$(sed -n -E 's/.*-substrate-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
-  token_gsa="" token_host=""
+  token_gsa="" token_host="" token_region="" token_role=""
   if [ -n "$data_file" ]; then
     chart_repo="$(jq -r '.infraredChartRepo // .InfraredChartRepo // ""' "$data_file")"
     sub_registry="$(jq -r '.SubstrateRegistry // ""' "$data_file")"
     token_gsa="$(jq -r '.RegistryToken.GCPServiceAccount // ""' "$data_file")"
     token_host="$(jq -r '.RegistryToken.Registry // ""' "$data_file")"
+    token_region="$(jq -r '.RegistryToken.AWSRegion // ""' "$data_file")"
+    token_role="$(jq -r '.RegistryToken.AWSRoleARN // ""' "$data_file")"
   fi
   [ -n "$chart_repo" ] || chart_repo=us-central1-docker.pkg.dev/darkshift-preprod/infrared/charts
   sub_reg="${sub_registry:-ghcr.io/darkshiftio/substrate}"
@@ -543,7 +554,7 @@ for v in "${variants[@]}"; do
       && ok "$variant: VMSingle's data $([ "$vm_empty" = true ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
       || bad "$variant: VMSingle's storage is $vmsingle, want $want_vm, or another part of the stack asks for a claim"
   fi
-  if [ -n "$token_gsa" ]; then
+  if [ -n "$token_host" ]; then
     # The chart derives its pull secret from registryToken: none named here.
     [ "$(yq -r '.spec.sources[0].helm.valuesObject.imagePullSecrets | length' "$reg/components/infrared.yaml")" = 0 ] \
       && ok "$variant: the infrared Application names no pull secret: the chart's registryToken is it" \
@@ -587,6 +598,11 @@ for v in "${variants[@]}"; do
     want="${want}gitea: {enabled: true$gitea_class}"$'\n'"giteaAdmin: {existingSecret: infrared-gitea-admin}"$'\n'
   fi
   [ -n "$token_gsa" ] && want="${want}registryToken: {gcpServiceAccount: \"$token_gsa\", registry: \"$token_host\"}"$'\n'
+  if [ -n "$token_region" ]; then
+    aws_token="region: \"$token_region\""
+    [ -n "$token_role" ] && aws_token="$aws_token, roleArn: \"$token_role\""
+    want="${want}registryToken: {aws: {$aws_token}, registry: \"$token_host\"}"$'\n'
+  fi
   if [ -n "$zot_addr" ] || [ "$retention_app" != "{}" ]; then
     want="${want}registry: $(jq -cn --arg a "$zot_addr" --argjson r "$retention_app" '{} + (if $a != "" then {address: $a} else {} end) + (if $r != {} then {retention: $r} else {} end)')"$'\n'
   fi
@@ -1571,7 +1587,7 @@ for v in "${variants[@]}"; do
   # is good for an hour.
   if [ -n "$pull_secret" ]; then
     want_refresh=1h0m0s
-    [ -n "$token_gsa" ] && want_refresh=5m0s
+    [ -n "$token_host" ] && want_refresh=5m0s
     refreshes="$(for b in "$work/$variant-built"/*.yaml; do
         sel "$b" 'select(.kind == "ExternalSecret" and .spec.target.name == "'"$pull_secret"'") | .metadata.namespace + "=" + .spec.refreshInterval'
       done | { grep -v '^$' || true; } | sort | tr '\n' ' ')"

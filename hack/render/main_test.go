@@ -669,6 +669,7 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := RegistryToken{GCPServiceAccount: "registry-reader@acme-preprod.iam.gserviceaccount.com", Registry: "us-central1-docker.pkg.dev"}
+	awsWant := RegistryToken{AWSRegion: "us-east-1", Registry: "123456789012.dkr.ecr.us-east-1.amazonaws.com"}
 	if d.SubstrateRegistry != "us-central1-docker.pkg.dev/acme/infrared/substrate" || d.RegistryToken != want {
 		t.Errorf("loaded SubstrateRegistry %q, RegistryToken %+v", d.SubstrateRegistry, d.RegistryToken)
 	}
@@ -676,6 +677,10 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 	tf := jsonFlag[RegistryToken]{&tok, "registry-token"}
 	if err := tf.Set(`{"gcpServiceAccount": "registry-reader@acme-preprod.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}`); err != nil || tok != want {
 		t.Errorf("-registry-token loaded %+v, %v", tok, err)
+	}
+	var awsTok RegistryToken
+	if err := (jsonFlag[RegistryToken]{&awsTok, "registry-token"}).Set(`{"awsRegion": "us-east-1", "registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com"}`); err != nil || awsTok != awsWant {
+		t.Errorf("-registry-token loaded the AWS form as %+v, %v", awsTok, err)
 	}
 	if err := tf.Set(`{"serviceAccount": "x"}`); err == nil {
 		t.Error("-registry-token took an unknown field")
@@ -690,7 +695,12 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 		"a registry with a port": func(d *Data) {
 			d.SubstrateRegistry = "registry.example.com:5000/substrate"
 		},
-		"token": func(d *Data) { d.ImagePullSecret, d.RegistryToken = "registry-token", want },
+		"token":     func(d *Data) { d.ImagePullSecret, d.RegistryToken = "registry-token", want },
+		"aws token": func(d *Data) { d.ImagePullSecret, d.RegistryToken = "registry-token", awsWant },
+		"aws token with an IRSA role": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", awsWant
+			d.RegistryToken.AWSRoleARN = "arn:aws:iam::123456789012:role/infrared-registry-token"
+		},
 	} {
 		d := base
 		mutate(&d)
@@ -711,10 +721,28 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{Registry: want.Registry}
 		},
 		"token with a registry path": func(d *Data) {
-			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{want.GCPServiceAccount, "us-central1-docker.pkg.dev/acme"}
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{GCPServiceAccount: want.GCPServiceAccount, Registry: "us-central1-docker.pkg.dev/acme"}
 		},
+		"aws token with a Google service account too": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", awsWant
+			d.RegistryToken.GCPServiceAccount = want.GCPServiceAccount
+		},
+		"aws token for Artifact Registry": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{AWSRegion: "us-east-1", Registry: want.Registry}
+		},
+		"aws token for ECR in another region": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{AWSRegion: "us-west-2", Registry: awsWant.Registry}
+		},
+		"aws token without a region": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{AWSRoleARN: "arn:aws:iam::123456789012:role/r", Registry: awsWant.Registry}
+		},
+		"aws token with a user, not a role": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", awsWant
+			d.RegistryToken.AWSRoleARN = "arn:aws:iam::123456789012:user/someone"
+		},
+		"aws token without a pull secret": func(d *Data) { d.RegistryToken = awsWant },
 		"token for a user, not a service account": func(d *Data) {
-			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{"someone@example.com", want.Registry}
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{GCPServiceAccount: "someone@example.com", Registry: want.Registry}
 		},
 	} {
 		d := base
