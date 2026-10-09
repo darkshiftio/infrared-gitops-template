@@ -157,6 +157,24 @@ type Data struct {
 	// itself), and copies the pull secret every 5 minutes instead of every
 	// hour. The zero value is none, as before the field existed.
 	RegistryToken RegistryToken `json:"RegistryToken"`
+	// CloudIdentity is the operator's INFRARED_CLOUD_IDENTITY, the Infrared
+	// chart's cloudIdentity: what the chart binds the ServiceAccount
+	// infrared-cloud to, the one identity Infrared reaches an org's cloud
+	// account with (ADR 0033). The template carries it in the infrared
+	// Application, so Argo CD's render of the chart keeps it. Nil is none, as
+	// before the field existed, and is left out of the data.
+	CloudIdentity *CloudIdentity `json:"CloudIdentity,omitempty"`
+}
+
+// CloudIdentity is the chart's cloudIdentity: a Google service account bound
+// by Workload Identity, and at most one way to an AWS principal: an IRSA role,
+// the node's role on the node's network, or a projected token for
+// AssumeRoleWithWebIdentity.
+type CloudIdentity struct {
+	GCPServiceAccount string `json:"GCPServiceAccount,omitempty"`
+	AWSRoleARN        string `json:"AWSRoleARN,omitempty"`
+	AWSHostNetwork    bool   `json:"AWSHostNetwork,omitempty"`
+	AWSWebIdentity    bool   `json:"AWSWebIdentity,omitempty"`
 }
 
 // RegistryToken is the chart's registryToken: the Google service account
@@ -464,6 +482,8 @@ func main() {
 		"SubstrateRegistry: the registry path Substrate's images come from (empty: ghcr.io/darkshiftio/substrate)")
 	flag.Var(jsonFlag[RegistryToken]{&d.RegistryToken, "registry-token"}, "registry-token",
 		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "awsHostNetwork": false (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
+	flag.Var(jsonFlag[*CloudIdentity]{&d.CloudIdentity, "cloud-identity"}, "cloud-identity",
+		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -539,6 +559,7 @@ func mergeDataFile(d *Data, path string) error {
 		"postgres-server-name": func() { d.PostgresServerName = explicit.PostgresServerName },
 		"substrate-registry":   func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
 		"registry-token":       func() { d.RegistryToken = explicit.RegistryToken },
+		"cloud-identity":       func() { d.CloudIdentity = explicit.CloudIdentity },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -603,7 +624,36 @@ func validate(d Data) error {
 		errs = append(errs, fmt.Errorf("SubstrateRegistry must be a registry host and path, no scheme, tag or trailing slash, e.g. us-central1-docker.pkg.dev/acme/infrared/substrate, got %q", d.SubstrateRegistry))
 	}
 	errs = append(errs, validateRegistryToken(d.RegistryToken, d.ImagePullSecret)...)
+	errs = append(errs, validateCloudIdentity(d.CloudIdentity)...)
 	return errors.Join(errs...)
+}
+
+// validateCloudIdentity checks the cloud identity: none, or a Google service
+// account, at most one AWS mode, or both, and nothing empty.
+func validateCloudIdentity(c *CloudIdentity) []error {
+	if c == nil {
+		return nil
+	}
+	var errs []error
+	if *c == (CloudIdentity{}) {
+		errs = append(errs, errors.New("CloudIdentity names no Google service account and no AWS mode: leave it out instead"))
+	}
+	if c.GCPServiceAccount != "" && !gcpServiceAccount.MatchString(c.GCPServiceAccount) {
+		errs = append(errs, fmt.Errorf("CloudIdentity.GCPServiceAccount must be a Google service account, <name>@<project>.iam.gserviceaccount.com, got %q", c.GCPServiceAccount))
+	}
+	if c.AWSRoleARN != "" && !awsRoleARN.MatchString(c.AWSRoleARN) {
+		errs = append(errs, fmt.Errorf("CloudIdentity.AWSRoleARN must be an IAM role, arn:aws:iam::<account>:role/<name>, got %q", c.AWSRoleARN))
+	}
+	modes := 0
+	for _, on := range []bool{c.AWSRoleARN != "", c.AWSHostNetwork, c.AWSWebIdentity} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		errs = append(errs, errors.New("CloudIdentity names more than one AWS mode (AWSRoleARN, AWSHostNetwork, AWSWebIdentity): one at most"))
+	}
+	return errs
 }
 
 // validateRegistryToken checks the registry token: none, or either a Google

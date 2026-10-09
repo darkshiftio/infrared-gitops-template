@@ -1654,7 +1654,10 @@ for v in "traefik - -edge traefik" \
     "archive-alone $infrared_app -postgres-archive {\"enabled\":true,\"retention\":\"14d\"}" \
     "retention-alone $infrared_app -registry-retention {\"keepNewest\":20,\"gcDelay\":\"30m\"}" \
     "server-name-alone - -postgres-server-name $server_name" \
-    "code-index-alone - -images $ci_images"; do
+    "code-index-alone - -images $ci_images" \
+    "cloud-identity-gcp-alone $infrared_app -cloud-identity {\"gcpServiceAccount\":\"infrared-cloud@acme-preprod.iam.gserviceaccount.com\",\"awsWebIdentity\":true}" \
+    "cloud-identity-aws-alone $infrared_app -cloud-identity {\"awsRoleArn\":\"arn:aws:iam::123456789012:role/infrared-cloud\"}" \
+    "cloud-identity-ec2-alone $infrared_app -cloud-identity {\"awsHostNetwork\":true}"; do
   read -r variant changes extra <<<"$v"
   [ "$changes" = - ] && changes=""
   changes="${changes//,/ }"
@@ -1675,6 +1678,23 @@ done
     = '[{"enabled":true,"persistence":{"storageClass":"linode-block-storage-retain"}},{"existingSecret":"infrared-gitea-admin"}]' ] \
   && ok "gitea-alone: the infrared Application turns Gitea on, on a Linode volume, with the install's admin Secret" \
   || bad "gitea-alone: the infrared Application's gitea values are wrong"
+
+for v in 'cloud-identity-gcp-alone {"gcpServiceAccount":"infrared-cloud@acme-preprod.iam.gserviceaccount.com","aws":{"webIdentity":true}}' \
+    'cloud-identity-aws-alone {"aws":{"roleARN":"arn:aws:iam::123456789012:role/infrared-cloud"}}' \
+    'cloud-identity-ec2-alone {"aws":{"hostNetwork":true}}'; do
+  read -r variant want <<<"$v"
+  got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.cloudIdentity' "$work/$variant/$infrared_app")"
+  [ "$got" = "$want" ] \
+    && ok "$variant: the infrared Application carries cloudIdentity $want, so adoption keeps it" \
+    || bad "$variant: the infrared Application's cloudIdentity is $got, want $want"
+done
+for bad_identity in '{}' '{"awsRoleArn":"arn:aws:iam::123456789012:role/x","awsWebIdentity":true}' '{"gcpServiceAccount":"nobody@example.com"}'; do
+  if "$work/render" -out "$work/cloud-identity-refused" -cluster demo -flavor k3s -build-registry "" -cloud-identity "$bad_identity" >/dev/null 2>&1; then
+    bad "cloud identity $bad_identity: rendered, want a refusal"
+  else
+    ok "cloud identity $bad_identity: refused"
+  fi
+done
 
 [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.registry' "$work/registry-alone/$infrared_app")" = "{\"address\":\"$zot_registry\"}" ] \
   && ok "registry-alone: the infrared Application carries the registry's address without the stores" \
