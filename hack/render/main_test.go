@@ -767,3 +767,27 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateCloudIdentity(t *testing.T) {
+	gsa := "infrared-cloud@acme-preprod.iam.gserviceaccount.com"
+	role := "arn:aws:iam::123456789012:role/infrared-cloud"
+	for _, tc := range []struct {
+		name string
+		c    *CloudIdentity
+		ok   bool
+	}{
+		{"none", nil, true},
+		{"google", &CloudIdentity{GCPServiceAccount: gsa}, true},
+		{"google and web identity", &CloudIdentity{GCPServiceAccount: gsa, AWSWebIdentity: true}, true},
+		{"irsa", &CloudIdentity{AWSRoleARN: role}, true},
+		{"host network", &CloudIdentity{AWSHostNetwork: true}, true},
+		{"empty", &CloudIdentity{}, false},
+		{"two aws modes", &CloudIdentity{AWSRoleARN: role, AWSHostNetwork: true}, false},
+		{"bad google account", &CloudIdentity{GCPServiceAccount: "nobody@example.com"}, false},
+		{"bad role", &CloudIdentity{AWSRoleARN: "arn:aws:iam::1:user/x"}, false},
+	} {
+		if errs := validateCloudIdentity(tc.c); (len(errs) == 0) != tc.ok {
+			t.Errorf("%s: errors %v, want ok=%v", tc.name, errs, tc.ok)
+		}
+	}
+}

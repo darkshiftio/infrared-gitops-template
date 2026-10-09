@@ -81,6 +81,25 @@ spec:
 [[- else ]]
           imagePullSecrets: []
 [[- end ]]
+[[- with .CloudIdentity ]]
+          # Infrared's cloud identity (INFRARED_CLOUD_IDENTITY): the chart binds
+          # the ServiceAccount infrared-cloud to it, the one identity that
+          # reaches an org's cloud accounts (ADR 0033), so adoption keeps it.
+          cloudIdentity:
+[[- if .GCPServiceAccount ]]
+            gcpServiceAccount: [[ .GCPServiceAccount | quote ]]
+[[- end ]]
+[[- if .AWSRoleARN ]]
+            aws:
+              roleARN: [[ .AWSRoleARN | quote ]]
+[[- else if .AWSHostNetwork ]]
+            aws:
+              hostNetwork: true
+[[- else if .AWSWebIdentity ]]
+            aws:
+              webIdentity: true
+[[- end ]]
+[[- end ]]
 [[- if .ImageRegistry ]]
           # Infrared's own images as the install pinned them (the operator's
           # INFRARED_IMAGE_REGISTRY and INFRARED_IMAGES), so adoption keeps every
