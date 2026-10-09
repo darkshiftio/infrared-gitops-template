@@ -177,7 +177,7 @@ set, so a cluster without it renders the same file as before:
 | `.Images` `code-index`, with `.ImageRegistry` | `codeIndex: {enabled: true, image: {tag, digest}}`, and `platformTokens.existingSecret: infrared-platform-tokens` (see "The code index") |
 | `.InfraredChartRepo`, always | `gitops.chartRepository` |
 | `.RegistryToken` | `registryToken: {gcpServiceAccount, registry}`, or on AWS `registryToken: {aws: {region, roleArn}, registry}` (`roleArn` only when set), and `imagePullSecrets: []` in place of `.ImagePullSecret`, which the chart derives from the token |
-| `.CloudIdentity` | `cloudIdentity: {gcpServiceAccount, aws: {roleARN | hostNetwork: true | webIdentity: true}}`, each part only when set, and nothing without `.CloudIdentity` |
+| `.CloudIdentity` | `cloudIdentity: {gcpServiceAccount, aws: {roleARN}}`, or `aws: {hostNetwork: true}` or `aws: {webIdentity: true}` instead of `roleARN`; each part only when set, and nothing without `.CloudIdentity` |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
