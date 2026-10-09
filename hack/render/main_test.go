@@ -682,6 +682,10 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 	if err := (jsonFlag[RegistryToken]{&awsTok, "registry-token"}).Set(`{"awsRegion": "us-east-1", "registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com"}`); err != nil || awsTok != awsWant {
 		t.Errorf("-registry-token loaded the AWS form as %+v, %v", awsTok, err)
 	}
+	var ec2Tok RegistryToken
+	if err := (jsonFlag[RegistryToken]{&ec2Tok, "registry-token"}).Set(`{"awsRegion": "us-east-1", "awsHostNetwork": true, "registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com"}`); err != nil || !ec2Tok.AWSHostNetwork || ec2Tok.AWSRegion != "us-east-1" {
+		t.Errorf("-registry-token loaded the EC2 form as %+v, %v", ec2Tok, err)
+	}
 	if err := tf.Set(`{"serviceAccount": "x"}`); err == nil {
 		t.Error("-registry-token took an unknown field")
 	}
@@ -700,6 +704,10 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 		"aws token with an IRSA role": func(d *Data) {
 			d.ImagePullSecret, d.RegistryToken = "registry-token", awsWant
 			d.RegistryToken.AWSRoleARN = "arn:aws:iam::123456789012:role/infrared-registry-token"
+		},
+		"aws token on the node's network": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", awsWant
+			d.RegistryToken.AWSHostNetwork = true
 		},
 	} {
 		d := base
@@ -741,6 +749,13 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 			d.RegistryToken.AWSRoleARN = "arn:aws:iam::123456789012:user/someone"
 		},
 		"aws token without a pull secret": func(d *Data) { d.RegistryToken = awsWant },
+		"host network without a region": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{AWSHostNetwork: true, Registry: awsWant.Registry}
+		},
+		"Google token with host network": func(d *Data) {
+			d.ImagePullSecret, d.RegistryToken = "registry-token", want
+			d.RegistryToken.AWSHostNetwork = true
+		},
 		"token for a user, not a service account": func(d *Data) {
 			d.ImagePullSecret, d.RegistryToken = "registry-token", RegistryToken{GCPServiceAccount: "someone@example.com", Registry: want.Registry}
 		},

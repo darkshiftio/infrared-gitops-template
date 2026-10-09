@@ -68,6 +68,11 @@ spec:
 [[- if .RegistryToken.AWSRoleARN ]]
               roleArn: [[ .RegistryToken.AWSRoleARN | quote ]]
 [[- end ]]
+[[- if .RegistryToken.AWSHostNetwork ]]
+              # The token Job on the node's network: the node's instance
+              # metadata, and so its role, answers one hop only.
+              hostNetwork: true
+[[- end ]]
             registry: [[ .RegistryToken.Registry | quote ]]
           imagePullSecrets: []
 [[- else if .ImagePullSecret ]]
