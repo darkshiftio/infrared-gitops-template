@@ -250,6 +250,11 @@ type Restore struct {
 type ImageRef struct {
 	Tag    string `json:"Tag"`
 	Digest string `json:"Digest"`
+	// Default is true when the pin is the chart version's own default
+	// (INFRARED_IMAGES "default"): handed only so a component that needs it
+	// runs, never written into the infrared Application, so a chart upgrade
+	// moves it with the chart.
+	Default bool `json:"Default,omitempty"`
 }
 
 // BackupTarget is a bucket outside the cluster: Backup.Bucket, .Provider

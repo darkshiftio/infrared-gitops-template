@@ -1955,6 +1955,23 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
   done
 done
 
+# --- A code index pin that is the chart's own default -----------------------------
+# The chart marks a pin equal to its own default "default": true. The code index
+# still runs at it, but the infrared Application does not carry it, so a chart
+# upgrade moves the code index with the chart (drift row 53).
+ci_default="{\"code-index\":{\"tag\":\"$ci_tag\",\"digest\":\"$ci_digest\",\"default\":true}}"
+cluster="$(render_again code-index-pull "$work/code-index-default" -images "$ci_default")"
+changed="$({ diff -rq "$work/code-index-pull" "$work/code-index-default" || true; } \
+  | sed -E "s#^Files $work/code-index-pull/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+ci_app="$work/code-index-default/registry/clusters/$cluster/components/infrared.yaml"
+if [ "$changed" = "registry/clusters/$cluster/components/infrared.yaml" ] \
+    && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.codeIndex | [.enabled, .image]' "$ci_app")" = '[true,null]' ] \
+    && grep -qF "$ci_digest" "$work/code-index-default/components/code-index/code-index.yaml"; then
+  ok "a default code index pin: the code index runs at it, the infrared Application leaves it out"
+else
+  bad "a default code index pin: changed '$changed'; want only the infrared Application, codeIndex [true,null] and the image still run"
+fi
+
 # --- Substrate's test actors are a setting ----------------------------------------
 # substrate-test-actors in Disabled, on the one install's shape: only the files
 # that name the test actors change. Their own two hold no objects, the

@@ -288,7 +288,7 @@ spec:
           # adoption keeps it on only with this.
           codeIndex:
             enabled: true
-[[- if $pin ]]
+[[- if and $pin (not $ci.Default) ]]
             image:
               tag: [[ $ci.Tag | quote ]]
               digest: [[ $ci.Digest | quote ]]
