@@ -9,7 +9,7 @@
 # stores. Wave 18, after the Postgres (17) that holds its filer metadata.
 #
 # Across the nodes: three masters (Raft), a volume server and its data on each
-# node's own disk, two filers and two S3 gateways, each on a node of its own.
+# node's own disk ([[ if eq .Cloud "gcp" ]]on Google Cloud a persistent disk that follows it[[ else ]]hostPath[[ end ]]), two filers and two S3 gateways, each on a node of its own.
 # Every file is written to two volume servers (replication 001), so with
 # SeaweedFS stopped on any one node every object still reads; the masters copy
 # what a lost node held back to two nodes (volume.fix.replication). The data is
@@ -34,6 +34,8 @@
 #
 # No resources finalizer: removing this Application leaves SeaweedFS running,
 # and its data stays on the nodes' disks either way.
+[[- /* Each volume server's persistent disk on Google Cloud (Cloud "gcp"): the registry's images, the snapshots' bundles and the backups' copies. */ -]]
+[[- $seaweedfsVolumeSize := "20Gi" ]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -71,9 +73,22 @@ spec:
             tag: "4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d"
           master:
             replicas: 3
+[[- if eq .Cloud "gcp" ]]
+            # On Google Cloud every server's data is a persistent disk of the
+            # cluster's default class, which follows its pod to whichever node
+            # it lands on: replacing the nodes (a resize, GKE's own upgrades)
+            # takes nothing with it. Elsewhere the data stays on each node's own
+            # disk (hostPath), where a replaced node's copies are remade from
+            # the other servers (volume.fix.replication, below).
+            data:
+              type: persistentVolumeClaim
+              size: 2Gi
+              storageClass: ""
+[[- else ]]
             data:
               type: hostPath
               hostPathPrefix: /var/lib/seaweedfs
+[[- end ]]
             logs:
               type: ""
             # The leader copies under-replicated volumes back to two servers,
@@ -99,9 +114,21 @@ spec:
             replicas: 3
             dataDirs:
               - name: data
+[[- if eq .Cloud "gcp" ]]
+                type: persistentVolumeClaim
+                size: [[ $seaweedfsVolumeSize ]]
+                storageClass: ""
+[[- else ]]
                 type: hostPath
                 hostPathPrefix: /var/lib/seaweedfs
+[[- end ]]
                 maxVolumes: 0
+[[- if eq .Cloud "gcp" ]]
+            # The chart's resize Job runs an unpinned image; a disk is grown by
+            # hand (troubleshooting runbook) rather than on a size change here.
+            resizeHook:
+              enabled: false
+[[- end ]]
             # Read-only below 10% free, well before the kubelet evicts pods.
             minFreeSpacePercent: 10
             resources:

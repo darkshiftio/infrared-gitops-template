@@ -273,6 +273,9 @@ yq -p json -o json '.Backup = {"Bucket": "'"$gcs_bucket"'", "Provider": "gcs", "
     "Prefix": "'"$backup_prefix"'", "Credentials": {"Kind": "serviceAccount"}} | .PostgresArchive.Enabled = false' "$work/copies.json" >"$work/gcs.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
   "$work/gcs.json" >"$work/gcs-restore.json"
+# The same on GKE's own nodes (Cloud gcp, from their gce:// providerIDs): SeaweedFS's
+# data on persistent disks of the default class instead of the nodes' disks.
+yq -p json -o json '.Cloud = "gcp"' "$work/gcs.json" >"$work/gcs-gke.json"
 # The registry token: Substrate's Data on GKE (Cloud ""), the chart and
 # Substrate's images on a private Artifact Registry, and the pull secret an
 # access token of a Google service account the chart rewrites every 30 minutes
@@ -324,6 +327,7 @@ variants=(
   "restore-plain demo-rr k3s $zot_registry -data $work/restore-plain.json"
   "gcs demo-gc k3s $zot_registry -data $work/gcs.json"
   "gcs-restore demo-gr k3s $zot_registry -data $work/gcs-restore.json"
+  "gcs-gke demo-gk k3s $zot_registry -data $work/gcs-gke.json"
   "code-index demo-ci k3s $zot_registry -data $work/code-index.json"
   "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
   "code-index-pull demo-cq k3s - -image-registry ghcr.io/demo-org -pull-secret ghcr-pull -images $ci_images"
@@ -929,10 +933,16 @@ for v in "${variants[@]}"; do
       && sel "$f" "$v | .image.tag" | grep -qE '^4\.48@sha256:[0-9a-f]{64}$' \
       && [ "$(sel "$f" "$v | .global.seaweedfs.enableReplication")/$(sel "$f" "$v | .global.seaweedfs.replicationPlacement")" = true/001 ] \
       && [ "$(sel "$f" "$v | (.master.replicas, .volume.replicas, .filer.replicas, .s3.replicas) | tostring" | tr '\n' ' ')" = "3 3 2 2 " ] \
-      && [ "$(sel "$f" "$v | (.master.data.type, .volume.dataDirs[].type, .filer.data.type) " | tr '\n' ' ')" = "hostPath hostPath emptyDir " ] \
+      && { if [ "$cloud" = gcp ]; then
+             [ "$(sel "$f" "$v | (.master.data.type, .volume.dataDirs[].type, .filer.data.type) " | tr '\n' ' ')" = "persistentVolumeClaim persistentVolumeClaim emptyDir " ] \
+               && [ "$(sel "$f" "$v | (.master.data.size, .volume.dataDirs[0].size, .volume.resizeHook.enabled) | tostring" | tr '\n' ' ')" = "2Gi 20Gi false " ] \
+               && [ -z "$(sel "$f" "$v | (.master.data.hostPathPrefix, .volume.dataDirs[0].hostPathPrefix) // \"\"" | tr -d '\n')" ]
+           else
+             [ "$(sel "$f" "$v | (.master.data.type, .volume.dataDirs[].type, .filer.data.type) " | tr '\n' ' ')" = "hostPath hostPath emptyDir " ]
+           fi; } \
       && grep -q 'volume.fix.replication -apply' <<<"$(sel "$f" "$v | .master.config")" \
       && [ "$(sel "$f" "$v | .s3.affinity" | yq -r '.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey')" = kubernetes.io/hostname ] \
-      && ok "$variant: SeaweedFS 4.48: 3 masters, 3 volume servers on the nodes' disks, 2 filers, 2 S3 gateways, every file on two servers" \
+      && ok "$variant: SeaweedFS 4.48: 3 masters, 3 volume servers on $([ "$cloud" = gcp ] && echo "persistent disks" || echo "the nodes' disks"), 2 filers, 2 S3 gateways, every file on two servers" \
       || bad "$variant: SeaweedFS is not spread over the nodes with every file on two of them"
     [ "$(sel "$f" "$v | .filer.extraEnvironmentVars | .WEED_LEVELDB2_ENABLED + \" \" + .WEED_POSTGRES2_ENABLED + \" \" + .WEED_POSTGRES2_HOSTNAME + \" \" + .WEED_POSTGRES2_DATABASE")" \
         = "false true postgres-rw.stores.svc seaweedfs" ] \

@@ -148,7 +148,7 @@ func TestValidateNewFields(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*Data){
 		"edge":                func(d *Data) { d.Edge = "Gateway" },
-		"cloud":               func(d *Data) { d.Cloud = "gcp" },
+		"cloud":               func(d *Data) { d.Cloud = "azure" },
 		"domain with scheme":  func(d *Data) { d.PlatformDomain = "https://preprod.example.com" },
 		"wildcard domain":     func(d *Data) { d.PlatformDomain = "*.preprod.example.com" },
 		"host with a port":    func(d *Data) { d.InfraredHost = "infrared.example.com:8443" },
