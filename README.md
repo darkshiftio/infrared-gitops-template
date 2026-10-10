@@ -380,7 +380,7 @@ it renders to a comment only otherwise.
 | `envoy-gateway` | Envoy Gateway's CRDs and controller. The Gateway API CRDs are the cluster's (k3s ships them) and are never installed here. |
 | `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. |
 | `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. |
-| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect` and HTTPRoute `.InfraredNamespace`/`infrared`. In waves: the token's copy (-5), the issuer (-4), the certificate (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. |
+| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect`, HTTPRoute `edge-name` (with `.PlatformDomain`) and HTTPRoute `.InfraredNamespace`/`infrared`. Envoy's Service is named `edge`. In waves: the token's copy (-5), the issuer (-4), the certificate (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. |
 
 All three that read or make a token wait first, in a PreSync hook (see
 "Order on a fresh cluster"): `platform-tokens` for External Secrets' webhook,
@@ -395,6 +395,13 @@ The Gateway's listeners:
 | `https` | `*.<PlatformDomain>` | zones: namespaces labelled `infrared.darkshift.io/zone` |
 | `infrared-http` | `.InfraredHost` | the redirect only |
 | `infrared-https` | `.InfraredHost` | `.InfraredNamespace` only; an exact name beats the wildcard, so nothing else can answer for Infrared |
+| `http-any` | none | the redirect only: plain HTTP for any other name, a zone's own address among them |
+
+A zone's own addresses (names outside `.PlatformDomain`, under a Domain its org
+verified) are not the template's: Infrared adds them as one ListenerSet per
+zone in `envoy-gateway-system`, an HTTPS listener per address with its own
+certificate, admitting routes from that zone's namespace only. The Gateway's
+`allowedListeners` admits ListenerSets from its own namespace alone.
 
 No load balancer is ever made: on Linode a LoadBalancer Service is a
 NodeBalancer. Envoy runs as a DaemonSet that binds each node's ports 80 and
@@ -404,7 +411,9 @@ ExternalIP of every node with a ready Envoy as the Gateway's addresses.
 external-dns publishes those, so a rebuilt node's address reaches DNS by
 itself. The redirect route names no host, so it takes each listener's: one
 proxied wildcard record `*.<PlatformDomain>`, which covers every zone, and one
-for `.InfraredHost`. The certificate is `*.<PlatformDomain>`, plus
+for `.InfraredHost` (`http-any` has no host, so it adds none). The route
+`edge-name` publishes `edge.<PlatformDomain>` by name, the target Infrared
+points a zone's own addresses at (proxied CNAMEs). The certificate is `*.<PlatformDomain>`, plus
 `.InfraredHost` when the wildcard does not cover it. The cluster's firewall
 must admit only Cloudflare to ports 80 and 443; nothing here opens the node
 ports to anyone.

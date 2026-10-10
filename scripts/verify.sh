@@ -790,13 +790,16 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$e" 'select(.kind == "EnvoyProxy") | .spec.provider.kubernetes.envoyService.externalTrafficPolicy')" = Local ] \
       && [ "$(line "$e" 'select(.kind == "EnvoyProxy") | .spec.provider.kubernetes.envoyDaemonSet.patch.value.spec.template.spec.containers[] | select(.name == "envoy") | .ports[] | (.hostPort | tostring) + ":" + (.containerPort | tostring)')" = "80:10080 443:10443" ] \
       && [ "$(sel "$e" 'select(.kind == "GatewayClass") | .spec.parametersRef.name')" = "$(sel "$e" 'select(.kind == "EnvoyProxy") | .metadata.name')" ] \
-      && ok "$variant: Envoy answers on each node's ports 80 and 443, no load balancer" || bad "$variant: the Envoy fleet is not on host ports behind a NodePort Service"
+      && [ "$(sel "$e" 'select(.kind == "EnvoyProxy") | .spec.provider.kubernetes.envoyService.name')" = edge ] \
+      && ok "$variant: Envoy answers on each node's ports 80 and 443, no load balancer, behind the Service edge" || bad "$variant: the Envoy fleet is not on host ports behind a NodePort Service"
     # One Gateway: the platform domain's wildcard for zones, Infrared's own name apart.
     [ "$(line "$e" 'select(.kind == "Gateway") | .spec.listeners[] | .name + "=" + .hostname')" \
-        = "http=*.$gw_domain https=*.$gw_domain infrared-http=$gw_host infrared-https=$gw_host" ] \
+        = "http=*.$gw_domain https=*.$gw_domain infrared-http=$gw_host infrared-https=$gw_host http-any=" ] \
+      && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.name == "http-any") | .protocol + ":" + (.port | tostring) + ":" + .allowedRoutes.namespaces.from')" = HTTP:80:Same ] \
+      && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.allowedListeners.namespaces.from')" = Same ] \
       && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.name == "https") | .allowedRoutes.namespaces.selector.matchExpressions[0].key')" = infrared.darkshift.io/zone ] \
       && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.name == "infrared-https") | .allowedRoutes.namespaces.selector.matchLabels["kubernetes.io/metadata.name"]')" = infrared ] \
-      && ok "$variant: Gateway edge serves *.$gw_domain and $gw_host" || bad "$variant: Gateway edge listeners are wrong"
+      && ok "$variant: Gateway edge serves *.$gw_domain and $gw_host, plain HTTP for any name, and ListenerSets from its own namespace" || bad "$variant: Gateway edge listeners are wrong"
     [ "$(line "$e" 'select(.kind == "Certificate") | .spec.dnsNames[]')" = "*.$gw_domain" ] \
       && [ "$(sel "$e" 'select(.kind == "Certificate") | .spec.issuerRef.kind + "/" + .spec.issuerRef.name')" = "OriginIssuer/$(sel "$e" 'select(.kind == "OriginIssuer") | .metadata.name')" ] \
       && [ "$(line "$e" 'select(.kind == "Gateway") | .spec.listeners[] | .tls.certificateRefs[]?.name' | tr ' ' '\n' | sort -u)" = "$(sel "$e" 'select(.kind == "Certificate") | .spec.secretName')" ] \
@@ -808,13 +811,15 @@ for v in "${variants[@]}"; do
     awk '{ for (i = 2; i <= NF; i++) if ($i + 0 <= $(i - 1) + 0) exit 1; exit NF != 6 }' <<<"$order" \
       && ok "$variant: the edge applies its token, issuer and certificate before the Gateway (waves $order)" \
       || bad "$variant: the edge's waves are not token < issuer < certificate < EnvoyProxy < GatewayClass < Gateway: $order"
-    [ "$(line "$e" 'select(.metadata.name == "https-redirect") | .spec.parentRefs[].sectionName')" = "http infrared-http" ] \
+    [ "$(line "$e" 'select(.metadata.name == "https-redirect") | .spec.parentRefs[].sectionName')" = "http infrared-http http-any" ] \
+      && [ "$(line "$e" 'select(.metadata.name == "edge-name") | .spec.parentRefs[].sectionName + " " + .spec.hostnames[0] + " " + .spec.rules[0].filters[0].requestRedirect.scheme')" = "http edge.$gw_domain https" ] \
       && [ "$(sel "$e" 'select(.metadata.name == "https-redirect") | .spec.rules[0].filters[0].requestRedirect.scheme')" = https ] \
       && [ "$(line "$e" 'select(.kind == "HTTPRoute" and .metadata.name == "infrared") | .metadata.namespace + " " + .spec.hostnames[0] + " " + .spec.rules[0].backendRefs[0].name + ":" + (.spec.rules[0].backendRefs[0].port | tostring)')" = "infrared $gw_host infrared:80" ] \
-      && ok "$variant: the redirect from port 80, and Infrared's route" || bad "$variant: the edge's routes are wrong"
+      && ok "$variant: the redirect from port 80, the edge's own name edge.$gw_domain, and Infrared's route" || bad "$variant: the edge's routes are wrong"
     # external-dns publishes the edge's labelled route only, as this cluster's owner.
     label="$(sel "$dns" '.spec.sources[0].helm.valuesObject.labelFilter')"
     [ "$(sel "$e" "select(.metadata.name == \"https-redirect\") | .metadata.labels[\"${label%%=*}\"]")" = "${label#*=}" ] \
+      && [ "$(sel "$e" "select(.metadata.name == \"edge-name\") | .metadata.labels[\"${label%%=*}\"]")" = "${label#*=}" ] \
       && [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.txtOwnerId')" = "$cluster" ] \
       && [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.policy')" = sync ] \
       && [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.gatewayNamespace')" = "$(sel "$e" 'select(.kind == "Gateway") | .metadata.namespace')" ] \
