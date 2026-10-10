@@ -164,6 +164,14 @@ type Data struct {
 	// Application, so Argo CD's render of the chart keeps it. Nil is none, as
 	// before the field existed, and is left out of the data.
 	CloudIdentity *CloudIdentity `json:"CloudIdentity,omitempty"`
+	// RunningChartVersion is the chart version of the operator that renders,
+	// which pins Infrared's images to its own release. The infrared Application
+	// carries those pins only while InfraredChartVersion is that version: when
+	// the gitops repo pins a newer chart (an upgrade), the pins are left out so
+	// Argo CD runs the newer chart's own images, the newer operator among them,
+	// which then pins its own. Empty is an operator from before the field, and
+	// the pins render as they always did.
+	RunningChartVersion string `json:"RunningChartVersion,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -482,6 +490,7 @@ func main() {
 		"SubstrateRegistry: the registry path Substrate's images come from (empty: ghcr.io/darkshiftio/substrate)")
 	flag.Var(jsonFlag[RegistryToken]{&d.RegistryToken, "registry-token"}, "registry-token",
 		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "awsHostNetwork": false (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
+	flag.StringVar(&d.RunningChartVersion, "running-chart-version", "", "RunningChartVersion: the rendering operator's chart version; image pins render only when it equals InfraredChartVersion (empty: always, as before)")
 	flag.Var(jsonFlag[*CloudIdentity]{&d.CloudIdentity, "cloud-identity"}, "cloud-identity",
 		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
 	flag.Parse()
@@ -524,42 +533,43 @@ func mergeDataFile(d *Data, path string) error {
 	}
 	*d = fromFile
 	overrides := map[string]func(){
-		"cluster":              func() { d.ClusterName = explicit.ClusterName },
-		"flavor":               func() { d.ClusterFlavor = explicit.ClusterFlavor },
-		"region":               func() { d.Region = explicit.Region },
-		"org":                  func() { d.OrgName = explicit.OrgName },
-		"repo-owner":           func() { d.GitopsRepoOwner = explicit.GitopsRepoOwner },
-		"repo-name":            func() { d.GitopsRepoName = explicit.GitopsRepoName },
-		"repo-url":             func() { d.GitopsRepoURL = explicit.GitopsRepoURL },
-		"branch":               func() { d.DefaultBranch = explicit.DefaultBranch },
-		"template-version":     func() { d.TemplateVersion = explicit.TemplateVersion },
-		"infrared-version":     func() { d.InfraredVersion = explicit.InfraredVersion },
-		"chart-repo":           func() { d.InfraredChartRepo = explicit.InfraredChartRepo },
-		"chart-version":        func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
-		"namespace":            func() { d.InfraredNamespace = explicit.InfraredNamespace },
-		"pull-secret":          func() { d.ImagePullSecret = explicit.ImagePullSecret },
-		"build-registry":       func() { d.BuildRegistry = explicit.BuildRegistry },
-		"edge":                 func() { d.Edge = explicit.Edge },
-		"platform-domain":      func() { d.PlatformDomain = explicit.PlatformDomain },
-		"infrared-host":        func() { d.InfraredHost = explicit.InfraredHost },
-		"image-registry":       func() { d.ImageRegistry = explicit.ImageRegistry },
-		"images":               func() { d.Images = explicit.Images },
-		"cloud":                func() { d.Cloud = explicit.Cloud },
-		"substrate-capable":    func() { d.SubstrateCapable = explicit.SubstrateCapable },
-		"stores":               func() { d.Stores = explicit.Stores },
-		"backup":               func() { d.Backup = explicit.Backup },
-		"disabled":             func() { d.Disabled = explicit.Disabled },
-		"forge":                func() { d.Forge = explicit.Forge },
-		"forge-url":            func() { d.ForgeURL = explicit.ForgeURL },
-		"registry":             func() { d.Registry = explicit.Registry },
-		"copies":               func() { d.Copies = explicit.Copies },
-		"postgres-archive":     func() { d.PostgresArchive = explicit.PostgresArchive },
-		"registry-retention":   func() { d.RegistryRetention = explicit.RegistryRetention },
-		"restore":              func() { d.Restore = explicit.Restore },
-		"postgres-server-name": func() { d.PostgresServerName = explicit.PostgresServerName },
-		"substrate-registry":   func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
-		"registry-token":       func() { d.RegistryToken = explicit.RegistryToken },
-		"cloud-identity":       func() { d.CloudIdentity = explicit.CloudIdentity },
+		"cluster":               func() { d.ClusterName = explicit.ClusterName },
+		"flavor":                func() { d.ClusterFlavor = explicit.ClusterFlavor },
+		"region":                func() { d.Region = explicit.Region },
+		"org":                   func() { d.OrgName = explicit.OrgName },
+		"repo-owner":            func() { d.GitopsRepoOwner = explicit.GitopsRepoOwner },
+		"repo-name":             func() { d.GitopsRepoName = explicit.GitopsRepoName },
+		"repo-url":              func() { d.GitopsRepoURL = explicit.GitopsRepoURL },
+		"branch":                func() { d.DefaultBranch = explicit.DefaultBranch },
+		"template-version":      func() { d.TemplateVersion = explicit.TemplateVersion },
+		"infrared-version":      func() { d.InfraredVersion = explicit.InfraredVersion },
+		"chart-repo":            func() { d.InfraredChartRepo = explicit.InfraredChartRepo },
+		"chart-version":         func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
+		"namespace":             func() { d.InfraredNamespace = explicit.InfraredNamespace },
+		"pull-secret":           func() { d.ImagePullSecret = explicit.ImagePullSecret },
+		"build-registry":        func() { d.BuildRegistry = explicit.BuildRegistry },
+		"edge":                  func() { d.Edge = explicit.Edge },
+		"platform-domain":       func() { d.PlatformDomain = explicit.PlatformDomain },
+		"infrared-host":         func() { d.InfraredHost = explicit.InfraredHost },
+		"image-registry":        func() { d.ImageRegistry = explicit.ImageRegistry },
+		"images":                func() { d.Images = explicit.Images },
+		"cloud":                 func() { d.Cloud = explicit.Cloud },
+		"substrate-capable":     func() { d.SubstrateCapable = explicit.SubstrateCapable },
+		"stores":                func() { d.Stores = explicit.Stores },
+		"backup":                func() { d.Backup = explicit.Backup },
+		"disabled":              func() { d.Disabled = explicit.Disabled },
+		"forge":                 func() { d.Forge = explicit.Forge },
+		"forge-url":             func() { d.ForgeURL = explicit.ForgeURL },
+		"registry":              func() { d.Registry = explicit.Registry },
+		"copies":                func() { d.Copies = explicit.Copies },
+		"postgres-archive":      func() { d.PostgresArchive = explicit.PostgresArchive },
+		"registry-retention":    func() { d.RegistryRetention = explicit.RegistryRetention },
+		"restore":               func() { d.Restore = explicit.Restore },
+		"postgres-server-name":  func() { d.PostgresServerName = explicit.PostgresServerName },
+		"substrate-registry":    func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
+		"registry-token":        func() { d.RegistryToken = explicit.RegistryToken },
+		"cloud-identity":        func() { d.CloudIdentity = explicit.CloudIdentity },
+		"running-chart-version": func() { d.RunningChartVersion = explicit.RunningChartVersion },
 	}
 	for name, apply := range overrides {
 		if set[name] {

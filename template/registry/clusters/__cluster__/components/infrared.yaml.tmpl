@@ -1,3 +1,9 @@
+[[- /* Infrared's image pins render only while the gitops repo deploys the
+chart version of the operator that renders this file (RunningChartVersion; an
+older operator leaves it empty and pins as before). An upgrade pins a newer
+chart, so the old operator leaves its own images out and Argo CD runs the newer
+chart's, whose operator then pins them. */ -]]
+[[ $pin := or (not .RunningChartVersion) (eq .InfraredChartVersion .RunningChartVersion) -]]
 # The Infrared control plane itself: operator, api, ui and mcp.
 #
 # The first `helm install` of the chart created this release and bootstrapped
@@ -107,25 +113,25 @@ spec:
           image:
             registry: [[ .ImageRegistry | quote ]]
 [[- end ]]
-[[- with index .Images "operator" ]][[ if or .Tag .Digest ]]
+[[- with index .Images "operator" ]][[ if and $pin (or .Tag .Digest) ]]
           operator:
             image:
               tag: [[ .Tag | quote ]]
               digest: [[ .Digest | quote ]]
 [[- end ]][[ end ]]
-[[- with index .Images "api" ]][[ if or .Tag .Digest ]]
+[[- with index .Images "api" ]][[ if and $pin (or .Tag .Digest) ]]
           api:
             image:
               tag: [[ .Tag | quote ]]
               digest: [[ .Digest | quote ]]
 [[- end ]][[ end ]]
-[[- with index .Images "ui" ]][[ if or .Tag .Digest ]]
+[[- with index .Images "ui" ]][[ if and $pin (or .Tag .Digest) ]]
           ui:
             image:
               tag: [[ .Tag | quote ]]
               digest: [[ .Digest | quote ]]
 [[- end ]][[ end ]]
-[[- with index .Images "runner" ]][[ if or .Tag .Digest ]]
+[[- with index .Images "runner" ]][[ if and $pin (or .Tag .Digest) ]]
           runner:
             image:
               tag: [[ .Tag | quote ]]
@@ -140,7 +146,7 @@ spec:
             # The bearer token MCP clients send to /mcp.
             access:
               existingSecret: infrared-mcp-access
-[[- with index .Images "mcp" ]][[ if or .Tag .Digest ]]
+[[- with index .Images "mcp" ]][[ if and $pin (or .Tag .Digest) ]]
             image:
               tag: [[ .Tag | quote ]]
               digest: [[ .Digest | quote ]]
@@ -282,9 +288,11 @@ spec:
           # adoption keeps it on only with this.
           codeIndex:
             enabled: true
+[[- if $pin ]]
             image:
               tag: [[ $ci.Tag | quote ]]
               digest: [[ $ci.Digest | quote ]]
+[[- end ]]
           # Its record and its GitHub App are in the install's Secret
           # infrared-platform-tokens, which the chart writes at the install
           # alone (codeIndex.knowledge and platformTokens). This keeps Argo CD's
