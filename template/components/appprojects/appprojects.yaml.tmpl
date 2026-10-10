@@ -67,9 +67,15 @@ spec:
   destinations:
     - server: https://kubernetes.default.svc
       namespace: [[ .InfraredNamespace ]]
-  # The chart ships the infrared.darkshift.io CRDs and the operator's and
-  # API's ClusterRoles.
+    # The chart's registryCredentials.namespace (chart 0.1.0-alpha.152, ADR 0033): the
+    # Secrets the infrared-cloud credential Job writes, apart from Infrared's own.
+    - server: https://kubernetes.default.svc
+      namespace: infrared-registry-credentials
+  # The chart ships the infrared.darkshift.io CRDs, the operator's and API's
+  # ClusterRoles, and the registry credentials' Namespace.
   clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
     - group: apiextensions.k8s.io
       kind: CustomResourceDefinition
     - group: rbac.authorization.k8s.io
