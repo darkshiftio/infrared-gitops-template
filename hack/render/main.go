@@ -75,7 +75,7 @@ type Data struct {
 	// Images is each component's pin (INFRARED_IMAGES), keyed by operator, api,
 	// ui, mcp and runner; empty keeps the chart's.
 	Images map[string]ImageRef `json:"Images"`
-	// Cloud is "", "aws" or "linode", from the nodes' providerID prefix.
+	// Cloud is "", "aws", "linode" or "gcp", from the nodes' providerID prefix.
 	Cloud string `json:"Cloud"`
 	// SubstrateCapable is the operator's preflight result; while it is false the
 	// template leaves Substrate out.
@@ -344,7 +344,7 @@ func (f disabledFlag) Set(s string) error {
 // Edges, Clouds and Forges are the values Edge, Cloud and Forge may take.
 var (
 	Edges  = []string{"", "traefik", "gateway"}
-	Clouds = []string{"", "aws", "linode"}
+	Clouds = []string{"", "aws", "linode", "gcp"}
 	Forges = []string{"", "gitea"}
 )
 
@@ -469,7 +469,7 @@ func main() {
 	flag.StringVar(&d.InfraredHost, "infrared-host", "", "InfraredHost: Infrared's own name in gateway mode, the sign-in URL's host (empty for none)")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
-	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws" or "linode"`)
+	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
 	flag.BoolVar(&d.SubstrateCapable, "substrate-capable", false, "SubstrateCapable: the preflight's result")
 	flag.BoolVar(&d.Stores, "stores", false, "Stores: the platform's own Postgres and SeaweedFS")
 	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "...", "prefix": "...", "provider": "gcs"} (empty: no backups)`)
