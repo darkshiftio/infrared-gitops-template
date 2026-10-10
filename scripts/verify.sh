@@ -1696,6 +1696,40 @@ for bad_identity in '{}' '{"awsRoleArn":"arn:aws:iam::123456789012:role/x","awsW
   fi
 done
 
+# --- Image pins only at the running operator's chart version (drift row 52) ---
+# The infrared Application pins Infrared's images to the rendering operator's own
+# release. While the gitops repo deploys that chart version the render is the one
+# it always was; once the repo pins a newer chart (an upgrade), the pins are left
+# out, so Argo CD runs the newer chart's images and its operator pins its own.
+pins_images="{\"operator\":{\"tag\":\"v0.1.0\",\"digest\":\"sha256:$(printf 'a%.0s' $(seq 64))\"},\"code-index\":{\"tag\":\"$ci_tag\",\"digest\":\"$ci_digest\"}}"
+for v in pins-before pins-running pins-upgrade; do
+  case $v in
+    pins-before) extra="" ;;
+    pins-running) extra="-running-chart-version 0.1.0" ;;
+    pins-upgrade) extra="-running-chart-version 0.0.9" ;;
+  esac
+  # shellcheck disable=SC2086
+  "$work/render" -out "$work/$v" -cluster demo -flavor k3s -build-registry "" -chart-version 0.1.0 \
+    -image-registry ghcr.io/demo-org -images "$pins_images" $extra >/dev/null
+done
+if diff -rq "$work/pins-before" "$work/pins-running" >/dev/null; then
+  ok "pins-running: at the running operator's chart version the render is byte-identical to one without RunningChartVersion"
+else
+  bad "pins-running: the render at the running chart version differs from the render without RunningChartVersion"
+fi
+changed="$({ diff -rq "$work/pins-before" "$work/pins-upgrade" || true; } | sed -E "s#^Files $work/pins-before/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+[ "$changed" = "$infrared_app" ] \
+  && ok "pins-upgrade: a newer chart in the repo changes only the infrared Application" \
+  || bad "pins-upgrade: differs in '$changed', want only $infrared_app"
+got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject | [.operator, .codeIndex.enabled, .codeIndex.image, .image.registry]' "$work/pins-upgrade/$infrared_app")"
+[ "$got" = '[null,true,null,"ghcr.io/demo-org"]' ] \
+  && ok "pins-upgrade: no operator or code index image pin, the code index still on and the registry kept" \
+  || bad "pins-upgrade: the infrared Application's pins are $got, want [null,true,null,\"ghcr.io/demo-org\"]"
+got="$(yq -o json -I0 '.spec.sources[0].helm.valuesObject | [.operator.image.tag, .codeIndex.image.tag]' "$work/pins-running/$infrared_app")"
+[ "$got" = "[\"v0.1.0\",\"$ci_tag\"]" ] \
+  && ok "pins-running: the operator and code index pins are there" \
+  || bad "pins-running: the pins are $got"
+
 [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.registry' "$work/registry-alone/$infrared_app")" = "{\"address\":\"$zot_registry\"}" ] \
   && ok "registry-alone: the infrared Application carries the registry's address without the stores" \
   || bad "registry-alone: the infrared Application does not carry the registry's address"
