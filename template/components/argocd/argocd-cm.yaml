@@ -10,3 +10,14 @@ data:
   application.resourceTrackingMethod: annotation
   # Lets a kustomization under components/ inflate helm charts.
   kustomize.buildOptions: --enable-helm
+  # Argo CD (install.yaml) ignores every resource's /status updates by default
+  # (resource.customizations.ignoreResourceUpdates.all). Then a hook Job that
+  # completed, or an ExternalSecret, OriginIssuer or Certificate that went
+  # Ready, is seen only at the next three-minute reconcile, and a sync wave
+  # waits that long for each (workspace TODO 188: the edge took about 30
+  # minutes twice on Google run 1). Ignore lists only add up, so no kind can be
+  # exempted from .all: it is emptied here, and upstream's per-kind ignores
+  # (ConfigMap, Endpoints, ReplicaSet, Application, EndpointSlice, ...) stay.
+  resource.customizations.ignoreResourceUpdates.all: |
+    jsonPointers: []
+
