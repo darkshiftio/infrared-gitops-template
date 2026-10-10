@@ -71,6 +71,10 @@ spec:
     # Secrets the infrared-cloud credential Job writes, apart from Infrared's own.
     - server: https://kubernetes.default.svc
       namespace: infrared-registry-credentials
+    # The chart's tofuState.namespace (ADR 0033 phase 4 follow-up): OpenTofu's
+    # state and lock for workload Clusters, apart from Infrared's own Secrets.
+    - server: https://kubernetes.default.svc
+      namespace: infrared-tofu-state
   # The chart ships the infrared.darkshift.io CRDs, the operator's and API's
   # ClusterRoles, and the registry credentials' Namespace.
   clusterResourceWhitelist:
