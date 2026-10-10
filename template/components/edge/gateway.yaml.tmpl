@@ -53,7 +53,11 @@ spec:
                           containerPort: 10443
                           hostPort: 443
                           protocol: TCP
+      # A fixed name, edge, rather than one Envoy Gateway derives from the
+      # Gateway's: Infrared dials edge.envoy-gateway-system.svc to check that
+      # an address serves.
       envoyService:
+        name: edge
         type: NodePort
         externalTrafficPolicy: Local
   # Envoy's own default, written out as the API server would store it.
@@ -80,7 +84,15 @@ spec:
 # =============================================================================
 # One certificate, edge-tls (certificate.yaml), for every HTTPS listener.
 # Plain HTTP only redirects to HTTPS (routes.yaml), so its listeners admit
-# routes from this namespace alone.
+# routes from this namespace alone. The listener http-any takes plain HTTP for
+# every other name, a zone's own address among them, so it redirects too
+# rather than answering 404.
+#
+# A zone's own addresses (a name outside the platform domain, under a Domain
+# its org verified) are not listed here. Infrared adds them as a ListenerSet
+# per zone in this namespace, one HTTPS listener per address with its own
+# certificate, admitting routes from that zone's namespace only; the Gateway
+# accepts ListenerSets from this namespace alone.
 [[- if .PlatformDomain ]]
 #
 # Zones: https://<zone>.[[ .PlatformDomain ]], one level down, which is all the
@@ -104,6 +116,9 @@ metadata:
   namespace: envoy-gateway-system
 spec:
   gatewayClassName: edge
+  allowedListeners:
+    namespaces:
+      from: Same
   listeners:
 [[- if .PlatformDomain ]]
     - name: http
@@ -156,6 +171,12 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
 [[- end ]]
+    - name: http-any
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
 ---
 # No request timeout at the edge. Envoy's own default is 15 seconds a request,
 # which would cut Infrared's longer API calls and its MCP stream (the UI's nginx

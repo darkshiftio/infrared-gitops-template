@@ -4,10 +4,11 @@
 # group and kind, the PathPrefix / match, backendRef group, kind and weight), or
 # Argo CD would keep them OutOfSync.
 # =============================================================================
-# Plain HTTP, every name: a redirect to HTTPS, nothing served in the clear.
+# Plain HTTP, every name: a redirect to HTTPS, nothing served in the clear,
+# a zone's own addresses too (on the listener http-any, which names no host).
 #
 # It is also where the edge's DNS records come from. It names no host, so it
-# takes each listener's own:
+# takes each listener's own (http-any has none, so it publishes nothing):
 [[- if .PlatformDomain ]]
 #   [[ printf "*.%s" .PlatformDomain ]]  one proxied wildcard record, for every zone
 [[- end ]]
@@ -37,6 +38,10 @@ spec:
       name: edge
       sectionName: infrared-http
 [[- end ]]
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      sectionName: http-any
   rules:
     - matches:
         - path:
@@ -47,6 +52,40 @@ spec:
           requestRedirect:
             scheme: https
             statusCode: 301
+[[- if .PlatformDomain ]]
+---
+# The edge's own name, [[ printf "edge.%s" .PlatformDomain ]]: one proxied record at the
+# Gateway's addresses, which follow the nodes. Infrared points a zone's own
+# addresses there (a proxied CNAME each; Cloudflare flattens one at a zone's
+# apex), so none of them needs a node's IP. The wildcard record answers for
+# the name too; this one is published by name, not by chance. Plain HTTP only,
+# a redirect like the one above: on HTTPS the name is the wildcard listener's.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: edge-name
+  namespace: envoy-gateway-system
+  labels:
+    infrared.darkshift.io/dns: edge
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      sectionName: http
+  hostnames:
+    - [[ printf "edge.%s" .PlatformDomain | quote ]]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+[[- end ]]
 [[- if .InfraredHost ]]
 ---
 # Infrared at https://[[ .InfraredHost ]]: the UI's Service, which serves the UI
