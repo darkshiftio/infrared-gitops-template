@@ -1,6 +1,8 @@
 [[- $on := true ]][[ range .Disabled ]][[ if eq . "seaweedfs" ]][[ $on = false ]][[ end ]][[ end ]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point ]]
 [[- $prefix := default .ClusterName .Backup.Prefix ]]
+[[- /* One node (StoresSingleNode, the chart's stores.singleNode): one of each server, and every file once. */ -]]
+[[- $single := .StoresSingleNode ]]
 [[- if not $on -]]
 # seaweedfs is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
@@ -8,6 +10,14 @@
 # SeaweedFS 4.48 (chart 4.48.0), the platform's object store, in the namespace
 # stores. Wave 18, after the Postgres (17) that holds its filer metadata.
 #
+[[- if $single ]]
+# On the cluster's one node (the install's stores.singleNode): one master, one
+# volume server with its data on the node's own disk ([[ if eq .Cloud "gcp" ]]a persistent disk that follows it[[ else ]]hostPath[[ end ]]), one
+# filer and one S3 gateway. Every file is written once (replication 000):
+# there is no other server to copy it to, so the node's disk is the only copy.
+# The data is under /var/lib/seaweedfs on the node. The filer keeps every
+# entry in the platform's Postgres (database seaweedfs).
+[[- else ]]
 # Across the nodes: three masters (Raft), a volume server and its data on each
 # node's own disk ([[ if eq .Cloud "gcp" ]]on Google Cloud a persistent disk that follows it[[ else ]]hostPath[[ end ]]), two filers and two S3 gateways, each on a node of its own.
 # Every file is written to two volume servers (replication 001), so with
@@ -15,6 +25,7 @@
 # what a lost node held back to two nodes (volume.fix.replication). The data is
 # under /var/lib/seaweedfs on each node, never on a cloud volume. The filers
 # keep every entry in the platform's Postgres (database seaweedfs).
+[[- end ]]
 #
 # S3 at http://seaweedfs-s3.stores.svc:8333, with an identity per bucket
 # (components/seaweedfs/identities.yaml). The chart's bucket hook makes the
@@ -64,15 +75,20 @@ spec:
               # The chart's ClusterRole may edit any pod in the cluster; nothing
               # here needs it.
               createClusterRole: false
+[[- if $single ]]
+              # One volume server: every file once (the masters' default, 000).
+              enableReplication: false
+[[- else ]]
               # Every file on two volume servers: another server in the same
               # rack, and each server is on a node of its own.
               enableReplication: true
               replicationPlacement: "001"
+[[- end ]]
           image:
             registry: docker.io
             tag: "4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d"
           master:
-            replicas: 3
+            replicas: [[ if $single ]]1[[ else ]]3[[ end ]]
 [[- if eq .Cloud "gcp" ]]
             # On Google Cloud every server's data is a persistent disk of the
             # cluster's default class, which follows its pod to whichever node
@@ -91,9 +107,14 @@ spec:
 [[- end ]]
             logs:
               type: ""
+[[- if $single ]]
+            # Every 17 minutes: empty volumes and stale uploads go. With every
+            # file written once, volume.fix.replication finds nothing to copy.
+[[- else ]]
             # The leader copies under-replicated volumes back to two servers,
             # e.g. after a node is replaced, every 17 minutes. No erasure
             # coding: it needs more servers than three nodes give.
+[[- end ]]
             config: |-
               [master.maintenance]
               scripts = """
@@ -111,7 +132,7 @@ spec:
               limits:
                 memory: 512Mi
           volume:
-            replicas: 3
+            replicas: [[ if $single ]]1[[ else ]]3[[ end ]]
             dataDirs:
               - name: data
 [[- if eq .Cloud "gcp" ]]
@@ -138,7 +159,7 @@ spec:
               limits:
                 memory: 1Gi
           filer:
-            replicas: 2
+            replicas: [[ if $single ]]1[[ else ]]2[[ end ]]
             data:
               type: emptyDir
             logs:
@@ -169,7 +190,7 @@ spec:
                 memory: 1Gi
           s3:
             enabled: true
-            replicas: 2
+            replicas: [[ if $single ]]1[[ else ]]2[[ end ]]
             enableAuth: true
             existingConfigSecret: seaweedfs-s3-identities
             # Lance's namespace server is not used.

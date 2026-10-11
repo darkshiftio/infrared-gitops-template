@@ -211,6 +211,10 @@ spec:
           # every render of this repo.
           stores:
             enabled: true
+[[- if .StoresSingleNode ]]
+            # On the cluster's one node (INFRARED_STORES_SINGLE_NODE).
+            singleNode: true
+[[- end ]]
 [[- end ]]
 [[- $c := .Copies ]]
 [[- $settings := or $c.Recipients $c.Mirror.Schedule $c.Mirror.Retention .PostgresArchive.Enabled ]]

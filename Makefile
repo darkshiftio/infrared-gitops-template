@@ -19,6 +19,10 @@ INFRARED_HOST   ?=
 # make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
 #   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
 STORES   ?= false
+# STORES_SINGLE_NODE: true, with STORES=true, runs SeaweedFS on the cluster's
+# one node, every file written once (as INFRARED_STORES_SINGLE_NODE). E.g.
+# make render STORES=true STORES_SINGLE_NODE=true
+STORES_SINGLE_NODE ?= false
 BACKUP   ?=
 DISABLED ?=
 CLOUD    ?=
@@ -55,7 +59,7 @@ render:
 	rm -rf $(OUT)
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
 		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" \
-		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
+		-stores=$(STORES) -stores-single-node=$(STORES_SINGLE_NODE) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
 		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)'

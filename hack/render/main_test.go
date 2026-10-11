@@ -206,6 +206,22 @@ func TestDataFileStoresFields(t *testing.T) {
 	}
 }
 
+// One node's stores load from the operator's JSON by the Go name, and the
+// flag wins over the file, as every other flag does.
+func TestDataFileStoresSingleNode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Stores": true, "StoresSingleNode": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Stores || !d.StoresSingleNode {
+		t.Errorf("loaded Stores %t, StoresSingleNode %t; want both", d.Stores, d.StoresSingleNode)
+	}
+}
+
 func TestBackupAndDisabledFlags(t *testing.T) {
 	var b BackupTarget
 	bf := backupFlag{&b}
