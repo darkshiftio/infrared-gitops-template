@@ -54,6 +54,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Edge` | `` \| `traefik` \| `gateway` | the Installation's `spec.edge`. `` and `traefik` both mean Traefik, as before; `gateway` turns on the edge (see "The edge"). Test it with `eq .Edge "gateway"`, never `if .Edge` |
 | `.PlatformDomain` | `` or `preprod.example.com` | the Installation's `spec.previews.domain`; in gateway mode zones answer at `<zone>.<PlatformDomain>` |
 | `.InfraredHost` | `` or `infrared.preprod.example.com` | the host of the Installation's `spec.previews.signInURL`, lowercase, no port; in gateway mode Infrared's own name |
+| `.CustomHostnames` | `false` or `true` | the Installation's `spec.previews.customHostnames`, in gateway mode only: addresses under an org's own domains are Cloudflare for SaaS custom hostnames, whose origin certificates come from Let's Encrypt over HTTP-01 (Issuer `letsencrypt-http`, cert-manager's Gateway API support) |
+| `.ACMEEmail` | `` or `alerts@example.com` | the Installation's `spec.previews.acmeEmail`, Let's Encrypt's contact for those certificates; empty registers without one |
 | `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
 | `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`, and `code-index`, which the chart hands on only with `codeIndex.enabled` (see "The code index"); empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
@@ -417,6 +419,17 @@ points a zone's own addresses at (proxied CNAMEs). The certificate is `*.<Platfo
 `.InfraredHost` when the wildcard does not cover it. The cluster's firewall
 must admit only Cloudflare to ports 80 and 443; nothing here opens the node
 ports to anyone.
+
+With `.CustomHostnames` the edge also has the Issuer `letsencrypt-http`
+(wave 1, after the Gateway its solver names), which answers Let's Encrypt's
+HTTP-01 challenges on `http-any`: cert-manager attaches a route for the one
+challenge path and host, more specific than the redirect, and the challenge
+arrives the way visitors do, through Cloudflare's proxy (proven on
+infrared-cp-google 2026-10-10: Cloudflare forwards plain HTTP for the path
+unredirected, and Full (strict) accepts the Let's Encrypt certificate where it
+refuses a self-signed one with 526). The `cert-manager` Application then sets
+`config.enableGatewayAPI`. Infrared asks the Issuer for a custom hostname's
+certificate only once Cloudflare has activated the hostname.
 
 ### The stores
 

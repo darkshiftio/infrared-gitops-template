@@ -28,6 +28,14 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
+[[- if and (eq .Edge "gateway") .CustomHostnames ]]
+        # The HTTP-01 challenges of custom hostnames' origin certificates are
+        # routes on the edge Gateway (components/edge, Issuer letsencrypt-http).
+        config:
+          apiVersion: controller.config.cert-manager.org/v1alpha1
+          kind: ControllerConfiguration
+          enableGatewayAPI: true
+[[- end ]]
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
