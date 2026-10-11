@@ -200,7 +200,8 @@ EOF
 # The gateway variant off Linode (Cloud ""): the same edge on a cluster that
 # does not bring the Gateway API CRDs itself, such as GKE, where Envoy's chart
 # installs them (Google Cloud run 1, 2026-10-07).
-yq -p json -o json '. + {"Cloud": ""}' "$work/gateway.json" >"$work/gateway-nocloud.json"
+# It also serves custom hostnames (Cloudflare for SaaS), as infrared-cp-google does.
+yq -p json -o json '. + {"Cloud": "", "CustomHostnames": true, "ACMEEmail": "alerts@example.com"}' "$work/gateway.json" >"$work/gateway-nocloud.json"
 
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
@@ -811,6 +812,20 @@ for v in "${variants[@]}"; do
     awk '{ for (i = 2; i <= NF; i++) if ($i + 0 <= $(i - 1) + 0) exit 1; exit NF != 6 }' <<<"$order" \
       && ok "$variant: the edge applies its token, issuer and certificate before the Gateway (waves $order)" \
       || bad "$variant: the edge's waves are not token < issuer < certificate < EnvoyProxy < GatewayClass < Gateway: $order"
+    # Custom hostnames: Let's Encrypt over HTTP-01 on http-any, through cert-manager's Gateway API support.
+    cm="$reg/components/cert-manager.yaml"
+    if [ "$variant" = gateway-nocloud ]; then
+      [ "$(sel "$e" 'select(.kind == "Issuer") | .metadata.name + " " + .spec.acme.email + " " + .spec.acme.server')" \
+          = "letsencrypt-http alerts@example.com https://acme-v02.api.letsencrypt.org/directory" ] \
+        && [ "$(line "$e" 'select(.kind == "Issuer") | .spec.acme.solvers[0].http01.gatewayHTTPRoute.parentRefs[] | .kind + "/" + .namespace + "/" + .name + "/" + .sectionName')" \
+          = "Gateway/envoy-gateway-system/edge/http-any" ] \
+        && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config.enableGatewayAPI')" = true ] \
+        && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config.kind')" = ControllerConfiguration ] \
+        && ok "$variant: custom hostnames' origin certificates from Let's Encrypt over HTTP-01 on http-any" || bad "$variant: the custom hostnames' issuer is wrong"
+    else
+      [ -z "$(sel "$e" 'select(.kind == "Issuer") | .metadata.name')" ] && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config // "none"')" = none ] \
+        && ok "$variant: no custom hostnames, no Let's Encrypt issuer" || bad "$variant: a Let's Encrypt issuer without custom hostnames"
+    fi
     [ "$(line "$e" 'select(.metadata.name == "https-redirect") | .spec.parentRefs[].sectionName')" = "http infrared-http http-any" ] \
       && [ "$(line "$e" 'select(.metadata.name == "edge-name") | .spec.parentRefs[].sectionName + " " + .spec.hostnames[0] + " " + .spec.rules[0].filters[0].requestRedirect.scheme')" = "http edge.$gw_domain https" ] \
       && [ "$(sel "$e" 'select(.metadata.name == "https-redirect") | .spec.rules[0].filters[0].requestRedirect.scheme')" = https ] \

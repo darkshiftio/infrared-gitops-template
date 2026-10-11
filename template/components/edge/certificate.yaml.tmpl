@@ -90,6 +90,46 @@ spec:
     group: cert-manager.k8s.cloudflare.com
     kind: OriginIssuer
     name: cloudflare-origin
+[[- if .CustomHostnames ]]
+---
+# =============================================================================
+# Origin certificates for custom hostnames, from Let's Encrypt.
+# =============================================================================
+# An address under an org's own domain (a Cloudflare for SaaS custom hostname,
+# Infrared's spec.previews.customHostnames) is a name Cloudflare's Origin CA
+# can't sign. Infrared asks this Issuer for its certificate once Cloudflare
+# has activated the hostname, so the challenge reaches the Gateway the way
+# visitors do: Cloudflare's proxy, then plain HTTP on the listener http-any,
+# where cert-manager attaches a route for the one challenge path, more
+# specific than the redirect. Full (strict) then holds for the name too.
+# cert-manager's Gateway API support (the cert-manager Application) makes
+# those routes. Its wave is its own, after the Gateway its solver names:
+# cert-manager's webhook admits it.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-http
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+[[- if .ACMEEmail ]]
+    email: [[ .ACMEEmail | quote ]]
+[[- end ]]
+    privateKeySecretRef:
+      name: letsencrypt-http-account
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - group: gateway.networking.k8s.io
+                kind: Gateway
+                name: edge
+                namespace: envoy-gateway-system
+                sectionName: http-any
+[[- end ]]
 [[- else -]]
 # The edge is not a Gateway with a name to serve: no certificate.
 [[- end ]]

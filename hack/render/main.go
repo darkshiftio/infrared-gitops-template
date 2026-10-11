@@ -69,6 +69,15 @@ type Data struct {
 	// InfraredHost is the host of the Installation's spec.previews.signInURL,
 	// "" when unset. In gateway mode it is Infrared's own name.
 	InfraredHost string `json:"InfraredHost"`
+	// CustomHostnames is spec.previews.customHostnames on a gateway edge:
+	// addresses under an org's own domains are Cloudflare for SaaS custom
+	// hostnames, whose origin certificates come from Let's Encrypt over
+	// HTTP-01 on the listener http-any (Issuer letsencrypt-http, and
+	// cert-manager's Gateway API support). false renders as before.
+	CustomHostnames bool `json:"CustomHostnames"`
+	// ACMEEmail is spec.previews.acmeEmail, Let's Encrypt's contact for those
+	// certificates; "" registers without one.
+	ACMEEmail string `json:"ACMEEmail"`
 	// ImageRegistry is the registry of Infrared's own images (the operator's
 	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
 	ImageRegistry string `json:"ImageRegistry"`
@@ -606,6 +615,12 @@ func validate(d Data) error {
 	}
 	if !slices.Contains(Clouds, d.Cloud) {
 		errs = append(errs, fmt.Errorf("Cloud must be one of %q, got %q", Clouds, d.Cloud))
+	}
+	if d.CustomHostnames && d.Edge != "gateway" {
+		errs = append(errs, errors.New("CustomHostnames needs Edge gateway: custom hostnames are served through the Gateway behind Cloudflare"))
+	}
+	if d.ACMEEmail != "" && (strings.ContainsAny(d.ACMEEmail, " \t\"") || strings.Count(d.ACMEEmail, "@") != 1) {
+		errs = append(errs, fmt.Errorf("ACMEEmail must be one email address, got %q", d.ACMEEmail))
 	}
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
