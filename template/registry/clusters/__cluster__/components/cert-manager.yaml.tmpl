@@ -32,7 +32,7 @@ spec:
         # The HTTP-01 challenges of custom hostnames' origin certificates are
         # routes on the edge Gateway (components/edge, Issuer letsencrypt-http).
         config:
-          apiVersion: controller.config.cert-manager.org/v1alpha1
+          apiVersion: controller.config.cert-manager.io/v1alpha1
           kind: ControllerConfiguration
           enableGatewayAPI: true
 [[- end ]]
