@@ -820,7 +820,8 @@ for v in "${variants[@]}"; do
         && [ "$(line "$e" 'select(.kind == "Issuer") | .spec.acme.solvers[0].http01.gatewayHTTPRoute.parentRefs[] | .kind + "/" + .namespace + "/" + .name + "/" + .sectionName')" \
           = "Gateway/envoy-gateway-system/edge/http-any" ] \
         && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config.enableGatewayAPI')" = true ] \
-        && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config.kind')" = ControllerConfiguration ] \
+        && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config.apiVersion + " " + .spec.source.helm.valuesObject.config.kind')" \
+          = "controller.config.cert-manager.io/v1alpha1 ControllerConfiguration" ] \
         && ok "$variant: custom hostnames' origin certificates from Let's Encrypt over HTTP-01 on http-any" || bad "$variant: the custom hostnames' issuer is wrong"
     else
       [ -z "$(sel "$e" 'select(.kind == "Issuer") | .metadata.name')" ] && [ "$(sel "$cm" '.spec.source.helm.valuesObject.config // "none"')" = none ] \
