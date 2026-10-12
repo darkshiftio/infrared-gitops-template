@@ -2030,5 +2030,28 @@ else
   bad "ghcr: kustomize build components/builds"
 fi
 
+# The monitoring stack's extraObjects go through the chart's tpl: render the
+# chart itself with the gateway variant's values, so a {{ }} quoted wrong
+# fails here and not in Argo CD. Skipped (and said) when the chart can't be
+# fetched.
+vmks_app="$work/gateway/registry/clusters/demo-gw/components/victoria-metrics-k8s-stack.yaml"
+vmks_version="$(yq -r '.spec.source.targetRevision' "$vmks_app")"
+yq '.spec.source.helm.valuesObject' "$vmks_app" >"$work/vmks-values.yaml"
+if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io/helm-charts/ --version "$vmks_version" \
+    --untar -d "$work/vmks-chart" >/dev/null 2>&1; then
+  if helm template victoria-metrics-k8s-stack "$work/vmks-chart/victoria-metrics-k8s-stack" -n monitoring \
+      -f "$work/vmks-values.yaml" >"$work/vmks.yaml" 2>"$work/vmks.err"; then
+    [ "$(yq -N -r 'select(.kind == "VMPodScrape" and .metadata.name == "edge-envoy") | .metadata.namespace' "$work/vmks.yaml")" = envoy-gateway-system ] \
+      && ok "gateway: the monitoring chart renders the Envoy scrape" || bad "gateway: no VMPodScrape edge-envoy from the monitoring chart"
+    [ "$(yq -N -r 'select(.metadata.name == "infrared-edge-zones-dashboard") | .data["infrared-edge-zones.json"]' "$work/vmks.yaml" \
+        | jq -r '[.panels[].targets[0].legendFormat] | unique | join(",")')" = '{{infrared_zone}}' ] \
+      && ok "gateway: the zones dashboard's legends survive the chart's tpl" || bad "gateway: the zones dashboard's legends are wrong after tpl"
+  else
+    bad "gateway: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks.err")"
+  fi
+else
+  echo "skip: victoria-metrics-k8s-stack $vmks_version could not be fetched; its render is not checked"
+fi
+
 if [ "$fail" -ne 0 ]; then echo "verify: FAILED" >&2; exit 1; fi
 echo "verify: all checks passed"
