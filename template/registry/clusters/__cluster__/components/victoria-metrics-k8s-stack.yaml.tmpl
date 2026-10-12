@@ -152,6 +152,181 @@ spec:
                       sourceLabels: [__name__]
                       regex: (etcd_request_duration_seconds_bucket|apiserver_watch_events_dispatch_duration_seconds_bucket|apiserver_request_body_size_bytes_bucket|apiserver_storage_list_duration_seconds_bucket|apiserver_watch_list_duration_seconds_bucket|apiserver_watch_cache_read_wait_seconds_bucket|apiserver_watch_cache_initialization_duration_seconds_bucket|apiserver_response_sizes_bucket|apiserver_watch_events_sizes_bucket|apiserver_admission_controller_admission_duration_seconds_bucket)
 [[- end ]]
+[[- if eq .Edge "gateway" ]]
+        # Requests at the edge, per zone: Envoy's own metrics for the upstream
+        # of every HTTPRoute (httproute/<zone>/<route>/rule/<n>), so an app
+        # needs nothing of its own. Only those families and upstreams are kept
+        # (a few hundred series), with the zone and the route as labels. The
+        # operator's edge-errors and edge-latency SLOs read them, and the
+        # dashboard below shows them. extraObjects go through tpl, so the
+        # dashboard's {{ }} legends are quoted.
+        extraObjects:
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMPodScrape
+            metadata:
+              name: edge-envoy
+              namespace: envoy-gateway-system
+            spec:
+              selector:
+                matchLabels:
+                  app.kubernetes.io/component: proxy
+                  app.kubernetes.io/managed-by: envoy-gateway
+              podMetricsEndpoints:
+                - port: metrics
+                  path: /stats/prometheus
+                  metricRelabelConfigs:
+                    - action: keep
+                      sourceLabels: [__name__]
+                      regex: envoy_cluster_upstream_rq_(xx|total|time_bucket|time_count|time_sum)
+                    - action: keep
+                      sourceLabels: [envoy_cluster_name]
+                      regex: httproute/.+
+                    - action: replace
+                      sourceLabels: [envoy_cluster_name]
+                      regex: httproute/([^/]+)/([^/]+)/rule/.+
+                      targetLabel: infrared_zone
+                      replacement: $1
+                    - action: replace
+                      sourceLabels: [envoy_cluster_name]
+                      regex: httproute/([^/]+)/([^/]+)/rule/.+
+                      targetLabel: infrared_route
+                      replacement: $2
+          - apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: infrared-edge-zones-dashboard
+              namespace: monitoring
+              labels:
+                # Grafana's sidecar loads every ConfigMap so labelled in monitoring.
+                grafana_dashboard: "1"
+            data:
+              infrared-edge-zones.json: |
+                {
+                  "title": "Infrared zones: requests at the edge",
+                  "uid": "infrared-edge-zones",
+                  "schemaVersion": 39,
+                  "time": {
+                    "from": "now-24h",
+                    "to": "now"
+                  },
+                  "refresh": "1m",
+                  "tags": [
+                    "infrared"
+                  ],
+                  "templating": {
+                    "list": [
+                      {
+                        "name": "datasource",
+                        "type": "datasource",
+                        "query": "prometheus",
+                        "current": {}
+                      },
+                      {
+                        "name": "zone",
+                        "type": "query",
+                        "datasource": {
+                          "type": "prometheus",
+                          "uid": "${datasource}"
+                        },
+                        "query": "label_values(envoy_cluster_upstream_rq_total, infrared_zone)",
+                        "refresh": 2,
+                        "includeAll": true,
+                        "multi": true,
+                        "current": {
+                          "text": "All",
+                          "value": "$__all"
+                        }
+                      }
+                    ]
+                  },
+                  "panels": [
+                    {
+                      "id": 1,
+                      "type": "timeseries",
+                      "title": "Requests per second",
+                      "datasource": {
+                        "type": "prometheus",
+                        "uid": "${datasource}"
+                      },
+                      "gridPos": {
+                        "h": 8,
+                        "w": 24,
+                        "x": 0,
+                        "y": 0
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "reqps"
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "expr": "sum by (infrared_zone) (rate(envoy_cluster_upstream_rq_total{infrared_zone=~\"$zone\"}[5m]))",
+                          "legendFormat": "{{ \"{{infrared_zone}}\" }}"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 2,
+                      "type": "timeseries",
+                      "title": "Server errors (5xx share)",
+                      "datasource": {
+                        "type": "prometheus",
+                        "uid": "${datasource}"
+                      },
+                      "gridPos": {
+                        "h": 8,
+                        "w": 12,
+                        "x": 0,
+                        "y": 8
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "percentunit"
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "expr": "sum by (infrared_zone) (rate(envoy_cluster_upstream_rq_xx{infrared_zone=~\"$zone\",envoy_response_code_class=\"5\"}[5m])) / sum by (infrared_zone) (rate(envoy_cluster_upstream_rq_total{infrared_zone=~\"$zone\"}[5m]))",
+                          "legendFormat": "{{ \"{{infrared_zone}}\" }}"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 3,
+                      "type": "timeseries",
+                      "title": "Latency p95 (ms)",
+                      "datasource": {
+                        "type": "prometheus",
+                        "uid": "${datasource}"
+                      },
+                      "gridPos": {
+                        "h": 8,
+                        "w": 12,
+                        "x": 12,
+                        "y": 8
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "ms"
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "expr": "histogram_quantile(0.95, sum by (infrared_zone, le) (rate(envoy_cluster_upstream_rq_time_bucket{infrared_zone=~\"$zone\"}[5m])))",
+                          "legendFormat": "{{ \"{{infrared_zone}}\" }}"
+                        }
+                      ]
+                    }
+                  ]
+                }
+[[- end ]]
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
