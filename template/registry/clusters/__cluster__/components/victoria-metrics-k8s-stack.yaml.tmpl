@@ -112,6 +112,19 @@ spec:
           enabled: false
         kubeEtcd:
           enabled: false
+        # The chart copies every node label onto each kubelet and cAdvisor
+        # series. A GKE node has about 35, which takes each series past
+        # VMSingle's limit of 40 labels, so VMSingle kept none of them: no CPU,
+        # memory or network for any pod. This list replaces the chart's
+        # without that copy; the node's name stays in the node label.
+        kubelet:
+          vmScrape:
+            spec:
+              relabelConfigs:
+                - sourceLabels: [__metrics_path__]
+                  targetLabel: metrics_path
+                - replacement: kubelet
+                  targetLabel: job
 [[- if eq .ClusterFlavor "k3s" ]]
         # k3s keeps one metrics registry for the whole process, so a node's
         # kubelet and API server endpoints each serve all of it, about 60,000
@@ -119,7 +132,6 @@ spec:
         # API server scrape drops the other components' families and ten
         # histograms that none of this chart's rules or dashboards read: about
         # 30,000 series a node in place of 120,000, which fits VMSingle's 1 GiB.
-        kubelet:
           vmScrapes:
             kubelet:
               spec:
