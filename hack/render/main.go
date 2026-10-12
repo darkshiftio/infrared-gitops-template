@@ -92,6 +92,12 @@ type Data struct {
 	// Stores is the operator's INFRARED_STORES: true renders the platform's own
 	// stores, CloudNativePG with one Postgres Cluster, and SeaweedFS.
 	Stores bool `json:"Stores"`
+	// StoresSingleNode is the operator's INFRARED_STORES_SINGLE_NODE, the
+	// chart's stores.singleNode: with Stores, SeaweedFS runs on the cluster's
+	// one node, one server of each kind, every file written once. False, the
+	// default, spreads it over three nodes as before; without Stores it
+	// changes nothing.
+	StoresSingleNode bool `json:"StoresSingleNode"`
 	// Backup is the destination of the install's backups, outside the cluster:
 	// the Installation's spec.backup.destination, which the operator seeds from
 	// the chart's INFRARED_BACKUP. An empty Bucket turns backups off, and with
@@ -486,6 +492,7 @@ func main() {
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
 	flag.BoolVar(&d.SubstrateCapable, "substrate-capable", false, "SubstrateCapable: the preflight's result")
 	flag.BoolVar(&d.Stores, "stores", false, "Stores: the platform's own Postgres and SeaweedFS")
+	flag.BoolVar(&d.StoresSingleNode, "stores-single-node", false, "StoresSingleNode: with Stores, SeaweedFS on the cluster's one node, every file once")
 	flag.Var(backupFlag{&d.Backup}, "backup", `Backup, as JSON: {"bucket": "...", "endpoint": "https://...", "region": "...", "prefix": "...", "provider": "gcs"} (empty: no backups)`)
 	flag.Var(disabledFlag{&d.Disabled}, "disabled", `Disabled, as a JSON array of component names: ["infisical"] (empty: none)`)
 	flag.StringVar(&d.Forge, "forge", "", `Forge: "" (GitHub, as before) or "gitea"`)
@@ -570,6 +577,7 @@ func mergeDataFile(d *Data, path string) error {
 		"cloud":                 func() { d.Cloud = explicit.Cloud },
 		"substrate-capable":     func() { d.SubstrateCapable = explicit.SubstrateCapable },
 		"stores":                func() { d.Stores = explicit.Stores },
+		"stores-single-node":    func() { d.StoresSingleNode = explicit.StoresSingleNode },
 		"backup":                func() { d.Backup = explicit.Backup },
 		"disabled":              func() { d.Disabled = explicit.Disabled },
 		"forge":                 func() { d.Forge = explicit.Forge },

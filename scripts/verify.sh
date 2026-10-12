@@ -32,6 +32,10 @@
 #     file on two of them, its filer metadata in that Postgres, the buckets
 #     ate-snapshots and registry with an identity each and no key in the repo;
 #     without Stores, no object of them
+#   - one node (StoresSingleNode, with Stores): SeaweedFS runs one master, one
+#     volume server, one filer and one S3 gateway and writes every file once,
+#     and only its Application, the repo's README and the infrared Application,
+#     which carries stores.singleNode, change; without Stores nothing changes
 #   - only the Postgres Cluster and, with Forge gitea, Gitea's volume name a
 #     Linode volume class, and only on Linode: each makes one volume
 #   - the infrared Application carries the operator's image registry and pins,
@@ -2015,6 +2019,37 @@ off_app="$work/substrate-test-actors-off/registry/clusters/$cluster/components/i
   && ! grep -q 'substrate-test-actors' <(sed -n '/^Left out on purpose/,/^$/p' "$work/substrate-test-actors-off/README.md") \
   && ok "substrate-test-actors: leaves out only the test actors ($(wc -w <<<"$want" | tr -d ' ') files change), and the infrared Application never carries the name" \
   || bad "substrate-test-actors: changed '$changed', want '$want', or the infrared Application or README carry it wrong"
+
+# --- One node: the stores on the cluster's one node ------------------------------
+# StoresSingleNode with the stores, on the stores alone and on the one install's
+# shape (the registry variant): one server of each kind, every file written once
+# (replication off, the masters' default 000), and only SeaweedFS's Application,
+# the repo's README and the infrared Application, which carries
+# stores.singleNode, change. Without the stores it changes nothing, so no
+# production cluster, which never sets it, renders anything new.
+sw_v='.spec.sources[] | select(.chart == "seaweedfs") | .helm.valuesObject'
+for base in stores-plain registry; do
+  out="$work/single-node-$base"
+  cluster="$(render_again "$base" "$out" -stores-single-node)" || { bad "single node: no variant $base"; continue; }
+  sw="registry/clusters/$cluster/components/seaweedfs.yaml"
+  infrared="registry/clusters/$cluster/components/infrared.yaml"
+  changed="$({ diff -rq "$work/$base" "$out" || true; } | sed -E "s#^Files $work/$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  want="$(printf '%s\n' README.md "$sw" "$infrared" | sort | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$changed" = "$want" ] \
+      && [ "$(sel "$out/$sw" "$sw_v | (.master.replicas, .volume.replicas, .filer.replicas, .s3.replicas) | tostring" | tr '\n' ' ')" = "1 1 1 1 " ] \
+      && [ "$(sel "$out/$sw" "$sw_v | .global.seaweedfs.enableReplication")" = false ] \
+      && [ -z "$(sel "$out/$sw" "$sw_v | .global.seaweedfs.replicationPlacement // \"\"")" ] \
+      && [ "$(sel "$out/$sw" "$sw_v | .volume.dataDirs[0].type")" = hostPath ] \
+      && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.stores' "$out/$infrared")" = '{"enabled":true,"singleNode":true}' ]; then
+    ok "single node ($base): SeaweedFS 1 master, 1 volume server, 1 filer, 1 S3 gateway, every file once; only its Application, the README and the infrared Application change"
+  else
+    bad "single node ($base): changed '$changed', want '$want'; or SeaweedFS is not one of each with every file once, or stores.singleNode is not carried"
+  fi
+done
+render_again k3s "$work/single-node-k3s" -stores-single-node >/dev/null
+changed="$({ diff -rq "$work/k3s" "$work/single-node-k3s" || true; } | tr '\n' ' ')"
+[ -z "$changed" ] && ok "single node without the stores: nothing changes" \
+  || bad "single node without the stores changes files: $changed"
 
 # --- a build registry that is not ECR ---------------------------------------------
 # No ECR login job and no privileged namespace; builds/registry-push is the org's.

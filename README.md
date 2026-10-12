@@ -61,6 +61,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
 | `.SubstrateCapable` | `false` | the operator's preflight: whether the cluster can host Agent Substrate. With `.Stores` and `.Registry` too, the template runs Substrate (see "Agent Substrate"); while it is false, or either of those is unset, the template leaves Substrate out |
 | `.Stores` | `false` \| `true` | the operator's `INFRARED_STORES`: `true` renders the platform's own stores, CloudNativePG with one Postgres Cluster and SeaweedFS (see "The stores"), and on k3s keeps VMSingle's metrics on an `emptyDir` (see "Metrics with the stores") |
+| `.StoresSingleNode` | `false` \| `true` | the operator's `INFRARED_STORES_SINGLE_NODE` (chart value `stores.singleNode`): with `.Stores`, SeaweedFS runs on the cluster's one node, one server of each kind, every file written once (see "The stores"). `false` spreads it over three nodes as before; without `.Stores` it changes nothing |
 | `.Backup` | `{"Bucket": "acme-backups", "Provider": "", "Endpoint": "https://us-east-1.linodeobjects.com", "Region": "us-east-1", "Prefix": "", "Credentials": {"Secret": "", "AccessKeyIDKey": "", "SecretKeyKey": "", "Kind": ""}}` | the Installation's `spec.backup.destination`, which the operator seeds from its `INFRARED_BACKUP`: a bucket outside the cluster that the stores are copied to and the backups written to. `.Backup.Provider` is empty, `linode` or `s3` for an S3-compatible bucket with a key, as before the field existed, or `gcs` for Google Cloud Storage, which the cluster's own identities write and read (below). An empty `.Backup.Bucket` turns backups off, and with `.Stores` false there is nothing to copy. `.Backup.Endpoint` is empty for AWS S3; `.Backup.Region` may be empty. `.Backup.Prefix` is the path everything is kept under in the bucket, `<prefix>` below; empty is `.ClusterName`, as before the field existed. `.Backup.Credentials` is where the bucket's key is: the Secret in `.InfraredNamespace` and its two keys, and the credential's kind; each empty field is today's, `infrared-platform-tokens`, `backup-access-key-id`, `backup-secret-access-key` and `accessKey`, and the operator may send those explicitly, which renders the same files. Day one reads no other Secret or kind (`hack/render` refuses them). With `gcs`, `Kind` is `serviceAccount`, or empty for the same, and no key is read or copied: `.Backup.Endpoint` is `https://storage.googleapis.com` or empty, and `.PostgresArchive.Enabled` is refused, since Barman's archive writes through the S3 API with a key |
 | `.Disabled` | `[]` or `["infisical"]` | the operator's `INFRARED_DISABLED_COMPONENTS`: components, by Application name, that the template leaves out (see "Disabled components"), and `substrate-test-actors`, Substrate's test actors (see "Agent Substrate"). No helper tests a list, so a template ranges over it: `[[ range .Disabled ]][[ if eq . "infisical" ]][[ $on = false ]][[ end ]][[ end ]]` |
 | `.Forge` | `` \| `gitea` | the forge the org's repos live on: `gitea` when the platform org's GitProvider is the Gitea the Infrared chart runs, `` for GitHub, as before (the operator never passes `github`). Test it with `eq .Forge "gitea"` |
@@ -80,7 +81,7 @@ The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
 encoding/json matches them case-insensitively, so `hack/render -data` reads
 either, and `Backup`'s keys as `INFRARED_BACKUP` spells them (`bucket`, …).
-`hack/render` takes `-stores`, `-backup` as JSON and `-disabled` as a JSON
+`hack/render` takes `-stores` (and `-stores-single-node`), `-backup` as JSON and `-disabled` as a JSON
 array, exactly as the operator's environment carries them, `-forge` with
 `-forge-url`, and `-registry`; `-registry-retention` as JSON, as
 `INFRARED_REGISTRY_RETENTION` carries it (camelCase keys); `-copies`,
@@ -109,6 +110,8 @@ no file, so a Traefik cluster without the stores renders the same files
 whatever its preflight says (`make verify` checks it). `.Copies`,
 `.PostgresArchive`, `.RegistryRetention`, `.PostgresServerName` and
 `.Backup.Prefix` change only settings that render today's literal when empty,
+`.StoresSingleNode` changes only SeaweedFS's topology, the repo's README and
+what the `infrared` Application carries, and only with `.Stores`,
 and `.Backup.Credentials` renders today's files with its defaults, empty or
 spelled out. `.Copies.Recipients` turns backups on, with the stores and a
 backup bucket: the Postgres roles' copy into `.InfraredNamespace` and the
@@ -170,6 +173,7 @@ set, so a cluster without it renders the same file as before:
 | `.Edge` `gateway` | `installation.edge: gateway` |
 | `.PlatformDomain` and `.InfraredHost`, in gateway mode | `installation.previews.domain`, and `installation.previews.signInURL: https://<InfraredHost>` |
 | `.Stores` | `stores.enabled: true` |
+| `.StoresSingleNode`, with `.Stores` | `stores.singleNode: true` |
 | `.Backup.Bucket` (with its `.Endpoint`, `.Region` and `.Prefix` when set) | `backup` (`bucket`, `endpoint`, `region`, `prefix`) |
 | `.Copies.Recipients`, `.Copies.Mirror.Schedule`, `.Copies.Mirror.Retention` and `.PostgresArchive.Enabled`, each that is set | `backup` (`recipients`, `mirror.schedule`, `retention`, `postgres.archive: true`), beside the bucket, or alone |
 | `.Disabled` | `components.disabled`, without `substrate-test-actors` |
@@ -473,6 +477,19 @@ masters' leader copies under-replicated volumes back to two servers
 no erasure coding, which needs more servers than three nodes give. The filers
 keep every entry in the platform's Postgres (database `seaweedfs`), so they are
 stateless. No SeaweedFS object claims a volume, so none is a Linode volume.
+
+On a cluster of one node (`.StoresSingleNode`, the chart's `stores.singleNode`,
+which a local install on one machine sets) the same chart runs one master, one
+volume server, one filer and one S3 gateway, and writes every file once
+(replication `000`, the masters' default): three masters would never form a
+Raft quorum there, since the chart's anti-affinity keeps two of them from the
+one node, and there is no second server to copy a file to. The node's disk is
+then the only copy, so a lost node loses the buckets, except what the backups
+copied outside. The setting is the install's, never derived from the nodes it
+sees: a cluster of three rendered while one node had joined would keep
+unreplicated stores until its next hydration, and then move SeaweedFS from one
+Raft peer to three with every old volume still at `000`. It is off by default,
+and changes nothing without the stores.
 
 S3 answers at `http://seaweedfs-s3.stores.svc:8333`. The chart's bucket hook
 makes the buckets `ate-snapshots` (Agent Substrate's snapshots) and `registry`
@@ -913,6 +930,7 @@ make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
 make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
 make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000
+make render STORES=true STORES_SINGLE_NODE=true   # one node, as a local install on a Mac
 make render STORES=true REGISTRY=10.43.0.50:5000 SUBSTRATE_CAPABLE=true PULL_SECRET=ghcr-pull
 make verify                             # the CI gate
 scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
