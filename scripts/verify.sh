@@ -2046,6 +2046,10 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     [ "$(yq -N -r 'select(.metadata.name == "infrared-edge-zones-dashboard") | .data["infrared-edge-zones.json"]' "$work/vmks.yaml" \
         | jq -r '[.panels[].targets[0].legendFormat] | unique | join(",")')" = '{{infrared_zone}}' ] \
       && ok "gateway: the zones dashboard's legends survive the chart's tpl" || bad "gateway: the zones dashboard's legends are wrong after tpl"
+    # Node labels copied onto kubelet series took them past VMSingle's 40.
+    [ "$(yq -N -r 'select(.kind == "VMNodeScrape") | .spec.relabelConfigs[] | select(.action == "labelmap") | .regex' "$work/vmks.yaml" | wc -l | tr -d ' ')" = 0 ] \
+      && [ "$(yq -N -r 'select(.kind == "VMNodeScrape") | .metadata.name' "$work/vmks.yaml" | wc -l | tr -d ' ')" -ge 2 ] \
+      && ok "gateway: the kubelet and cAdvisor scrapes copy no node labels" || bad "gateway: a VMNodeScrape copies node labels onto its series"
   else
     bad "gateway: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks.err")"
   fi
