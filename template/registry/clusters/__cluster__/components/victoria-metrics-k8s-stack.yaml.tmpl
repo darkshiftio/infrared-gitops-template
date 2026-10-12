@@ -264,7 +264,7 @@ spec:
                         {
                           "refId": "A",
                           "expr": "sum by (infrared_zone) (rate(envoy_cluster_upstream_rq_total{infrared_zone=~\"$zone\"}[5m]))",
-                          "legendFormat": "{{ \"{{infrared_zone}}\" }}"
+                          "legendFormat": "{{ `{{infrared_zone}}` }}"
                         }
                       ]
                     },
@@ -292,7 +292,7 @@ spec:
                         {
                           "refId": "A",
                           "expr": "sum by (infrared_zone) (rate(envoy_cluster_upstream_rq_xx{infrared_zone=~\"$zone\",envoy_response_code_class=\"5\"}[5m])) / sum by (infrared_zone) (rate(envoy_cluster_upstream_rq_total{infrared_zone=~\"$zone\"}[5m]))",
-                          "legendFormat": "{{ \"{{infrared_zone}}\" }}"
+                          "legendFormat": "{{ `{{infrared_zone}}` }}"
                         }
                       ]
                     },
@@ -320,7 +320,7 @@ spec:
                         {
                           "refId": "A",
                           "expr": "histogram_quantile(0.95, sum by (infrared_zone, le) (rate(envoy_cluster_upstream_rq_time_bucket{infrared_zone=~\"$zone\"}[5m])))",
-                          "legendFormat": "{{ \"{{infrared_zone}}\" }}"
+                          "legendFormat": "{{ `{{infrared_zone}}` }}"
                         }
                       ]
                     }
