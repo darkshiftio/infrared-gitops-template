@@ -407,6 +407,17 @@ for v in "${variants[@]}"; do
     jq -e '(.Disabled // []) | index("victoria-metrics-k8s-stack")' "$data_file" >/dev/null 2>&1 && tele_metrics=false
   fi
   tele_app="$out/registry/clusters/$cluster/components/telemetry.yaml"
+  # With the metrics stack on, its values carry Infrared's own scrape (every
+  # Service port named metrics in the Infrared namespace) and the Fleet dashboard.
+  vm_app="$out/registry/clusters/$cluster/components/victoria-metrics-k8s-stack.yaml"
+  if [ "$tele_metrics" = true ] && grep -q '^kind: Application' "$vm_app" 2>/dev/null; then
+    if grep -q 'kind: VMServiceScrape' "$vm_app" && grep -q 'name: infrared-metrics' "$vm_app" \
+      && grep -q 'name: infrared-fleet-dashboard' "$vm_app" && grep -q '"uid": "infrared-fleet"' "$vm_app"; then
+      ok "$variant: the metrics stack scrapes Infrared's metrics ports and carries the Fleet dashboard"
+    else
+      bad "$variant: the metrics stack lacks Infrared's scrape or the Fleet dashboard"
+    fi
+  fi
   tele_vm="$out/components/telemetry/vmagent.yaml"
   tele_kust="$out/components/telemetry/kustomization.yaml"
   if [ -n "$tele_url" ] && [ "$tele_metrics" = false ]; then

@@ -166,6 +166,20 @@ spec:
 [[- end ]]
         # extraObjects go through tpl, so the dashboards' {{ }} legends are quoted.
         extraObjects:
+          # Infrared's own metrics (ADR 0044): the operator's step counters and
+          # the API's request counters, on every Service port named metrics in
+          # the Infrared namespace, which the chart names so. An empty selector
+          # is every Service there; one without such a port yields no target.
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMServiceScrape
+            metadata:
+              name: infrared-metrics
+              namespace: [[ .InfraredNamespace ]]
+            spec:
+              selector: {}
+              endpoints:
+                - port: metrics
+                  interval: 30s
           # The Fleet dashboard (infrared-docs-internal ADR 0044, P10): every
           # platform's numbers side by side, hosted's own and each Mac's stack
           # that pushes to this store through infrared-api's write path: agent
