@@ -164,15 +164,289 @@ spec:
                       sourceLabels: [__name__]
                       regex: (etcd_request_duration_seconds_bucket|apiserver_watch_events_dispatch_duration_seconds_bucket|apiserver_request_body_size_bytes_bucket|apiserver_storage_list_duration_seconds_bucket|apiserver_watch_list_duration_seconds_bucket|apiserver_watch_cache_read_wait_seconds_bucket|apiserver_watch_cache_initialization_duration_seconds_bucket|apiserver_response_sizes_bucket|apiserver_watch_events_sizes_bucket|apiserver_admission_controller_admission_duration_seconds_bucket)
 [[- end ]]
-[[- if eq .Edge "gateway" ]]
-        # Requests at the edge, per zone: Envoy's own metrics for the upstream
-        # of every HTTPRoute (httproute/<zone>/<route>/rule/<n>), so an app
-        # needs nothing of its own. Only those families and upstreams are kept
-        # (a few hundred series), with the zone and the route as labels. The
-        # operator's edge-errors and edge-latency SLOs read them, and the
-        # dashboard below shows them. extraObjects go through tpl, so the
-        # dashboard's {{ }} legends are quoted.
+        # extraObjects go through tpl, so the dashboards' {{ }} legends are quoted.
         extraObjects:
+          # Infrared's own metrics (ADR 0044): the operator's step counters and
+          # the API's request counters, on every Service port named metrics in
+          # the Infrared namespace, which the chart names so. An empty selector
+          # is every Service there; one without such a port yields no target.
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMServiceScrape
+            metadata:
+              name: infrared-metrics
+              namespace: [[ .InfraredNamespace ]]
+            spec:
+              selector: {}
+              endpoints:
+                - port: metrics
+                  interval: 30s
+          # The Fleet dashboard (infrared-docs-internal ADR 0044, P10): every
+          # platform's numbers side by side, hosted's own and each Mac's stack
+          # that pushes to this store through infrared-api's write path: agent
+          # steps (attempts, cost, duration, tokens), the step containers'
+          # memory, the Macs' machines, the builders' Claude Code sessions, and
+          # the write path's health. The series come from the operator, the
+          # API, each stack's vmagent and the localred app, named as the plan
+          # (localred docs/plan-work-distributor.md, phase 1) says.
+          - apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: infrared-fleet-dashboard
+              namespace: monitoring
+              labels:
+                # Grafana's sidecar loads every ConfigMap so labelled in monitoring.
+                grafana_dashboard: "1"
+            data:
+              infrared-fleet.json: |
+                {
+                  "title": "Infrared fleet: every platform as one unit",
+                  "uid": "infrared-fleet",
+                  "schemaVersion": 39,
+                  "time": {
+                    "from": "now-24h",
+                    "to": "now"
+                  },
+                  "refresh": "1m",
+                  "tags": [
+                    "infrared"
+                  ],
+                  "editable": true,
+                  "panels": [
+                    {
+                      "id": 1,
+                      "type": "stat",
+                      "title": "Agent steps by platform, last 24 h",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 8,
+                        "h": 6
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (increase(infrared_step_attempts_total[24h]))",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {},
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ]
+                        },
+                        "colorMode": "none",
+                        "graphMode": "none"
+                      }
+                    },
+                    {
+                      "id": 2,
+                      "type": "stat",
+                      "title": "Builder sessions: cost by platform, last 24 h (USD)",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 0,
+                        "w": 8,
+                        "h": 6
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (increase({__name__=~\"claude_code_cost_usage.*\"}[24h]))",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "currencyUSD"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ]
+                        },
+                        "colorMode": "none",
+                        "graphMode": "none"
+                      }
+                    },
+                    {
+                      "id": 3,
+                      "type": "timeseries",
+                      "title": "Telemetry writes by platform and status, per minute",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 0,
+                        "w": 8,
+                        "h": 6
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, status) (rate(infrared_telemetry_writes_total[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}} {{status}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {},
+                        "overrides": []
+                      }
+                    },
+                    {
+                      "id": 4,
+                      "type": "timeseries",
+                      "title": "Step cost by platform and model, per hour (USD)",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 6,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, model) (increase(infrared_step_cost_usd_total[1h]))",
+                          "legendFormat": "{{ `{{platform}} {{model}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "currencyUSD"
+                        },
+                        "overrides": []
+                      }
+                    },
+                    {
+                      "id": 5,
+                      "type": "timeseries",
+                      "title": "Step duration, p95 by platform",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 6,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "histogram_quantile(0.95, sum by (platform, le) (rate(infrared_step_duration_seconds_bucket[1h])))",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s"
+                        },
+                        "overrides": []
+                      }
+                    },
+                    {
+                      "id": 6,
+                      "type": "timeseries",
+                      "title": "Tokens by platform and kind, per hour",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 14,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, kind) (increase(infrared_step_tokens_total[1h]))",
+                          "legendFormat": "{{ `{{platform}} {{kind}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {},
+                        "overrides": []
+                      }
+                    },
+                    {
+                      "id": 7,
+                      "type": "timeseries",
+                      "title": "Step containers: peak memory working set by platform and container",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 14,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform, container) (container_memory_working_set_bytes{namespace=~\"ir-org-.*\"})",
+                          "legendFormat": "{{ `{{platform}} {{container}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes"
+                        },
+                        "overrides": []
+                      }
+                    },
+                    {
+                      "id": 8,
+                      "type": "timeseries",
+                      "title": "Machines: memory by platform and machine",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 22,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform, machine) (localred_machine_memory_bytes)",
+                          "legendFormat": "{{ `{{platform}} {{machine}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes"
+                        },
+                        "overrides": []
+                      }
+                    },
+                    {
+                      "id": 9,
+                      "type": "timeseries",
+                      "title": "vmagent remote write by platform and status code, per minute",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 22,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, status_code) (rate(vmagent_remotewrite_requests_total[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}} {{status_code}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {},
+                        "overrides": []
+                      }
+                    }
+                  ]
+                }
+[[- if eq .Edge "gateway" ]]
+          # Requests at the edge, per zone: Envoy's own metrics for the upstream
+          # of every HTTPRoute (httproute/<zone>/<route>/rule/<n>), so an app
+          # needs nothing of its own. Only those families and upstreams are kept
+          # (a few hundred series), with the zone and the route as labels. The
+          # operator's edge-errors and edge-latency SLOs read them, and the
+          # dashboard below shows them.
           - apiVersion: operator.victoriametrics.com/v1beta1
             kind: VMPodScrape
             metadata:

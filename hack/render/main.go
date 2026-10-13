@@ -138,6 +138,14 @@ type Data struct {
 	// Schedule is the base backup's and Retention the archive's, each empty
 	// for today's literal.
 	PostgresArchive PostgresArchive `json:"PostgresArchive"`
+	// Telemetry is the Installation's spec.observability.telemetry: the
+	// telemetry plane an install without the metrics stack pushes its numbers
+	// to (infrared-docs-internal ADR 0044). URL is the remote-write address,
+	// hosted's POST /api/v1/telemetry/write; Platform is the label every series
+	// carries, <login>-<stack> for a Mac's stack. Both empty renders no
+	// telemetry component; with victoria-metrics-k8s-stack on, nothing renders
+	// either, since that stack keeps its metrics itself.
+	Telemetry Telemetry `json:"Telemetry"`
 	// RegistryRetention is the operator's INFRARED_REGISTRY_RETENTION: Zot's
 	// garbage collection and retention. Each empty field renders today's
 	// literal.
@@ -236,6 +244,13 @@ type PostgresArchive struct {
 	Enabled   bool   `json:"Enabled"`
 	Schedule  string `json:"Schedule"`
 	Retention string `json:"Retention"`
+}
+
+// Telemetry is where an install without the metrics stack sends its numbers,
+// and the platform label they carry (ADR 0044).
+type Telemetry struct {
+	URL      string `json:"URL"`
+	Platform string `json:"Platform"`
 }
 
 // RegistryRetention is INFRARED_REGISTRY_RETENTION: Zot deletes an untagged

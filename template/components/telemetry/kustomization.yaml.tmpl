@@ -1,0 +1,14 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "telemetry" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $metrics := true ]][[ range .Disabled ]][[ if eq . "victoria-metrics-k8s-stack" ]][[ $metrics = false ]][[ end ]][[ end ]]
+[[- if and $on .Telemetry.URL (not $metrics) -]]
+# One telemetry plane (the `telemetry` Application, wave 30): see vmagent.yaml.
+# Every object names its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - vmagent.yaml
+[[- else -]]
+# The telemetry component renders only with a telemetry URL and without the
+# metrics stack, so this component holds no objects and no Application points
+# at it.
+[[- end ]]

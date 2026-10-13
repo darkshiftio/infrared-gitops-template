@@ -222,6 +222,21 @@ func TestDataFileStoresSingleNode(t *testing.T) {
 	}
 }
 
+// The telemetry plane loads from the operator's JSON by the Go names (ADR 0044).
+func TestDataFileTelemetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Telemetry": {"URL": "https://infrared.example.com/api/v1/telemetry/write", "Platform": "demo-mac"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.Telemetry.URL != "https://infrared.example.com/api/v1/telemetry/write" || d.Telemetry.Platform != "demo-mac" {
+		t.Errorf("loaded Telemetry %+v; want the URL and platform demo-mac", d.Telemetry)
+	}
+}
+
 func TestBackupAndDisabledFlags(t *testing.T) {
 	var b BackupTarget
 	bf := backupFlag{&b}
