@@ -1,0 +1,58 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "telemetry" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $metrics := true ]][[ range .Disabled ]][[ if eq . "victoria-metrics-k8s-stack" ]][[ $metrics = false ]][[ end ]][[ end ]]
+[[- if not $on -]]
+# telemetry is left out: the Installation names it among its disabled
+# components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and .Telemetry.URL (not $metrics) -]]
+# One telemetry plane (components/telemetry): a vmagent in monitoring that
+# scrapes Infrared's own metrics (every port named metrics in
+# [[ .InfraredNamespace ]]), the kubelet's container series for the org
+# namespaces, and its own; takes OpenTelemetry metrics at :8429; and
+# remote-writes all of it to [[ .Telemetry.URL ]] with the labels
+# platform=[[ .Telemetry.Platform ]] and cluster=[[ .Telemetry.Platform ]],
+# buffering to disk while the store is unreachable. The bearer token is the
+# Secret monitoring/telemetry-token, which `ir local telemetry connect` writes;
+# this repo never holds it. Wave 30, the metrics stack's band: this component
+# stands where victoria-metrics-k8s-stack is left out (infrared-docs-internal
+# ADR 0044, P7 to P9).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: telemetry
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: observability
+  annotations:
+    argocd.argoproj.io/sync-wave: "30"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: [[ .GitopsRepoURL ]]
+    targetRevision: [[ .DefaultBranch ]]
+    path: components/telemetry
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- else -]]
+# The telemetry component renders only for an install whose Installation names
+# a telemetry URL (spec.observability.telemetry) and leaves the metrics stack
+# out: a local stack that pushes its numbers to hosted's store. This cluster
+# has the metrics stack of its own, or no telemetry URL, so this file holds no
+# objects.
+[[- end ]]

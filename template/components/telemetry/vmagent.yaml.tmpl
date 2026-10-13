@@ -1,0 +1,245 @@
+[[- $on := true ]][[ range .Disabled ]][[ if eq . "telemetry" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $metrics := true ]][[ range .Disabled ]][[ if eq . "victoria-metrics-k8s-stack" ]][[ $metrics = false ]][[ end ]][[ end ]]
+[[- if and $on .Telemetry.URL (not $metrics) -]]
+# One vmagent for a stack without the metrics stack: it scrapes, takes
+# OpenTelemetry metrics, and remote-writes to the telemetry plane
+# ([[ .Telemetry.URL ]]) as platform [[ .Telemetry.Platform ]].
+#
+#   scrapes   every Endpoints port named metrics in [[ .InfraredNamespace ]]
+#             (the API's and the operator's, which the chart names so); the
+#             kubelet's cAdvisor series for the org namespaces (ir-org-*),
+#             memory working set and CPU seconds by pod and container, with
+#             the id, name and image labels dropped; and itself
+#   takes     OpenTelemetry metrics at :8429/opentelemetry/v1/metrics, named
+#             the Prometheus way (claude_code.cost.usage becomes
+#             claude_code_cost_usage), from the person's Claude Code sessions
+#             and the localred app
+#   drops     user.email, user.id and organization.id, which Claude Code puts
+#             on every series (localred finding K1): the platform label is the
+#             only identity that leaves the Mac
+#   writes    with the bearer token in the Secret telemetry-token (key token),
+#             which `ir local telemetry connect` writes and this repo never
+#             holds; the labels platform and cluster on every series; a disk
+#             buffer of up to 800 MiB on a 1 Gi claim, so a Mac shut for a
+#             while flushes when it wakes; at most 50,000 new series an hour
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: telemetry-vmagent
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, nodes/proxy, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - nonResourceURLs: [/metrics, /metrics/cadvisor]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: telemetry-vmagent
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: telemetry-vmagent
+subjects:
+  - kind: ServiceAccount
+    name: vmagent
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmagent-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+data:
+  scrape.yaml: |
+    global:
+      scrape_interval: 30s
+    scrape_configs:
+      - job_name: infrared
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: ["[[ .InfraredNamespace ]]"]
+        relabel_configs:
+          - action: keep
+            source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: metrics
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: service
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+      - job_name: kubelet-cadvisor
+        scheme: https
+        metrics_path: /metrics/cadvisor
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - action: keep
+            source_labels: [__name__]
+            regex: container_memory_working_set_bytes|container_cpu_usage_seconds_total
+          - action: keep
+            source_labels: [namespace]
+            regex: ir-org-.+
+          - action: keep
+            source_labels: [container]
+            regex: .+
+          - action: labeldrop
+            regex: id|name|image
+      - job_name: vmagent
+        static_configs:
+          - targets: ["127.0.0.1:8429"]
+  relabel.yaml: |
+    # Claude Code puts the person's email and IDs on every series it exports
+    # (localred finding K1). They never leave the Mac: the platform label is
+    # the one identity the plane keeps. Both spellings, since Prometheus naming
+    # turns the dots into underscores.
+    - action: labeldrop
+      regex: "user\\.email|user\\.id|organization\\.id|user_email|user_id|organization_id"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vmagent-buffer
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+spec:
+  replicas: 1
+  # One claim, one pod: the new one starts once the old one has let go.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmagent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmagent
+        app.kubernetes.io/part-of: infrared-gitops
+    spec:
+      serviceAccountName: vmagent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vmagent
+          image: docker.io/victoriametrics/vmagent:v1.154.0@sha256:2a939a9df9c8591aa5447efcd21af8c4f2ecc60ca6a8e742ffd46b9c76ef7f17
+          args:
+            - -promscrape.config=/etc/vmagent/scrape.yaml
+            - -promscrape.configCheckInterval=1m
+            - -remoteWrite.url=[[ .Telemetry.URL ]]
+            - -remoteWrite.bearerTokenFile=/etc/telemetry/token
+            - -remoteWrite.label=platform=[[ .Telemetry.Platform ]]
+            - -remoteWrite.label=cluster=[[ .Telemetry.Platform ]]
+            - -remoteWrite.relabelConfig=/etc/vmagent/relabel.yaml
+            - -remoteWrite.tmpDataPath=/var/lib/vmagent
+            - -remoteWrite.maxDiskUsagePerURL=800MiB
+            - -remoteWrite.maxHourlySeries=50000
+            - -opentelemetry.usePrometheusNaming
+            - -httpListenAddr=:8429
+          ports:
+            - name: http
+              containerPort: 8429
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/vmagent
+              readOnly: true
+            - name: token
+              mountPath: /etc/telemetry
+              readOnly: true
+            - name: buffer
+              mountPath: /var/lib/vmagent
+      volumes:
+        - name: config
+          configMap:
+            name: vmagent-config
+        - name: token
+          secret:
+            secretName: telemetry-token
+        - name: buffer
+          persistentVolumeClaim:
+            claimName: vmagent-buffer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmagent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: infrared-gitops
+spec:
+  selector:
+    app.kubernetes.io/name: vmagent
+  ports:
+    - name: http
+      port: 8429
+      targetPort: http
+[[- else -]]
+# The telemetry component renders only with a telemetry URL and without the
+# metrics stack, so this file holds no objects.
+[[- end ]]

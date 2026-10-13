@@ -155,6 +155,9 @@ products/                  yours: one directory per product (see "Products")
 [[- if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
 | 30 | `victoria-metrics-k8s-stack` | VictoriaMetrics, vmagent, vmalert, Alertmanager, Grafana[[ if and (eq .ClusterFlavor "k3s") .Stores ]]. The metrics are on the pod's own disk, so they start empty after a node loss or a pod restart[[ end ]] |
 [[- end ]]
+[[- if and .Telemetry.URL (contains " victoria-metrics-k8s-stack " $disabled) (not (contains " telemetry " $disabled)) ]]
+| 30 | `telemetry` | one vmagent in `monitoring`: scrapes Infrared's metrics and the org namespaces' containers, takes OpenTelemetry metrics at `:8429`, and remote-writes everything to `[[ .Telemetry.URL ]]` as platform `[[ .Telemetry.Platform ]]`; the token is the Secret `monitoring/telemetry-token` |
+[[- end ]]
 | 40 | `infrared` | the Infrared control plane (operator, api, ui, mcp) |
 [[- if and $codeIndex (not (contains " code-index " $disabled)) ]]
 | 41 | `code-index` | Infrared's code index (namespace `code-index`): the repositories its record names, at their pinned commits, searchable by infrared-api alone. Its record (the Secret `code-index-settings`) and its credential for private repositories (the Secret `code-index-credentials`) are the install's, copied from `[[ .InfraredNamespace ]]/infrared-platform-tokens` |

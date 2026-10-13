@@ -102,6 +102,9 @@
 #   - metrics: on k3s with the stores VMSingle's data on an emptyDir of 10Gi
 #     and no claim (a request of no space), otherwise its 10Gi claim as before;
 #     and nothing else in the stack asks for a claim
+#   - telemetry (ADR 0044): with a telemetry URL in the -data file and the
+#     metrics stack left out, one vmagent that writes to that URL as that
+#     platform; with the stack on, or without a URL, nothing of it
 #   - backups, with a backup bucket: the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys, under the install's name or
 #     .Backup.Prefix; with .PostgresArchive.Enabled as well, Postgres's WAL
@@ -265,6 +268,14 @@ ci_images="{\"code-index\":{\"tag\":\"$ci_tag\",\"digest\":\"$ci_digest\"}}"
 yq -p json -o json '.Images["code-index"] = {"tag": "'"$ci_tag"'", "digest": "'"$ci_digest"'"}' "$work/substrate.json" >"$work/code-index.json"
 yq -p json -o json '.Images["code-index"] = {"tag": "'"$ci_tag"'", "digest": "'"$ci_digest"'"} | .imagePullSecret = ""' \
   "$work/gateway.json" >"$work/code-index-plain.json"
+# The telemetry variants (ADR 0044): the stores' Data with a telemetry URL and
+# platform, once with the metrics stack left out (a Mac's stack, which pushes
+# its numbers to hosted's store) and once with the stack on, where nothing of
+# the telemetry component may render.
+yq -p json -o json '.Telemetry = {"URL": "https://infrared.example.com/api/v1/telemetry/write", "Platform": "demo-mac"} | .Disabled = ["victoria-metrics-k8s-stack"]' \
+  "$work/stores.json" >"$work/telemetry.json"
+yq -p json -o json '.Telemetry = {"URL": "https://infrared.example.com/api/v1/telemetry/write", "Platform": "demo-mac"}' \
+  "$work/stores.json" >"$work/telemetry-metrics.json"
 yq -p json -o json '. + {"Copies": {"Recipients": ["'"$age_recipient"'"]}}' "$work/stores.json" >"$work/copies-noreg.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
   "$work/copies.json" >"$work/restore.json"
@@ -335,6 +346,8 @@ variants=(
   "gcs-gke demo-gk k3s $zot_registry -data $work/gcs-gke.json"
   "code-index demo-ci k3s $zot_registry -data $work/code-index.json"
   "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
+  "telemetry demo-tm k3s - -data $work/telemetry.json"
+  "telemetry-metrics demo-te k3s - -data $work/telemetry-metrics.json"
   "code-index-pull demo-cq k3s - -image-registry ghcr.io/demo-org -pull-secret ghcr-pull -images $ci_images"
   "code-index-nopull demo-cy k3s - -image-registry ghcr.io/demo-org -images $ci_images"
 )
@@ -381,6 +394,34 @@ for v in "${variants[@]}"; do
   data_file="$(sed -n -E 's/.*-data ([^ ]+).*/\1/p' <<<"${extra:-}")"
   if [ -z "$pull_secret" ] && [ -n "$data_file" ]; then
     pull_secret="$(yq -p json -r '.imagePullSecret // .ImagePullSecret // ""' "$data_file")"
+  fi
+  # The telemetry plane (ADR 0044): with a telemetry URL in the -data file and
+  # the metrics stack left out, the telemetry Application and its vmagent
+  # render, writing to that URL as that platform, with the token's Secret and
+  # the relabel that drops the person's email; otherwise no file of the
+  # component holds an object.
+  tele_url="" tele_platform="" tele_metrics=true
+  if [ -n "$data_file" ]; then
+    tele_url="$(jq -r '.Telemetry.URL // ""' "$data_file")"
+    tele_platform="$(jq -r '.Telemetry.Platform // ""' "$data_file")"
+    jq -e '(.Disabled // []) | index("victoria-metrics-k8s-stack")' "$data_file" >/dev/null 2>&1 && tele_metrics=false
+  fi
+  tele_app="$out/registry/clusters/$cluster/components/telemetry.yaml"
+  tele_vm="$out/components/telemetry/vmagent.yaml"
+  tele_kust="$out/components/telemetry/kustomization.yaml"
+  if [ -n "$tele_url" ] && [ "$tele_metrics" = false ]; then
+    if grep -q '^kind: Application' "$tele_app" && grep -q -- "-remoteWrite.url=$tele_url" "$tele_vm" \
+      && grep -q -- "-remoteWrite.label=platform=$tele_platform" "$tele_vm" && grep -q '^kind: Deployment' "$tele_vm" \
+      && grep -q 'secretName: telemetry-token' "$tele_vm" && grep -q 'user_email' "$tele_vm" \
+      && grep -q 'infrared.darkshift.io/layer: observability' "$tele_app" && grep -q -- '- vmagent.yaml' "$tele_kust"; then
+      ok "$variant: telemetry renders a vmagent writing to $tele_url as platform $tele_platform"
+    else
+      bad "$variant: telemetry does not render the vmagent for $tele_url as platform $tele_platform"
+    fi
+  elif grep -q '^kind:' "$tele_app" "$tele_vm" "$tele_kust" 2>/dev/null; then
+    bad "$variant: telemetry holds objects without a telemetry URL or beside the metrics stack"
+  else
+    ok "$variant: telemetry holds no objects"
   fi
   # The variant's edge, stores, cloud, names, backup bucket, components left
   # out and forge, by flag or in its -data file.
