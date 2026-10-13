@@ -36,12 +36,17 @@ spec:
           spec:
             # 30 days covers 28-day SLO windows; about 6-7 GB for one management cluster.
             retentionPeriod: "30d"
+            # Read on infrared-cp-google on 2026-10-13 (localred plan, spike S4): 89,000
+            # active series and 723 MiB in use under the former 1 GiB limit, before any
+            # developer's stack pushes to the telemetry plane (ADR 0044). 2 GiB leaves
+            # room for several stacks at a few thousand series each; the owner allowed
+            # the raise.
             resources:
               requests:
                 cpu: 100m
-                memory: 256Mi
+                memory: 512Mi
               limits:
-                memory: 1Gi
+                memory: 2Gi
 [[- if and (eq .ClusterFlavor "k3s") .Stores ]]
             # With the stores the cluster is several servers, each with its own
             # disk, and is built to lose one: SeaweedFS keeps every file on two
