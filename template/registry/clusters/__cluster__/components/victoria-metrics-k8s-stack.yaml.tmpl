@@ -187,12 +187,15 @@ spec:
                   interval: 30s
           # The Fleet dashboard (infrared-docs-internal ADR 0044, P10): every
           # platform's numbers side by side, hosted's own and each Mac's stack
-          # that pushes to this store through infrared-api's write path: agent
-          # steps (attempts, cost, duration, tokens), the step containers'
-          # memory, the Macs' machines, the builders' Claude Code sessions, and
-          # the write path's health. The series come from the operator, the
-          # API, each stack's vmagent and the localred app, named as the plan
-          # (localred docs/plan-work-distributor.md, phase 1) says.
+          # that pushes to this store through infrared-api's write path, by the
+          # cluster label both carry: the plane's own health (targets, writes,
+          # buffers), Infrared's API and operator, agent steps (attempts, cost,
+          # duration, tokens), the step containers, the Macs' machines, the
+          # builders' Claude Code sessions, and the store itself. The series
+          # come from the operator, the API, each stack's vmagent and the
+          # localred app, named as the plan (localred
+          # docs/plan-work-distributor.md, phase 1) says. Its second cut, from
+          # the first series a Mac sent on 2026-10-13.
           - apiVersion: v1
             kind: ConfigMap
             metadata:
@@ -204,70 +207,82 @@ spec:
             data:
               infrared-fleet.json: |
                 {
-                  "title": "Infrared fleet: every platform as one unit",
                   "uid": "infrared-fleet",
-                  "schemaVersion": 39,
-                  "time": {
-                    "from": "now-24h",
-                    "to": "now"
-                  },
-                  "refresh": "1m",
+                  "title": "Infrared fleet: every platform as one unit",
                   "tags": [
                     "infrared"
                   ],
                   "editable": true,
+                  "schemaVersion": 39,
+                  "version": 3,
+                  "time": {
+                    "from": "now-6h",
+                    "to": "now"
+                  },
+                  "timezone": "browser",
+                  "refresh": "1m",
+                  "graphTooltip": 1,
+                  "description": "Every Infrared install as a platform of one telemetry plane (ADR 0044): hosted's own cluster and each developer's Mac stack, side by side. The variable is the cluster label both carry today.",
+                  "templating": {
+                    "list": [
+                      {
+                        "name": "cluster",
+                        "label": "Platform",
+                        "type": "query",
+                        "query": {
+                          "query": "label_values(up, cluster)",
+                          "refId": "var"
+                        },
+                        "definition": "label_values(up, cluster)",
+                        "multi": true,
+                        "includeAll": true,
+                        "allValue": ".*",
+                        "current": {
+                          "text": "All",
+                          "value": "$__all"
+                        },
+                        "refresh": 2,
+                        "sort": 1
+                      }
+                    ]
+                  },
                   "panels": [
                     {
                       "id": 1,
-                      "type": "stat",
-                      "title": "Agent steps by platform, last 24 h",
+                      "type": "row",
+                      "title": "The plane: every platform that sends, and how its writes fare",
+                      "collapsed": false,
                       "gridPos": {
                         "x": 0,
                         "y": 0,
-                        "w": 8,
-                        "h": 6
+                        "w": 24,
+                        "h": 1
                       },
-                      "targets": [
-                        {
-                          "expr": "sum by (platform) (increase(infrared_step_attempts_total[24h]))",
-                          "legendFormat": "{{ `{{platform}}` }}",
-                          "refId": "A"
-                        }
-                      ],
-                      "fieldConfig": {
-                        "defaults": {},
-                        "overrides": []
-                      },
-                      "options": {
-                        "reduceOptions": {
-                          "calcs": [
-                            "lastNotNull"
-                          ]
-                        },
-                        "colorMode": "none",
-                        "graphMode": "none"
-                      }
+                      "panels": []
                     },
                     {
                       "id": 2,
                       "type": "stat",
-                      "title": "Builder sessions: cost by platform, last 24 h (USD)",
+                      "title": "Targets up, by platform",
+                      "description": "Scrape targets answering on each platform: on a Mac's stack the API, the operator and the kubelet; on hosted everything its metrics stack scrapes.",
                       "gridPos": {
-                        "x": 8,
-                        "y": 0,
-                        "w": 8,
-                        "h": 6
+                        "x": 0,
+                        "y": 1,
+                        "w": 6,
+                        "h": 5
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform) (increase({__name__=~\"claude_code_cost_usage.*\"}[24h]))",
-                          "legendFormat": "{{ `{{platform}}` }}",
-                          "refId": "A"
+                          "expr": "sum by (cluster) (up{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
                         }
                       ],
                       "fieldConfig": {
                         "defaults": {
-                          "unit": "currencyUSD"
+                          "unit": "short"
                         },
                         "overrides": []
                       },
@@ -275,172 +290,1530 @@ spec:
                         "reduceOptions": {
                           "calcs": [
                             "lastNotNull"
-                          ]
+                          ],
+                          "fields": "",
+                          "values": false
                         },
+                        "textMode": "value_and_name",
                         "colorMode": "none",
-                        "graphMode": "none"
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
                       }
                     },
                     {
                       "id": 3,
-                      "type": "timeseries",
-                      "title": "Telemetry writes by platform and status, per minute",
+                      "type": "stat",
+                      "title": "Samples per scrape, by platform",
+                      "description": "How much each platform sends per scrape round: a rough size of its share of the plane.",
                       "gridPos": {
-                        "x": 16,
-                        "y": 0,
-                        "w": 8,
-                        "h": 6
+                        "x": 6,
+                        "y": 1,
+                        "w": 6,
+                        "h": 5
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, status) (rate(infrared_telemetry_writes_total[5m])) * 60",
-                          "legendFormat": "{{ `{{platform}} {{status}}` }}",
-                          "refId": "A"
+                          "expr": "sum by (cluster) (scrape_samples_scraped{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
                         }
                       ],
                       "fieldConfig": {
-                        "defaults": {},
+                        "defaults": {
+                          "unit": "short"
+                        },
                         "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
                       }
                     },
                     {
                       "id": 4,
-                      "type": "timeseries",
-                      "title": "Step cost by platform and model, per hour (USD)",
+                      "type": "stat",
+                      "title": "Remote writes accepted per minute",
+                      "description": "A Mac's vmagent writing to hosted's API; hosted's own vmagent writing to its store.",
                       "gridPos": {
-                        "x": 0,
-                        "y": 6,
-                        "w": 12,
-                        "h": 8
+                        "x": 12,
+                        "y": 1,
+                        "w": 6,
+                        "h": 5
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, model) (increase(infrared_step_cost_usd_total[1h]))",
-                          "legendFormat": "{{ `{{platform}} {{model}}` }}",
-                          "refId": "A"
+                          "expr": "sum by (cluster) (rate(vmagent_remotewrite_requests_total{cluster=~\"$cluster\", status_code=~\"2.*\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
                         }
                       ],
                       "fieldConfig": {
                         "defaults": {
-                          "unit": "currencyUSD"
+                          "unit": "short"
                         },
                         "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
                       }
                     },
                     {
                       "id": 5,
-                      "type": "timeseries",
-                      "title": "Step duration, p95 by platform",
+                      "type": "stat",
+                      "title": "Buffered on disk, not yet written",
+                      "description": "Bytes waiting in a vmagent's disk queue: rises while a Mac cannot reach hosted, drains when it can.",
                       "gridPos": {
-                        "x": 12,
-                        "y": 6,
-                        "w": 12,
-                        "h": 8
+                        "x": 18,
+                        "y": 1,
+                        "w": 6,
+                        "h": 5
                       },
                       "targets": [
                         {
-                          "expr": "histogram_quantile(0.95, sum by (platform, le) (rate(infrared_step_duration_seconds_bucket[1h])))",
-                          "legendFormat": "{{ `{{platform}}` }}",
-                          "refId": "A"
+                          "expr": "sum by (cluster) (vmagent_remotewrite_pending_data_bytes{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
                         }
                       ],
                       "fieldConfig": {
                         "defaults": {
-                          "unit": "s"
+                          "unit": "bytes"
                         },
                         "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
                       }
                     },
                     {
                       "id": 6,
                       "type": "timeseries",
-                      "title": "Tokens by platform and kind, per hour",
+                      "title": "Remote writes per minute, by platform and answer",
+                      "description": "2XX is accepted; anything else is the write path refusing (401 a revoked token, 413 too large, 502 the store) or the edge.",
                       "gridPos": {
                         "x": 0,
-                        "y": 14,
+                        "y": 6,
                         "w": 12,
-                        "h": 8
+                        "h": 7
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, kind) (increase(infrared_step_tokens_total[1h]))",
-                          "legendFormat": "{{ `{{platform}} {{kind}}` }}",
+                          "expr": "sum by (cluster, status_code) (rate(vmagent_remotewrite_requests_total{cluster=~\"$cluster\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{status_code}}` }}",
                           "refId": "A"
                         }
                       ],
                       "fieldConfig": {
-                        "defaults": {},
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
                         "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
                       }
                     },
                     {
                       "id": 7,
                       "type": "timeseries",
-                      "title": "Step containers: peak memory working set by platform and container",
+                      "title": "Rows pushed per second, by platform",
+                      "description": "Samples leaving each platform's vmagent for the plane.",
                       "gridPos": {
                         "x": 12,
+                        "y": 6,
+                        "w": 12,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster) (rate(vmagent_remotewrite_rows_pushed_total{cluster=~\"$cluster\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 8,
+                      "type": "row",
+                      "title": "Infrared's API: requests, refusals, latency",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 13,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 9,
+                      "type": "timeseries",
+                      "title": "Requests per minute, by platform and operation",
+                      "description": "The fifteen busiest operations, by operation ID.",
+                      "gridPos": {
+                        "x": 0,
                         "y": 14,
                         "w": 12,
                         "h": 8
                       },
                       "targets": [
                         {
-                          "expr": "max by (platform, container) (container_memory_working_set_bytes{namespace=~\"ir-org-.*\"})",
-                          "legendFormat": "{{ `{{platform}} {{container}}` }}",
+                          "expr": "topk(15, sum by (cluster, op) (rate(infrared_api_requests_total{cluster=~\"$cluster\"}[5m])) * 60)",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{op}}` }}",
                           "refId": "A"
                         }
                       ],
                       "fieldConfig": {
                         "defaults": {
-                          "unit": "bytes"
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
                         },
                         "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
                       }
                     },
                     {
-                      "id": 8,
+                      "id": 10,
                       "type": "timeseries",
-                      "title": "Machines: memory by platform and machine",
+                      "title": "Refusals and errors per minute (4xx, 5xx)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 14,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, status) (rate(infrared_api_requests_total{cluster=~\"$cluster\", status=~\"4..|5..\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{status}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 11,
+                      "type": "timeseries",
+                      "title": "Latency p95, by platform",
+                      "description": "",
+                      "gridPos": {
+                        "x": 18,
+                        "y": 14,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "histogram_quantile(0.95, sum by (cluster, le) (rate(infrared_api_request_duration_seconds_bucket{cluster=~\"$cluster\"}[5m])))",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 12,
+                      "type": "row",
+                      "title": "Infrared's operator: reconciles, queues, memory, active runs",
+                      "collapsed": false,
                       "gridPos": {
                         "x": 0,
                         "y": 22,
-                        "w": 12,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 13,
+                      "type": "timeseries",
+                      "title": "Reconciles per minute, by platform and controller",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 23,
+                        "w": 8,
                         "h": 8
                       },
                       "targets": [
                         {
-                          "expr": "max by (platform, machine) (localred_machine_memory_bytes)",
-                          "legendFormat": "{{ `{{platform}} {{machine}}` }}",
+                          "expr": "sum by (cluster, controller) (rate(controller_runtime_reconcile_total{job=~\"infrared|infrared-operator|infrared-api\", cluster=~\"$cluster\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{controller}}` }}",
                           "refId": "A"
                         }
                       ],
                       "fieldConfig": {
                         "defaults": {
-                          "unit": "bytes"
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
                         },
                         "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
                       }
                     },
                     {
-                      "id": 9,
+                      "id": 14,
                       "type": "timeseries",
-                      "title": "vmagent remote write by platform and status code, per minute",
+                      "title": "Reconcile errors per minute",
+                      "description": "",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 23,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, controller) (rate(controller_runtime_reconcile_total{job=~\"infrared|infrared-operator|infrared-api\", cluster=~\"$cluster\", result=\"error\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{controller}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 15,
+                      "type": "timeseries",
+                      "title": "Work queued, by controller",
+                      "description": "",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 23,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, name) (workqueue_depth{job=~\"infrared|infrared-operator|infrared-api\", cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{name}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 16,
+                      "type": "timeseries",
+                      "title": "Operator and API memory",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 31,
+                        "w": 12,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (cluster, service) (process_resident_memory_bytes{cluster=~\"$cluster\", job=~\"infrared|infrared-operator|infrared-api\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{service}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 17,
+                      "type": "timeseries",
+                      "title": "Active runs, by platform, org and workflow",
+                      "description": "AgentWorkflowRuns the operator is still driving. Empty until a run exists.",
                       "gridPos": {
                         "x": 12,
-                        "y": 22,
+                        "y": 31,
+                        "w": 12,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, org, workflow) (infrared_runs_active{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{org}}` }} {{ `{{workflow}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 18,
+                      "type": "row",
+                      "title": "Agent steps: attempts, cost, duration, tokens (the operator's step series)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 38,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 19,
+                      "type": "timeseries",
+                      "title": "Attempts per hour, by platform and outcome",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 39,
                         "w": 12,
                         "h": 8
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, status_code) (rate(vmagent_remotewrite_requests_total[5m])) * 60",
-                          "legendFormat": "{{ `{{platform}} {{status_code}}` }}",
+                          "expr": "sum by (cluster, outcome) (increase(infrared_step_attempts_total{cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{outcome}}` }}",
                           "refId": "A"
                         }
                       ],
                       "fieldConfig": {
-                        "defaults": {},
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
                         "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 20,
+                      "type": "timeseries",
+                      "title": "Cost per hour, by platform and model (USD)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 39,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, model) (increase(infrared_step_cost_usd_total{cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{model}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "currencyUSD",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 21,
+                      "type": "timeseries",
+                      "title": "Duration p50 and p95, by platform",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 47,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "histogram_quantile(0.5, sum by (cluster, le) (rate(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
+                          "legendFormat": "{{ `{{cluster}}` }} p50",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "histogram_quantile(0.95, sum by (cluster, le) (rate(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
+                          "legendFormat": "{{ `{{cluster}}` }} p95",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 22,
+                      "type": "timeseries",
+                      "title": "Tokens per hour, by platform and kind",
+                      "description": "",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 47,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, kind) (increase(infrared_step_tokens_total{cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{kind}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 23,
+                      "type": "row",
+                      "title": "Step containers: what a runner Job really uses (ir-org-* pods, from the kubelet)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 55,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 24,
+                      "type": "timeseries",
+                      "title": "Memory working set, by platform, pod and container",
+                      "description": "The number phase 2's templates are sized from.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 56,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (cluster, pod, container) (container_memory_working_set_bytes{cluster=~\"$cluster\", namespace=~\"ir-org-.*\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{pod}}` }} {{ `{{container}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 25,
+                      "type": "timeseries",
+                      "title": "CPU, by platform, pod and container (cores)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 56,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, pod, container) (rate(container_cpu_usage_seconds_total{cluster=~\"$cluster\", namespace=~\"ir-org-.*\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{pod}}` }} {{ `{{container}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 26,
+                      "type": "row",
+                      "title": "Macs: each stack's machine, as the localred app reads it",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 64,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 27,
+                      "type": "timeseries",
+                      "title": "Machine memory: used and limit",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 65,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (cluster, machine) (localred_machine_memory_usage_bytes{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} used",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "max by (cluster, machine) (localred_machine_memory_limit_bytes{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} limit",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 28,
+                      "type": "timeseries",
+                      "title": "Machine CPU (cores in use)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 65,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, machine) (rate(localred_machine_cpu_usage_seconds_total{cluster=~\"$cluster\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 29,
+                      "type": "timeseries",
+                      "title": "Processes in the machine",
+                      "description": "",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 65,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (cluster, machine) (localred_machine_processes{cluster=~\"$cluster\"})",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 30,
+                      "type": "timeseries",
+                      "title": "Machine network (bytes per second)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 73,
+                        "w": 12,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, machine) (rate(localred_machine_network_receive_bytes_total{cluster=~\"$cluster\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} in",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "sum by (cluster, machine) (rate(localred_machine_network_transmit_bytes_total{cluster=~\"$cluster\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} out",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "Bps",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 31,
+                      "type": "timeseries",
+                      "title": "Machine disk (bytes per second)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 73,
+                        "w": 12,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, machine) (rate(localred_machine_block_read_bytes_total{cluster=~\"$cluster\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} read",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "sum by (cluster, machine) (rate(localred_machine_block_write_bytes_total{cluster=~\"$cluster\"}[5m]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} write",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "Bps",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 32,
+                      "type": "row",
+                      "title": "Builder sessions: a person's own Claude Code, started by ir local work (metrics only, never events)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 80,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 33,
+                      "type": "timeseries",
+                      "title": "Sessions per hour",
+                      "description": "",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 81,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster) (increase({__name__=~\"claude_code_session_count.*\", cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 34,
+                      "type": "timeseries",
+                      "title": "Cost per hour, by platform and model (USD)",
+                      "description": "",
+                      "gridPos": {
+                        "x": 6,
+                        "y": 81,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, model) (increase({__name__=~\"claude_code_cost_usage.*\", cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{model}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "currencyUSD",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 35,
+                      "type": "timeseries",
+                      "title": "Tokens per hour, by type",
+                      "description": "",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 81,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, type) (increase({__name__=~\"claude_code_token_usage.*\", cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{type}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 36,
+                      "type": "timeseries",
+                      "title": "Active time per hour",
+                      "description": "",
+                      "gridPos": {
+                        "x": 18,
+                        "y": 81,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster) (increase({__name__=~\"claude_code_active_time.*\", cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 37,
+                      "type": "row",
+                      "title": "The plane's home: VictoriaMetrics on infrared-cp-google",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 89,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 38,
+                      "type": "timeseries",
+                      "title": "Rows ingested per second, by source",
+                      "description": "promremotewrite is what the Macs' stacks write through infrared-api; the rest is hosted's own scraping.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 90,
+                        "w": 8,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (type) (rate(vm_rows_inserted_total{type=~\"promremotewrite|promscrape|prometheus|opentelemetry|vmimport\"}[5m]))",
+                          "legendFormat": "{{ `{{type}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 39,
+                      "type": "timeseries",
+                      "title": "Active series (hour cache)",
+                      "description": "Read against the store's memory limit: 89,000 on 2026-10-13 before any Mac pushed (TODO 288).",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 90,
+                        "w": 8,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "max(vm_cache_entries{type=\"storage/hour_metric_ids\"})",
+                          "legendFormat": "active series",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 40,
+                      "type": "timeseries",
+                      "title": "VMSingle memory: working set and limit",
+                      "description": "",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 90,
+                        "w": 8,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "max(container_memory_working_set_bytes{namespace=\"monitoring\", container=\"vmsingle\"})",
+                          "legendFormat": "working set",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "max(kube_pod_container_resource_limits{namespace=\"monitoring\", container=\"vmsingle\", resource=\"memory\"})",
+                          "legendFormat": "limit",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 41,
+                      "type": "timeseries",
+                      "title": "Telemetry writes through hosted's API, per minute, by platform and the store's answer",
+                      "description": "infrared_telemetry_writes_total from hosted's own API, once a Release carries the chart's metrics ports and hosted scrapes itself.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 97,
+                        "w": 24,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, status) (rate(infrared_telemetry_writes_total[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{status}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
                       }
                     }
                   ]
