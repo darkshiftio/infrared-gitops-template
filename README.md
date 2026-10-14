@@ -251,7 +251,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 23 | `substrate-actors` (the same) | `components/substrate-actors` | the same, images by digest |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
-| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi (see "Metrics with the stores") | 0.95.0 (operator v0.75.0) |
+| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi (see "Metrics with the stores"; on Google Cloud with a gcs backup bucket, copied there every night, see "The metrics' nightly copy") | 0.95.0 (operator v0.75.0) |
 | 30 | `telemetry` (with `.Telemetry.URL`, and the metrics stack left out) | `components/telemetry`: one vmagent that remote-writes to that URL (see "The telemetry plane") | vmagent v1.154.0, by digest |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
@@ -813,6 +813,35 @@ that follows the pod within its zone. A cluster with the stores hydrated from an
 older template keeps its old claim, which nothing uses once VMSingle has moved:
 the operator never deletes it, so a person does
 (`kubectl -n monitoring delete pvc vmsingle-victoria-metrics-k8s-stack`).
+
+### The metrics' nightly copy
+
+On Google Cloud (`.Cloud` `gcp`) with the backup bucket on Google Cloud Storage
+(`.Backup.Provider` `gcs` and a `.Backup.Bucket`), the metrics are also copied
+outside the cluster every night, since the claim's disk is deleted with the
+claim and with the cluster. The metrics stack's values carry three objects in
+`monitoring`, all named `metrics-backup`:
+
+- a CronJob, at 02:40 UTC (clear of the mirror at 17 past and Postgres's base
+  backup at 03:00), that asks VMSingle for a snapshot
+  (`/snapshot/create`), copies it with `vmbackup` (VictoriaMetrics' open-source
+  backup tool, at VMSingle's own version, by digest) and deletes the snapshot.
+  It mounts VMSingle's claim read-only, so it runs on VMSingle's node (pod
+  affinity: the disk is ReadWriteOnce);
+- its ServiceAccount, which writes as itself: the cluster grants it the
+  bucket's role through Workload Identity, as it does the mirror's (nothing here
+  names a Google identity);
+- a VMRule: `MetricsBackupStale` when the last successful copy is over a day
+  old for two hours, `MetricsBackupNeverRan` when none has succeeded for 26 hours.
+
+| What | Where | Kept |
+|---|---|---|
+| the newest night, uploading only the parts that changed | `<Bucket>/<prefix>/metrics/latest/` | until the next night |
+| that night again, copied inside Google Cloud Storage from `latest/` | `<Bucket>/<prefix>/metrics/<day>/`, `mon` to `sun` | a week: each day's copy is replaced on the same day next week |
+
+A copy is complete when its `backup_complete.ignore` is there. A restore is
+`vmrestore -src=gcs://<Bucket>/<prefix>/metrics/latest` (or a day) into an empty
+data directory, with VMSingle stopped. Elsewhere nothing of this renders.
 
 ### The telemetry plane
 

@@ -2067,6 +2067,125 @@ spec:
                   ]
                 }
 [[- end ]]
+[[- if and (eq .Cloud "gcp") .Backup.Bucket (eq .Backup.Provider "gcs") ]]
+[[- $prefix := default .ClusterName .Backup.Prefix ]]
+          # The metrics' own copy outside the cluster, every night: the claim
+          # above keeps them through a restart, this keeps them through the
+          # claim's loss (its disk is deleted with it) or the cluster's. Only on
+          # Google Cloud, where the backup bucket is Google Cloud Storage and the
+          # claim a persistent disk; nowhere else does this render.
+          #
+          # At 02:40 UTC (clear of the mirror at 17 past and Postgres at 03:00)
+          # the CronJob metrics-backup asks VMSingle for a snapshot and copies
+          # it with vmbackup, VictoriaMetrics' open-source backup tool, twice:
+          #
+          #   [[ .Backup.Bucket ]]/[[ $prefix ]]/metrics/latest/   the newest night, uploading only what changed
+          #   [[ .Backup.Bucket ]]/[[ $prefix ]]/metrics/<day>/    mon to sun, a week of nights, copied
+          #                                                        inside Google Cloud Storage from latest/
+          #
+          # A night is complete when its backup_complete.ignore is there. The
+          # pod mounts VMSingle's claim read-only, so it runs on VMSingle's
+          # node (a ReadWriteOnce disk is on one node), and writes as the
+          # ServiceAccount metrics-backup, which the cluster grants the bucket's
+          # role through Workload Identity, as it does the mirror's: no key. A
+          # restore is vmrestore from one of those paths into an empty data
+          # directory (infrared-docs-internal, runbook restore-metrics).
+          - apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: metrics-backup
+              namespace: monitoring
+          - apiVersion: batch/v1
+            kind: CronJob
+            metadata:
+              name: metrics-backup
+              namespace: monitoring
+            spec:
+              schedule: "40 2 * * *"
+              timeZone: Etc/UTC
+              concurrencyPolicy: Forbid
+              startingDeadlineSeconds: 3600
+              successfulJobsHistoryLimit: 2
+              failedJobsHistoryLimit: 2
+              jobTemplate:
+                spec:
+                  backoffLimit: 2
+                  activeDeadlineSeconds: 3600
+                  ttlSecondsAfterFinished: 86400
+                  template:
+                    metadata:
+                      labels:
+                        app.kubernetes.io/name: metrics-backup
+                    spec:
+                      serviceAccountName: metrics-backup
+                      restartPolicy: Never
+                      affinity:
+                        podAffinity:
+                          requiredDuringSchedulingIgnoredDuringExecution:
+                            - topologyKey: kubernetes.io/hostname
+                              labelSelector:
+                                matchLabels:
+                                  app.kubernetes.io/name: vmsingle
+                                  app.kubernetes.io/instance: victoria-metrics-k8s-stack
+                      containers:
+                        - name: vmbackup
+                          # VMSingle's own version (the chart's victoria-metrics v1.153.0).
+                          image: victoriametrics/vmbackup:v1.153.0@sha256:7508e0be1809a32ca8fe799ec448f2879784e48ad67a38c88562197bd2ccbb4a
+                          command: ["/bin/sh", "-c"]
+                          args:
+                            - |
+                              set -eu
+                              base="gcs://[[ .Backup.Bucket ]]/[[ $prefix ]]/metrics"
+                              vm="http://vmsingle-victoria-metrics-k8s-stack.monitoring.svc:8428"
+                              day=$(date -u +%a | tr 'A-Z' 'a-z')
+                              snap=$(wget -qO- "$vm/snapshot/create" | sed -n 's/.*"snapshot":"\([^"]*\)".*/\1/p')
+                              if [ -z "$snap" ]; then echo "VMSingle made no snapshot"; exit 1; fi
+                              trap 'wget -qO- "$vm/snapshot/delete?snapshot=$snap" >/dev/null || true' EXIT
+                              echo "snapshot $snap to $base/latest, then $base/$day"
+                              /vmbackup-prod -storageDataPath=/victoria-metrics-data -snapshotName="$snap" -dst="$base/latest"
+                              /vmbackup-prod -storageDataPath=/victoria-metrics-data -snapshotName="$snap" -origin="$base/latest" -dst="$base/$day"
+                          resources:
+                            requests:
+                              cpu: 50m
+                              memory: 64Mi
+                            limits:
+                              memory: 512Mi
+                          volumeMounts:
+                            - name: data
+                              mountPath: /victoria-metrics-data
+                              readOnly: true
+                      volumes:
+                        - name: data
+                          persistentVolumeClaim:
+                            claimName: vmsingle-victoria-metrics-k8s-stack
+                            readOnly: true
+          # A night that did not finish shows as an alert: no successful copy
+          # for 26 hours (a day and two hours), or none in the 26 hours since
+          # the CronJob came.
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMRule
+            metadata:
+              name: metrics-backup
+              namespace: monitoring
+            spec:
+              groups:
+                - name: metrics-backup
+                  rules:
+                    - alert: MetricsBackupStale
+                      expr: time() - max(kube_cronjob_status_last_successful_time{namespace="monitoring", cronjob="metrics-backup"}) > 24 * 3600
+                      for: 2h
+                      labels:
+                        severity: warning
+                      annotations:
+                        summary: The metrics have not been copied to the backup bucket for over a day.
+                    - alert: MetricsBackupNeverRan
+                      expr: absent(kube_cronjob_status_last_successful_time{namespace="monitoring", cronjob="metrics-backup"})
+                      for: 26h
+                      labels:
+                        severity: warning
+                      annotations:
+                        summary: The metrics have never been copied to the backup bucket.
+[[- end ]]
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
