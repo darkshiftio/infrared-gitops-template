@@ -1262,13 +1262,212 @@ spec:
                       }
                     },
                     {
+                      "id": 43,
+                      "type": "row",
+                      "collapsed": false,
+                      "panels": [],
+                      "title": "Runner pools: agent steps in VMs on the Macs (the operator's AgentVM series)",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 64,
+                        "w": 24,
+                        "h": 1
+                      }
+                    },
+                    {
+                      "id": 44,
+                      "type": "timeseries",
+                      "title": "AgentVMs, by platform, template and phase",
+                      "description": "Each step a pool takes is one AgentVM: Pending until a pool leases it, Leased, Running, then Succeeded, Failed or Lost.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 65,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, template, phase) (infrared_agentvm_phase{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{template}}` }} {{ `{{phase}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 45,
+                      "type": "timeseries",
+                      "title": "Lost leases per hour, by platform and pool",
+                      "description": "A lease lapses when its Mac stops answering for the time to live, or the node agent gives it back; the step runs again.",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 65,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, pool) (increase_pure(infrared_lease_lost_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{pool}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 46,
+                      "type": "timeseries",
+                      "title": "Peak memory of an AgentVM, p50 and p95 over the last hour, by template",
+                      "description": "What the templates' memory is sized from (the reviewer's 1 GiB, the builder step's 6 GiB).",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 73,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "histogram_quantile(0.5, sum by (platform, template, le) (increase_pure(infrared_agentvm_peak_memory_bytes_bucket{platform=~\"$platform\"}[1h])))",
+                          "legendFormat": "p50 {{ `{{platform}}` }} {{ `{{template}}` }}",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "histogram_quantile(0.95, sum by (platform, template, le) (increase_pure(infrared_agentvm_peak_memory_bytes_bucket{platform=~\"$platform\"}[1h])))",
+                          "legendFormat": "p95 {{ `{{platform}}` }} {{ `{{template}}` }}",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "bytes",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 47,
+                      "type": "timeseries",
+                      "title": "CPU time of an AgentVM, p50 and p95 over the last hour, by template",
+                      "description": "CPU seconds a VM used from start to exit, as Apple's runtime counts them.",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 73,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "histogram_quantile(0.5, sum by (platform, template, le) (increase_pure(infrared_agentvm_cpu_seconds_bucket{platform=~\"$platform\"}[1h])))",
+                          "legendFormat": "p50 {{ `{{platform}}` }} {{ `{{template}}` }}",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "histogram_quantile(0.95, sum by (platform, template, le) (increase_pure(infrared_agentvm_cpu_seconds_bucket{platform=~\"$platform\"}[1h])))",
+                          "legendFormat": "p95 {{ `{{platform}}` }} {{ `{{template}}` }}",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
                       "id": 26,
                       "type": "row",
                       "title": "Macs: each stack's machine, as the localred app reads it",
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 64,
+                        "y": 81,
                         "w": 24,
                         "h": 1
                       },
@@ -1281,7 +1480,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 0,
-                        "y": 65,
+                        "y": 82,
                         "w": 8,
                         "h": 8
                       },
@@ -1330,7 +1529,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 8,
-                        "y": 65,
+                        "y": 82,
                         "w": 8,
                         "h": 8
                       },
@@ -1374,7 +1573,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 16,
-                        "y": 65,
+                        "y": 82,
                         "w": 8,
                         "h": 8
                       },
@@ -1418,7 +1617,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 0,
-                        "y": 73,
+                        "y": 90,
                         "w": 12,
                         "h": 7
                       },
@@ -1467,7 +1666,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 12,
-                        "y": 73,
+                        "y": 90,
                         "w": 12,
                         "h": 7
                       },
@@ -1516,7 +1715,7 @@ spec:
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 80,
+                        "y": 97,
                         "w": 24,
                         "h": 1
                       },
@@ -1529,7 +1728,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 0,
-                        "y": 81,
+                        "y": 98,
                         "w": 6,
                         "h": 8
                       },
@@ -1573,7 +1772,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 6,
-                        "y": 81,
+                        "y": 98,
                         "w": 6,
                         "h": 8
                       },
@@ -1617,7 +1816,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 12,
-                        "y": 81,
+                        "y": 98,
                         "w": 6,
                         "h": 8
                       },
@@ -1661,7 +1860,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 18,
-                        "y": 81,
+                        "y": 98,
                         "w": 6,
                         "h": 8
                       },
@@ -1705,7 +1904,7 @@ spec:
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 89,
+                        "y": 106,
                         "w": 24,
                         "h": 1
                       },
@@ -1718,7 +1917,7 @@ spec:
                       "description": "promremotewrite is what the Macs' stacks write through infrared-api; the rest is hosted's own scraping.",
                       "gridPos": {
                         "x": 0,
-                        "y": 90,
+                        "y": 107,
                         "w": 8,
                         "h": 7
                       },
@@ -1762,7 +1961,7 @@ spec:
                       "description": "Read against the store's memory limit: 89,000 on 2026-10-13 before any Mac pushed (TODO 288).",
                       "gridPos": {
                         "x": 8,
-                        "y": 90,
+                        "y": 107,
                         "w": 8,
                         "h": 7
                       },
@@ -1806,7 +2005,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 16,
-                        "y": 90,
+                        "y": 107,
                         "w": 8,
                         "h": 7
                       },
@@ -1855,7 +2054,7 @@ spec:
                       "description": "infrared_telemetry_writes_total from hosted's own API, once a Release carries the chart's metrics ports and hosted scrapes itself.",
                       "gridPos": {
                         "x": 0,
-                        "y": 97,
+                        "y": 114,
                         "w": 24,
                         "h": 7
                       },
