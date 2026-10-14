@@ -6,10 +6,13 @@
 # ([[ .Telemetry.URL ]]) as platform [[ .Telemetry.Platform ]].
 #
 #   scrapes   every Endpoints port named metrics in [[ .InfraredNamespace ]]
-#             (the API's and the operator's, which the chart names so); the
-#             kubelet's cAdvisor series for the org namespaces (ir-org-*),
-#             memory working set and CPU seconds by pod and container, with
-#             the id, name and image labels dropped; and itself
+#             (the API's and the operator's, which the chart names so), every
+#             30 s, keeping only what the Fleet dashboard reads and a few
+#             series beside it; the kubelet's cAdvisor series for the org
+#             namespaces (ir-org-*), memory working set and CPU seconds by pod
+#             and container, with the id, name and image labels dropped,
+#             every 10 s; and itself, every 30 s, keeping only the health of
+#             its writes
 #   takes     OpenTelemetry metrics at :8429/opentelemetry/v1/metrics, named
 #             the Prometheus way (claude_code.cost.usage becomes
 #             claude_code_cost_usage), from the person's Claude Code sessions
@@ -22,6 +25,25 @@
 #             holds; the labels platform and cluster on every series; a disk
 #             buffer of up to 800 MiB on a 1 Gi claim, so a Mac shut for a
 #             while flushes when it wakes; at most 50,000 new series an hour
+#
+# The series budget (localred finding O7). Before the keep lists a Mac's
+# stack sent about 4,100 series: 4,105 in the first proof, 2026-10-14, of
+# which 2,878 were the job infrared (the operator's whole controller-runtime,
+# workqueue, Go and process registry beside Infrared's own infrared_* series
+# and the API's), 1,211 were vmagent's own, 8 were cAdvisor's and 8 the
+# localred app's. The lists keep what the Fleet dashboard names for the two
+# jobs and a few series beside it (reconcile errors and times, workqueue adds,
+# CPU, heap and goroutines, the push queue's drops). On the proof's stack an
+# hour later, 4,567 series before (3,327 infrared, 1,224 vmagent, 8 and 8) and
+# 2,180 after (2,133 infrared, 31 vmagent, 8 and 8); the proof's 4,105 would
+# have been about 1,800. What is left grows with use, not with the registry:
+# the operator's reconcile-time histogram (820 series) and the API's latency
+# histogram (689) are the two largest, and only the second is read by the
+# dashboard. The up and scrape_* series vmagent makes for each target bypass
+# metric_relabel_configs, so they are in the lists only to say they are
+# wanted. The cAdvisor job keeps two families for ir-org-* pods already, and
+# the OpenTelemetry and import paths carry what the person's sessions (13
+# series each) and the localred app (8) send; none of them is trimmed here.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -87,7 +109,36 @@ data:
             target_label: service
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
+        # Most of a Mac's series were the operator's whole registry
+        # (controller-runtime, workqueue, Go, process; see the header of this
+        # file). Keep Infrared's own series, what the Fleet dashboard reads of
+        # the rest, and a few beside it: reconcile errors and times, workqueue
+        # adds, process CPU, heap and goroutines. The regex is anchored, and a
+        # list is joined with |.
+        metric_relabel_configs:
+          - action: keep
+            source_labels: [__name__]
+            regex:
+              - infrared_.*
+              - controller_runtime_reconcile_total
+              - controller_runtime_reconcile_errors_total
+              - controller_runtime_reconcile_time_seconds.*
+              - workqueue_depth
+              - workqueue_adds_total
+              - process_resident_memory_bytes
+              - process_cpu_seconds_total
+              - go_memstats_heap_inuse_bytes
+              - go_goroutines
+              - up
+              - scrape_samples_scraped
+              - scrape_duration_seconds
       - job_name: kubelet-cadvisor
+        # Every 10 s where the other jobs scrape every 30. A 30 s scrape caught
+        # 6 of the first proof's 14 runner Jobs and none of those that ran 7
+        # to 10 s (localred finding T3). The kubelet serves the whole node's
+        # cAdvisor series, about 2 MB in under 100 ms on a Mac's node, and
+        # only the two families below, for ir-org-* pods, are kept.
+        scrape_interval: 10s
         scheme: https
         metrics_path: /metrics/cadvisor
         tls_config:
@@ -113,6 +164,30 @@ data:
       - job_name: vmagent
         static_configs:
           - targets: ["127.0.0.1:8429"]
+        # vmagent's own registry is about 1,200 series. Keep its write path:
+        # requests by answer, the disk buffer and rows pushed (the Fleet
+        # dashboard names vmagent_remotewrite_rows_pushed_total, which vmagent
+        # v1.154.0 does not export; it counts rows as
+        # ..._rows_pushed_after_relabel_total, kept too), the push queue's
+        # drops, and the version.
+        metric_relabel_configs:
+          - action: keep
+            source_labels: [__name__]
+            regex:
+              - vmagent_remotewrite_requests_total
+              - vmagent_remotewrite_pending_data_bytes
+              - vmagent_remotewrite_rows_pushed_total
+              - vmagent_remotewrite_rows_pushed_after_relabel_total
+              - vmagent_remotewrite_packets_dropped_total
+              - vmagent_remotewrite_retries_count_total
+              - vm_persistentqueue_bytes_pending
+              - vm_persistentqueue_blocks_dropped_total
+              - vmagent_rows_inserted_total
+              - vm_rows_inserted_total
+              - vm_app_version
+              - process_resident_memory_bytes
+              - up
+              - scrape_samples_scraped
   relabel.yaml: |
     # Claude Code puts the person's email and IDs on every series it exports
     # (localred finding K1). They never leave the Mac: the platform label is

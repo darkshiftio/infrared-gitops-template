@@ -78,8 +78,17 @@ spec:
 [[- end ]]
         vmagent:
           spec:
+            # Both labels name this install. A Mac's stack writes platform and
+            # cluster with the same value, <login>-<stack> (ADR 0044, the
+            # telemetry component), so the Fleet dashboard groups by platform
+            # for every install, this one's own series included (localred
+            # finding T4). vmagent adds them to every series it scrapes; a
+            # series that already has a platform label keeps it only under
+            # honorLabels (the API's infrared_telemetry_writes_total, below),
+            # and elsewhere is renamed exported_platform.
             externalLabels:
               cluster: [[ .ClusterName ]]
+              platform: [[ .ClusterName ]]
             resources:
               requests:
                 cpu: 50m
@@ -185,20 +194,32 @@ spec:
               endpoints:
                 - port: metrics
                   interval: 30s
+                  # The API labels infrared_telemetry_writes_total with the
+                  # platform that wrote, a Mac's. Without this vmagent would
+                  # rename that label exported_platform and set platform to
+                  # this install's name, merging every Mac's writes into one
+                  # row of the Fleet dashboard. No other series of the
+                  # operator or the API has a label that clashes with a
+                  # target's (job, instance, namespace, service, pod).
+                  honorLabels: true
           # The Fleet dashboard (infrared-docs-internal ADR 0044, P10): every
           # platform's numbers side by side, hosted's own and each Mac's stack
           # that pushes to this store through infrared-api's write path, by the
-          # cluster label both carry: the plane's own health (targets, writes,
-          # buffers), Infrared's API and operator, agent steps (attempts, cost,
-          # duration, tokens), the step containers, the Macs' machines, the
-          # builders' Claude Code sessions, and the store itself. The series
-          # come from the operator, the API, each stack's vmagent and the
-          # localred app, named as the plan (localred
+          # platform label every install carries (this stack's vmagent sets it
+          # to the install's name, above): the plane's own health (targets,
+          # writes, buffers), Infrared's API and operator, agent steps
+          # (attempts, cost, duration, tokens), the step containers, the Macs'
+          # machines, the builders' Claude Code sessions, and the store itself.
+          # The series come from the operator, the API, each stack's vmagent
+          # and the localred app, named as the plan (localred
           # docs/plan-work-distributor.md, phase 1) says. Its fourth cut, from
           # phase 1's proof on 2026-10-14: a change run's fourteen attempts and a
           # builder session from one Mac beside hosted. Counters use
           # increase_pure, so a platform's first hour counts from its first
-          # sample; durations are quantiles over the hour's histogram.
+          # sample; durations are quantiles over the hour's histogram. Its
+          # fifth cut groups by platform where the first four grouped by
+          # cluster, which a Mac's stack sets to the same value, and which
+          # hosted's own series had alone (localred finding T4).
           - apiVersion: v1
             kind: ConfigMap
             metadata:
@@ -217,7 +238,7 @@ spec:
                   ],
                   "editable": true,
                   "schemaVersion": 39,
-                  "version": 4,
+                  "version": 5,
                   "time": {
                     "from": "now-6h",
                     "to": "now"
@@ -225,18 +246,18 @@ spec:
                   "timezone": "browser",
                   "refresh": "1m",
                   "graphTooltip": 1,
-                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Fourth cut, 2026-10-14, from the first proof: a change run and a builder session on a Mac, beside hosted.",
+                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Fifth cut, 2026-10-14: grouped by the platform label, which hosted's own series carry now too. Fourth cut, from the first proof: a change run and a builder session on a Mac, beside hosted.",
                   "templating": {
                     "list": [
                       {
-                        "name": "cluster",
+                        "name": "platform",
                         "label": "Platform",
                         "type": "query",
                         "query": {
-                          "query": "label_values(up, cluster)",
+                          "query": "label_values(up, platform)",
                           "refId": "var"
                         },
-                        "definition": "label_values(up, cluster)",
+                        "definition": "label_values(up, platform)",
                         "multi": true,
                         "includeAll": true,
                         "allValue": ".*",
@@ -276,8 +297,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (up{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (platform) (up{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A",
                           "instant": true,
                           "range": false
@@ -317,8 +338,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (scrape_samples_scraped{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (platform) (scrape_samples_scraped{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A",
                           "instant": true,
                           "range": false
@@ -358,8 +379,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (rate(vmagent_remotewrite_requests_total{cluster=~\"$cluster\", status_code=~\"2.*\"}[5m])) * 60",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (platform) (rate(vmagent_remotewrite_requests_total{platform=~\"$platform\", status_code=~\"2.*\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A",
                           "instant": true,
                           "range": false
@@ -399,8 +420,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (vmagent_remotewrite_pending_data_bytes{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (platform) (vmagent_remotewrite_pending_data_bytes{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A",
                           "instant": true,
                           "range": false
@@ -440,8 +461,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, status_code) (rate(vmagent_remotewrite_requests_total{cluster=~\"$cluster\"}[5m])) * 60",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{status_code}}` }}",
+                          "expr": "sum by (platform, status_code) (rate(vmagent_remotewrite_requests_total{platform=~\"$platform\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{status_code}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -484,8 +505,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (rate(vmagent_remotewrite_rows_pushed_total{cluster=~\"$cluster\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (platform) (rate(vmagent_remotewrite_rows_pushed_total{platform=~\"$platform\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -541,8 +562,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "topk(15, sum by (cluster, op) (rate(infrared_api_requests_total{cluster=~\"$cluster\"}[5m])) * 60)",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{op}}` }}",
+                          "expr": "topk(15, sum by (platform, op) (rate(infrared_api_requests_total{platform=~\"$platform\"}[5m])) * 60)",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{op}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -585,8 +606,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, status) (rate(infrared_api_requests_total{cluster=~\"$cluster\", status=~\"4..|5..\"}[5m])) * 60",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{status}}` }}",
+                          "expr": "sum by (platform, status) (rate(infrared_api_requests_total{platform=~\"$platform\", status=~\"4..|5..\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{status}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -629,8 +650,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "histogram_quantile(0.95, sum by (cluster, le) (rate(infrared_api_request_duration_seconds_bucket{cluster=~\"$cluster\"}[5m])))",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "histogram_quantile(0.95, sum by (platform, le) (rate(infrared_api_request_duration_seconds_bucket{platform=~\"$platform\"}[5m])))",
+                          "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -686,8 +707,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, controller) (rate(controller_runtime_reconcile_total{job=~\"infrared|infrared-operator|infrared-api\", cluster=~\"$cluster\"}[5m])) * 60",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{controller}}` }}",
+                          "expr": "sum by (platform, controller) (rate(controller_runtime_reconcile_total{job=~\"infrared|infrared-operator|infrared-api\", platform=~\"$platform\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{controller}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -730,8 +751,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, controller) (rate(controller_runtime_reconcile_total{job=~\"infrared|infrared-operator|infrared-api\", cluster=~\"$cluster\", result=\"error\"}[5m])) * 60",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{controller}}` }}",
+                          "expr": "sum by (platform, controller) (rate(controller_runtime_reconcile_total{job=~\"infrared|infrared-operator|infrared-api\", platform=~\"$platform\", result=\"error\"}[5m])) * 60",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{controller}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -774,8 +795,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, name) (workqueue_depth{job=~\"infrared|infrared-operator|infrared-api\", cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{name}}` }}",
+                          "expr": "sum by (platform, name) (workqueue_depth{job=~\"infrared|infrared-operator|infrared-api\", platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{name}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -818,8 +839,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "max by (cluster, service) (process_resident_memory_bytes{cluster=~\"$cluster\", job=~\"infrared|infrared-operator|infrared-api\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{service}}` }}",
+                          "expr": "max by (platform, service) (process_resident_memory_bytes{platform=~\"$platform\", job=~\"infrared|infrared-operator|infrared-api\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{service}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -862,8 +883,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, org, workflow) (infrared_runs_active{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{org}}` }} {{ `{{workflow}}` }}",
+                          "expr": "sum by (platform, org, workflow) (infrared_runs_active{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{org}}` }} {{ `{{workflow}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -919,8 +940,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, outcome) (increase_pure(infrared_step_attempts_total{cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{outcome}}` }}",
+                          "expr": "sum by (platform, outcome) (increase_pure(infrared_step_attempts_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{outcome}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -963,8 +984,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, role, outcome) (increase_pure(infrared_step_attempts_total{cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{role}}` }} {{ `{{outcome}}` }}",
+                          "expr": "sum by (platform, role, outcome) (increase_pure(infrared_step_attempts_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{role}}` }} {{ `{{outcome}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1007,8 +1028,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, model) (increase_pure(infrared_step_cost_usd_total{cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{model}}` }}",
+                          "expr": "sum by (platform, model) (increase_pure(infrared_step_cost_usd_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{model}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1051,13 +1072,13 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "histogram_quantile(0.5, sum by (cluster, le) (increase_pure(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
-                          "legendFormat": "{{ `{{cluster}}` }} p50",
+                          "expr": "histogram_quantile(0.5, sum by (platform, le) (increase_pure(infrared_step_duration_seconds_bucket{platform=~\"$platform\"}[1h])))",
+                          "legendFormat": "{{ `{{platform}}` }} p50",
                           "refId": "A"
                         },
                         {
-                          "expr": "histogram_quantile(0.95, sum by (cluster, le) (increase_pure(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
-                          "legendFormat": "{{ `{{cluster}}` }} p95",
+                          "expr": "histogram_quantile(0.95, sum by (platform, le) (increase_pure(infrared_step_duration_seconds_bucket{platform=~\"$platform\"}[1h])))",
+                          "legendFormat": "{{ `{{platform}}` }} p95",
                           "refId": "B"
                         }
                       ],
@@ -1100,8 +1121,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, kind) (increase_pure(infrared_step_tokens_total{cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{kind}}` }}",
+                          "expr": "sum by (platform, kind) (increase_pure(infrared_step_tokens_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{kind}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1157,8 +1178,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "max by (cluster, pod, container) (container_memory_working_set_bytes{cluster=~\"$cluster\", namespace=~\"ir-org-.*\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{pod}}` }} {{ `{{container}}` }}",
+                          "expr": "max by (platform, pod, container) (container_memory_working_set_bytes{platform=~\"$platform\", namespace=~\"ir-org-.*\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{pod}}` }} {{ `{{container}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1201,8 +1222,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, pod, container) (rate(container_cpu_usage_seconds_total{cluster=~\"$cluster\", namespace=~\"ir-org-.*\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{pod}}` }} {{ `{{container}}` }}",
+                          "expr": "sum by (platform, pod, container) (rate(container_cpu_usage_seconds_total{platform=~\"$platform\", namespace=~\"ir-org-.*\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{pod}}` }} {{ `{{container}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1258,13 +1279,13 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "max by (cluster, machine) (localred_machine_memory_usage_bytes{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} used",
+                          "expr": "max by (platform, machine) (localred_machine_memory_usage_bytes{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }} used",
                           "refId": "A"
                         },
                         {
-                          "expr": "max by (cluster, machine) (localred_machine_memory_limit_bytes{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} limit",
+                          "expr": "max by (platform, machine) (localred_machine_memory_limit_bytes{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }} limit",
                           "refId": "B"
                         }
                       ],
@@ -1307,8 +1328,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, machine) (rate(localred_machine_cpu_usage_seconds_total{cluster=~\"$cluster\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }}",
+                          "expr": "sum by (platform, machine) (rate(localred_machine_cpu_usage_seconds_total{platform=~\"$platform\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1351,8 +1372,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "max by (cluster, machine) (localred_machine_processes{cluster=~\"$cluster\"})",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }}",
+                          "expr": "max by (platform, machine) (localred_machine_processes{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1395,13 +1416,13 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, machine) (rate(localred_machine_network_receive_bytes_total{cluster=~\"$cluster\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} in",
+                          "expr": "sum by (platform, machine) (rate(localred_machine_network_receive_bytes_total{platform=~\"$platform\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }} in",
                           "refId": "A"
                         },
                         {
-                          "expr": "sum by (cluster, machine) (rate(localred_machine_network_transmit_bytes_total{cluster=~\"$cluster\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} out",
+                          "expr": "sum by (platform, machine) (rate(localred_machine_network_transmit_bytes_total{platform=~\"$platform\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }} out",
                           "refId": "B"
                         }
                       ],
@@ -1444,13 +1465,13 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, machine) (rate(localred_machine_block_read_bytes_total{cluster=~\"$cluster\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} read",
+                          "expr": "sum by (platform, machine) (rate(localred_machine_block_read_bytes_total{platform=~\"$platform\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }} read",
                           "refId": "A"
                         },
                         {
-                          "expr": "sum by (cluster, machine) (rate(localred_machine_block_write_bytes_total{cluster=~\"$cluster\"}[5m]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{machine}}` }} write",
+                          "expr": "sum by (platform, machine) (rate(localred_machine_block_write_bytes_total{platform=~\"$platform\"}[5m]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{machine}}` }} write",
                           "refId": "B"
                         }
                       ],
@@ -1506,8 +1527,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, role, product) (increase_pure({__name__=~\"claude_code_session_count.*\", cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{role}}` }} {{ `{{product}}` }}",
+                          "expr": "sum by (platform, role, product) (increase_pure({__name__=~\"claude_code_session_count.*\", platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{role}}` }} {{ `{{product}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1550,8 +1571,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, model) (increase_pure({__name__=~\"claude_code_cost_usage.*\", cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{model}}` }}",
+                          "expr": "sum by (platform, model) (increase_pure({__name__=~\"claude_code_cost_usage.*\", platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{model}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1594,8 +1615,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, type) (increase_pure({__name__=~\"claude_code_token_usage.*\", cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{type}}` }}",
+                          "expr": "sum by (platform, type) (increase_pure({__name__=~\"claude_code_token_usage.*\", platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{type}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1638,8 +1659,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, type) (increase_pure({__name__=~\"claude_code_active_time.*\", cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{type}}` }}",
+                          "expr": "sum by (platform, type) (increase_pure({__name__=~\"claude_code_active_time.*\", platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{type}}` }}",
                           "refId": "A"
                         }
                       ],
