@@ -104,7 +104,15 @@
 #     and nothing else in the stack asks for a claim
 #   - telemetry (ADR 0044): with a telemetry URL in the -data file and the
 #     metrics stack left out, one vmagent that writes to that URL as that
-#     platform; with the stack on, or without a URL, nothing of it
+#     platform; with the stack on, or without a URL, nothing of it. That
+#     vmagent scrapes the kubelet's cAdvisor series every 10 s and its other
+#     jobs every 30 s, and its jobs infrared and vmagent keep only the series
+#     the Fleet dashboard names and a few beside them: every name the
+#     dashboard reads for those jobs is kept, and a registry's other families
+#     are not. The metrics stack, wherever it renders, gives vmagent the
+#     external labels cluster and platform (the install's name), keeps the
+#     platform the API sets on its own telemetry writes, and the Fleet
+#     dashboard groups by platform; the chart passes all of it through its tpl
 #   - backups, with a backup bucket: the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys, under the install's name or
 #     .Backup.Prefix; with .PostgresArchive.Enabled as well, Postgres's WAL
@@ -416,6 +424,24 @@ for v in "${variants[@]}"; do
       ok "$variant: the metrics stack scrapes Infrared's metrics ports and carries the Fleet dashboard"
     else
       bad "$variant: the metrics stack lacks Infrared's scrape or the Fleet dashboard"
+    fi
+    # Every series the stack scrapes carries cluster and platform, both the
+    # install's name, as a Mac's stack writes them (localred finding T4); a
+    # platform the API sets itself (infrared_telemetry_writes_total) is kept,
+    # not renamed exported_platform; and the Fleet dashboard groups by platform.
+    fleet_json="$(sel "$vm_app" '.spec.source.helm.valuesObject.extraObjects[] | select(.metadata.name == "infrared-fleet-dashboard") | .data["infrared-fleet.json"]')"
+    if [ "$(sel "$vm_app" '.spec.source.helm.valuesObject.vmagent.spec.externalLabels | .cluster + "," + .platform')" = "$cluster,$cluster" ] \
+      && [ "$(sel "$vm_app" '.spec.source.helm.valuesObject.extraObjects[] | select(.kind == "VMServiceScrape" and .metadata.name == "infrared-metrics") | .spec.endpoints[0].honorLabels')" = true ]; then
+      ok "$variant: the metrics stack labels its series cluster and platform $cluster, and keeps the platform the API sets"
+    else
+      bad "$variant: the metrics stack does not label its series with cluster and platform $cluster, or renames the API's platform"
+    fi
+    if jq -e '.templating.list[0] | .name == "platform" and .query.query == "label_values(up, platform)"' <<<"$fleet_json" >/dev/null \
+      && jq -e '[.panels[].targets[]?.expr | select(contains("platform=~\"$platform\""))] | length > 0' <<<"$fleet_json" >/dev/null \
+      && jq -e '[.panels[].targets[]?.expr | select(contains("cluster"))] | length == 0' <<<"$fleet_json" >/dev/null; then
+      ok "$variant: the Fleet dashboard groups by platform"
+    else
+      bad "$variant: the Fleet dashboard does not group by platform, or still names cluster"
     fi
   fi
   tele_vm="$out/components/telemetry/vmagent.yaml"
@@ -2103,6 +2129,73 @@ changed="$({ diff -rq "$work/k3s" "$work/single-node-k3s" || true; } | tr '\n' '
 [ -z "$changed" ] && ok "single node without the stores: nothing changes" \
   || bad "single node without the stores changes files: $changed"
 
+# --- The telemetry plane: what a Mac's vmagent keeps, and how often it scrapes ---
+# (localred findings O7 and T3). The vmagent of the telemetry variant keeps, of
+# the operator's and the API's registries and of its own, the series the Fleet
+# dashboard names and a few beside them, and scrapes the kubelet's cAdvisor
+# series every 10 s where its other jobs scrape every 30. The names the
+# dashboard reads are taken from the metrics stack's render (the
+# telemetry-metrics variant), so a panel added later for a family the lists
+# drop fails here, and not as an empty panel on a Mac.
+tele_scrape="$work/telemetry-scrape.yaml"
+sel "$work/telemetry/components/telemetry/vmagent.yaml" \
+  'select(.kind == "ConfigMap" and .metadata.name == "vmagent-config") | .data["scrape.yaml"]' >"$tele_scrape"
+# keep_regex <job>: the alternatives of the job's keep rule on __name__, joined with |.
+keep_regex() {
+  sel "$tele_scrape" '.scrape_configs[] | select(.job_name == "'"$1"'") | .metric_relabel_configs[]
+    | select(.action == "keep" and .source_labels[0] == "__name__") | .regex
+    | ((select(tag == "!!seq") | join("|")), (select(tag == "!!str")))'
+}
+# kept <regex> <name>: true when the anchored regex keeps the series name.
+kept() { jq -en --arg re "$1" --arg n "$2" '$n | test("^(" + $re + ")$")' >/dev/null; }
+infrared_keep="$(keep_regex infrared)"
+vmagent_keep="$(keep_regex vmagent)"
+if [ "$(sel "$tele_scrape" '.global.scrape_interval')" = 30s ] \
+    && [ "$(sel "$tele_scrape" '.scrape_configs[] | select(.job_name == "kubelet-cadvisor") | .scrape_interval')" = 10s ] \
+    && [ "$(sel "$tele_scrape" '[.scrape_configs[] | select(.job_name != "kubelet-cadvisor") | .scrape_interval // "30s"] | unique | join(",")')" = 30s ]; then
+  ok "telemetry: the cAdvisor scrape runs every 10 s, every other scrape every 30 s"
+else
+  bad "telemetry: the scrape intervals are not 10 s for kubelet-cadvisor and 30 s for every other job"
+fi
+fleet_names="$work/fleet-names.txt"
+if sel "$work/telemetry-metrics/registry/clusters/demo-te/components/victoria-metrics-k8s-stack.yaml" \
+    '.spec.source.helm.valuesObject.extraObjects[] | select(.metadata.name == "infrared-fleet-dashboard") | .data["infrared-fleet.json"]' \
+    | jq -r '.panels[].targets[]?.expr' | grep -oE '[a-zA-Z_:][a-zA-Z0-9_:]*' | sort -u >"$fleet_names" \
+  && grep -qx infrared_step_cost_usd_total "$fleet_names" && grep -qx workqueue_depth "$fleet_names" \
+  && grep -qx vmagent_remotewrite_requests_total "$fleet_names"; then
+  missing=""
+  while read -r name; do
+    case "$name" in
+      infrared_*|controller_runtime_*|workqueue_*|process_*|go_*) kept "$infrared_keep" "$name" || missing="$missing infrared:$name" ;;
+      vmagent_*|vm_persistentqueue_*) kept "$vmagent_keep" "$name" || missing="$missing vmagent:$name" ;;
+      up|scrape_*) { kept "$infrared_keep" "$name" && kept "$vmagent_keep" "$name"; } || missing="$missing infrared,vmagent:$name" ;;
+    esac
+  done <"$fleet_names"
+  if [ -z "$missing" ]; then
+    ok "telemetry: the keep lists of the jobs infrared and vmagent keep every series the Fleet dashboard names for them"
+  else
+    bad "telemetry: the Fleet dashboard names series that the keep lists drop:$missing"
+  fi
+else
+  bad "telemetry: could not read the Fleet dashboard's queries from the metrics stack's render"
+fi
+trimmed=""
+for name in workqueue_queue_duration_seconds_bucket workqueue_retries_total controller_runtime_active_workers \
+    rest_client_requests_total go_gc_duration_seconds process_open_fds; do
+  ! kept "$infrared_keep" "$name" || trimmed="$trimmed infrared:$name"
+done
+for name in flag vm_http_requests_total vm_promscrape_scrape_duration_seconds_bucket go_gc_duration_seconds process_open_fds; do
+  ! kept "$vmagent_keep" "$name" || trimmed="$trimmed vmagent:$name"
+done
+for name in infrared_step_cost_usd_total infrared_api_request_duration_seconds_bucket controller_runtime_reconcile_time_seconds_bucket; do
+  kept "$infrared_keep" "$name" || trimmed="$trimmed (lost) infrared:$name"
+done
+if [ -z "$trimmed" ]; then
+  ok "telemetry: the keep lists drop the operator's workqueue, client and runtime families and vmagent's flags and HTTP series, and keep Infrared's own"
+else
+  bad "telemetry: the keep lists are wrong for:$trimmed"
+fi
+
 # --- a build registry that is not ECR ---------------------------------------------
 # No ECR login job and no privileged namespace; builds/registry-push is the org's.
 "$work/render" -out "$work/ghcr" -cluster demo-g -flavor k3s -build-registry ghcr.io/demo-org >/dev/null
@@ -2133,6 +2226,22 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     [ "$(yq -N -r 'select(.metadata.name == "infrared-edge-zones-dashboard") | .data["infrared-edge-zones.json"]' "$work/vmks.yaml" \
         | jq -r '[.panels[].targets[0].legendFormat] | unique | join(",")')" = '{{infrared_zone}}' ] \
       && ok "gateway: the zones dashboard's legends survive the chart's tpl" || bad "gateway: the zones dashboard's legends are wrong after tpl"
+    # vmagent's external labels reach the VMAgent the chart makes, and the Fleet
+    # dashboard's legends (platform among them) survive the chart's tpl.
+    [ "$(yq -N -r 'select(.kind == "VMAgent") | .spec.externalLabels | .cluster + "," + .platform' "$work/vmks.yaml")" = demo-gw,demo-gw ] \
+      && ok "gateway: the monitoring chart gives vmagent the external labels cluster and platform" \
+      || bad "gateway: the monitoring chart's VMAgent lacks the external labels cluster and platform"
+    fleet_legends="$(yq -N -r 'select(.metadata.name == "infrared-fleet-dashboard") | .data["infrared-fleet.json"]' "$work/vmks.yaml" \
+      | jq -r '[.panels[].targets[]?.legendFormat // empty] | unique | join("|")')"
+    case "$fleet_legends" in
+      *'{{platform}}'*) ;;
+      *) fleet_legends="" ;;
+    esac
+    if [ -n "$fleet_legends" ] && ! grep -q '`' <<<"$fleet_legends" && ! grep -q '{{ ' <<<"$fleet_legends"; then
+      ok "gateway: the Fleet dashboard's legends survive the chart's tpl"
+    else
+      bad "gateway: the Fleet dashboard's legends are wrong after tpl: $fleet_legends"
+    fi
     # Node labels copied onto kubelet series took them past VMSingle's 40.
     [ "$(yq -N -r 'select(.kind == "VMNodeScrape") | .spec.relabelConfigs[] | select(.action == "labelmap") | .regex' "$work/vmks.yaml" | wc -l | tr -d ' ')" = 0 ] \
       && [ "$(yq -N -r 'select(.kind == "VMNodeScrape") | .metadata.name' "$work/vmks.yaml" | wc -l | tr -d ' ')" -ge 2 ] \

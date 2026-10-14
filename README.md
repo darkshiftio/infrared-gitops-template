@@ -252,6 +252,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi (see "Metrics with the stores") | 0.95.0 (operator v0.75.0) |
+| 30 | `telemetry` (with `.Telemetry.URL`, and the metrics stack left out) | `components/telemetry`: one vmagent that remote-writes to that URL (see "The telemetry plane") | vmagent v1.154.0, by digest |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
 | 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
@@ -302,7 +303,7 @@ whose value is not a layer the API knows.
 | 9 | Registry (`registry`) | `zot` (20) | |
 | 10 | Agent runtime (`agent-runtime`) | `substrate-crds` (20), `substrate-podcert` (21), `substrate` (22), `substrate-actors` (23) | |
 | 11 | Build runtime (`build-runtime`) | `kpack` (25), `builds` (26) | |
-| 12 | Observability (`observability`) | `victoria-metrics-k8s-stack` (30) | |
+| 12 | Observability (`observability`) | `victoria-metrics-k8s-stack` (30), `telemetry` (30) | |
 | 13 | Backups (`backups`) | `stores-restore` (18), only while a restore is in progress | the last run of the Infrared operator's CronJob `infrared-backup` in `.InfraredNamespace` and of the CronJob `stores/seaweedfs-backup`; with the WAL archive, the archive and the last base backup of `stores/postgres` |
 
 Which members serve a layer and which only support it, the layers each one
@@ -812,6 +813,38 @@ that follows the pod within its zone. A cluster with the stores hydrated from an
 older template keeps its old claim, which nothing uses once VMSingle has moved:
 the operator never deletes it, so a person does
 (`kubectl -n monitoring delete pvc vmsingle-victoria-metrics-k8s-stack`).
+
+### The telemetry plane
+
+Every install is a platform of one telemetry plane (infrared-docs-internal ADR
+0044): its series carry the label `platform`, and the Fleet dashboard (the
+ConfigMap `infrared-fleet-dashboard`, in the metrics stack's values) groups by
+it. Two shapes of install feed it.
+
+- **With the metrics stack,** vmagent sets `cluster` and `platform` on every
+  series it scrapes, both to `.ClusterName` (`infrared-cp-google` for hosted),
+  as a Mac's stack writes them. The scrape of Infrared's own metrics ports (a
+  VMServiceScrape for every Service port named `metrics` in
+  `.InfraredNamespace`) sets `honorLabels`, because infrared-api labels
+  `infrared_telemetry_writes_total` with the platform that wrote, and vmagent
+  would otherwise rename that label `exported_platform` and set `platform` to
+  this install's name. Any other scraped series that has a `platform` label is
+  renamed so (the kubelet's `kubernetes_build_info`, `linux/amd64`).
+- **Without it, and with `.Telemetry.URL` and `.Telemetry.Platform`,** the
+  `telemetry` Application (wave 30, layer `observability`) runs one vmagent in
+  `monitoring` that remote-writes everything to that URL as that platform,
+  with the bearer token from the Secret `telemetry-token`, which this repo
+  never holds, and a disk buffer. It scrapes Infrared's metrics ports every
+  30 s and keeps the series the Fleet dashboard names and a few beside them
+  (the operator's reconcile and workqueue totals, process memory and CPU,
+  Infrared's own `infrared_` series), not the rest of controller-runtime's, the
+  Go runtime's or the process registry, which were most of a Mac's 4,100
+  series; the kubelet's cAdvisor series for `ir-org-*` pods every 10 s, so that
+  a runner Job of a few seconds shows; and itself every 30 s, keeping its write
+  path's health. `make verify` checks that every series the dashboard names for
+  those jobs is kept. It also takes OpenTelemetry metrics from a person's
+  Claude Code sessions and the localred app, and drops `user.email`,
+  `user.id` and `organization.id` from them.
 
 ### Order on a fresh cluster
 
