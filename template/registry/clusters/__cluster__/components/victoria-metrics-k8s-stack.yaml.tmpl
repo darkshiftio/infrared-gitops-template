@@ -47,7 +47,7 @@ spec:
                 memory: 512Mi
               limits:
                 memory: 2Gi
-[[- if and (eq .ClusterFlavor "k3s") .Stores ]]
+[[- if and (eq .ClusterFlavor "k3s") .Stores (ne .Cloud "gcp") ]]
             # With the stores the cluster is several servers, each with its own
             # disk, and is built to lose one: SeaweedFS keeps every file on two
             # of them. On k3s the default StorageClass, local-path, would keep
@@ -71,6 +71,14 @@ spec:
                 emptyDir:
                   sizeLimit: 10Gi
 [[- else ]]
+[[- if eq .Cloud "gcp" ]]
+            # On Google Cloud the claim is a persistent disk of the cluster's
+            # default class, which follows the pod to whichever node it lands
+            # on, as SeaweedFS's disks do: a restart, a template move or a
+            # node's replacement keeps the metrics. 10Gi holds the 30 days:
+            # infrared-cp-google wrote about 130 MB a day on 2026-10-13 (localred
+            # plan, spike S4), a few GB at the retention.
+[[- end ]]
             storage:
               resources:
                 requests:
