@@ -100,8 +100,8 @@
 #     platformTokens.existingSecret; and without both, no object of it, and the
 #     pin alone changes nothing
 #   - metrics: on k3s with the stores VMSingle's data on an emptyDir of 10Gi
-#     and no claim (a request of no space), otherwise its 10Gi claim as before;
-#     and nothing else in the stack asks for a claim
+#     and no claim (a request of no space), except on Google Cloud; otherwise
+#     its 10Gi claim as before; and nothing else in the stack asks for a claim
 #   - telemetry (ADR 0044): with a telemetry URL in the -data file and the
 #     metrics stack left out, one vmagent that writes to that URL as that
 #     platform; with the stack on, or without a URL, nothing of it. That
@@ -628,14 +628,16 @@ for v in "${variants[@]}"; do
   # Metrics: on k3s with the stores VMSingle's data is on an emptyDir of 10Gi,
   # named data, and its claim asks for no space, which the operator makes no
   # claim for (a null would not survive an apply of the Application); without
-  # the stores, and on EKS, its 10Gi claim of the default class, as before.
+  # the stores, on EKS, and on Google Cloud (Cloud gcp, where the default class
+  # is a persistent disk that follows the pod), its 10Gi claim of the default
+  # class.
   # Nothing else in the stack asks for a claim: Grafana's persistence,
   # Alertmanager's storage and vmagent's stateful mode stay off.
   vm="$reg/components/victoria-metrics-k8s-stack.yaml"
   if holds_objects "$vm"; then
     vmsingle="$(yq -o json -I0 '.spec.source.helm.valuesObject.vmsingle.spec | {"storage": .storage, "volumes": .volumes}' "$vm")"
     vm_empty=false
-    [ "$flavor" = k3s ] && [ "$stores" = true ] && vm_empty=true
+    [ "$flavor" = k3s ] && [ "$stores" = true ] && [ "$cloud" != gcp ] && vm_empty=true
     if [ "$vm_empty" = true ]; then
       want_vm='{"storage":{"resources":{"requests":{"storage":"0"}}},"volumes":[{"name":"data","emptyDir":{"sizeLimit":"10Gi"}}]}'
     else
