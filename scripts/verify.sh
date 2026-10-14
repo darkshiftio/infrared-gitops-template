@@ -647,6 +647,22 @@ for v in "${variants[@]}"; do
       && [ "$(yq -r '.spec.source.helm.valuesObject | [(.grafana.persistence.enabled // false), (.alertmanager.spec.storage // "none"), (.vmagent.spec.statefulMode // false), (.vmagent.spec.statefulStorage // "none")] | join(" ")' "$vm")" = "false none false none" ] \
       && ok "$variant: VMSingle's data $([ "$vm_empty" = true ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
       || bad "$variant: VMSingle's storage is $vmsingle, want $want_vm, or another part of the stack asks for a claim"
+    # The metrics' nightly copy: only on Google Cloud with the backup bucket on
+    # Google Cloud Storage, a CronJob on VMSingle's node that mounts its claim
+    # read-only and writes as its own ServiceAccount under <prefix>/metrics/.
+    mb="$(yq -o json -I0 '[.spec.source.helm.valuesObject.extraObjects[] | select(.metadata.name == "metrics-backup") | .kind] | sort' "$vm")"
+    if [ "$cloud" = gcp ] && [ "$provider" = gcs ] && [ -n "$backup" ]; then
+      cj="$(yq -o json -I0 '.spec.source.helm.valuesObject.extraObjects[] | select(.kind == "CronJob" and .metadata.name == "metrics-backup") | .spec.jobTemplate.spec.template.spec' "$vm")"
+      [ "$mb" = '["CronJob","ServiceAccount","VMRule"]' ] \
+        && [ "$(jq -r '.serviceAccountName + " " + (.volumes[0].persistentVolumeClaim | .claimName + " " + (.readOnly | tostring)) + " " + .affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].labelSelector.matchLabels["app.kubernetes.io/name"]' <<<"$cj")" = "metrics-backup vmsingle-victoria-metrics-k8s-stack true vmsingle" ] \
+        && grep -qF "gcs://$backup/" <<<"$(jq -r '.containers[0].args[0]' <<<"$cj")" \
+        && grep -qE '/metrics"$' <<<"$(jq -r '.containers[0].args[0]' <<<"$cj" | grep '^base=')" \
+        && ok "$variant: the metrics are copied every night to gcs://$backup/<prefix>/metrics/ from VMSingle's node, as metrics-backup" \
+        || bad "$variant: the metrics' nightly copy is not rendered as it should be: $mb"
+    else
+      [ "$mb" = '[]' ] && ok "$variant: no nightly copy of the metrics, which needs Google Cloud and a gcs bucket" \
+        || bad "$variant: the metrics' nightly copy rendered without Google Cloud and a gcs bucket: $mb"
+    fi
   fi
   if [ -n "$token_host" ]; then
     # The chart derives its pull secret from registryToken: none named here.
@@ -2250,6 +2266,17 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
       && ok "gateway: the kubelet and cAdvisor scrapes copy no node labels" || bad "gateway: a VMNodeScrape copies node labels onto its series"
   else
     bad "gateway: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks.err")"
+  fi
+  # The metrics' nightly copy, its script among the extraObjects, through the
+  # chart's tpl on Google Cloud (variant gcs-gke).
+  yq '.spec.source.helm.valuesObject' "$work/gcs-gke/registry/clusters/demo-gk/components/victoria-metrics-k8s-stack.yaml" >"$work/vmks-gke-values.yaml"
+  if helm template victoria-metrics-k8s-stack "$work/vmks-chart/victoria-metrics-k8s-stack" -n monitoring \
+      -f "$work/vmks-gke-values.yaml" >"$work/vmks-gke.yaml" 2>"$work/vmks-gke.err"; then
+    [ "$(yq -N -r 'select(.kind == "CronJob" and .metadata.name == "metrics-backup") | .spec.jobTemplate.spec.template.spec.containers[0].args[0]' "$work/vmks-gke.yaml" \
+        | grep -cE '^(day=\$\(date -u \+%a|/vmbackup-prod .*-dst="\$base/latest"$|/vmbackup-prod .*-origin="\$base/latest" -dst="\$base/\$day"$)')" = 3 ] \
+      && ok "gcs-gke: the metrics' nightly copy survives the chart's tpl" || bad "gcs-gke: the metrics' nightly copy is wrong after tpl"
+  else
+    bad "gcs-gke: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-gke.err")"
   fi
 else
   echo "skip: victoria-metrics-k8s-stack $vmks_version could not be fetched; its render is not checked"
