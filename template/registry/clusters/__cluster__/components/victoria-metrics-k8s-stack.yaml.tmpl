@@ -505,7 +505,7 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform) (rate(vmagent_remotewrite_rows_pushed_total{platform=~\"$platform\"}[5m]))",
+                          "expr": "sum by (platform) (rate(vmagent_remotewrite_rows_pushed_after_relabel_total{platform=~\"$platform\"}[5m]))",
                           "legendFormat": "{{ `{{platform}}` }}",
                           "refId": "A"
                         }

@@ -165,11 +165,10 @@ data:
         static_configs:
           - targets: ["127.0.0.1:8429"]
         # vmagent's own registry is about 1,200 series. Keep its write path:
-        # requests by answer, the disk buffer and rows pushed (the Fleet
-        # dashboard names vmagent_remotewrite_rows_pushed_total, which vmagent
-        # v1.154.0 does not export; it counts rows as
-        # ..._rows_pushed_after_relabel_total, kept too), the push queue's
-        # drops, and the version.
+        # requests by answer, the disk buffer and rows pushed (vmagent v1.154.0
+        # counts rows as ..._rows_pushed_after_relabel_total, which the Fleet
+        # dashboard reads; the older ..._rows_pushed_total name is kept in case
+        # a later vmagent exports it), the push queue's drops, and the version.
         metric_relabel_configs:
           - action: keep
             source_labels: [__name__]
