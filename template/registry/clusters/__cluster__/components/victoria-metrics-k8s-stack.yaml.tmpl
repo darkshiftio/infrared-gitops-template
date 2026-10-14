@@ -194,8 +194,11 @@ spec:
           # builders' Claude Code sessions, and the store itself. The series
           # come from the operator, the API, each stack's vmagent and the
           # localred app, named as the plan (localred
-          # docs/plan-work-distributor.md, phase 1) says. Its second cut, from
-          # the first series a Mac sent on 2026-10-13.
+          # docs/plan-work-distributor.md, phase 1) says. Its fourth cut, from
+          # phase 1's proof on 2026-10-14: a change run's fourteen attempts and a
+          # builder session from one Mac beside hosted. Counters use
+          # increase_pure, so a platform's first hour counts from its first
+          # sample; durations are quantiles over the hour's histogram.
           - apiVersion: v1
             kind: ConfigMap
             metadata:
@@ -214,7 +217,7 @@ spec:
                   ],
                   "editable": true,
                   "schemaVersion": 39,
-                  "version": 3,
+                  "version": 4,
                   "time": {
                     "from": "now-6h",
                     "to": "now"
@@ -222,7 +225,7 @@ spec:
                   "timezone": "browser",
                   "refresh": "1m",
                   "graphTooltip": 1,
-                  "description": "Every Infrared install as a platform of one telemetry plane (ADR 0044): hosted's own cluster and each developer's Mac stack, side by side. The variable is the cluster label both carry today.",
+                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Fourth cut, 2026-10-14, from the first proof: a change run and a builder session on a Mac, beside hosted.",
                   "templating": {
                     "list": [
                       {
@@ -911,13 +914,57 @@ spec:
                       "gridPos": {
                         "x": 0,
                         "y": 39,
-                        "w": 12,
+                        "w": 8,
                         "h": 8
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, outcome) (increase(infrared_step_attempts_total{cluster=~\"$cluster\"}[1h]))",
+                          "expr": "sum by (cluster, outcome) (increase_pure(infrared_step_attempts_total{cluster=~\"$cluster\"}[1h]))",
                           "legendFormat": "{{ `{{cluster}}` }} {{ `{{outcome}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 42,
+                      "type": "timeseries",
+                      "title": "Attempts per hour, by role and outcome",
+                      "description": "",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 39,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (cluster, role, outcome) (increase_pure(infrared_step_attempts_total{cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{role}}` }} {{ `{{outcome}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -953,14 +1000,14 @@ spec:
                       "title": "Cost per hour, by platform and model (USD)",
                       "description": "",
                       "gridPos": {
-                        "x": 12,
+                        "x": 16,
                         "y": 39,
-                        "w": 12,
+                        "w": 8,
                         "h": 8
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, model) (increase(infrared_step_cost_usd_total{cluster=~\"$cluster\"}[1h]))",
+                          "expr": "sum by (cluster, model) (increase_pure(infrared_step_cost_usd_total{cluster=~\"$cluster\"}[1h]))",
                           "legendFormat": "{{ `{{cluster}}` }} {{ `{{model}}` }}",
                           "refId": "A"
                         }
@@ -994,7 +1041,7 @@ spec:
                     {
                       "id": 21,
                       "type": "timeseries",
-                      "title": "Duration p50 and p95, by platform",
+                      "title": "Duration p50 and p95 over the last hour, by platform",
                       "description": "",
                       "gridPos": {
                         "x": 0,
@@ -1004,12 +1051,12 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "histogram_quantile(0.5, sum by (cluster, le) (rate(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
+                          "expr": "histogram_quantile(0.5, sum by (cluster, le) (increase_pure(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
                           "legendFormat": "{{ `{{cluster}}` }} p50",
                           "refId": "A"
                         },
                         {
-                          "expr": "histogram_quantile(0.95, sum by (cluster, le) (rate(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
+                          "expr": "histogram_quantile(0.95, sum by (cluster, le) (increase_pure(infrared_step_duration_seconds_bucket{cluster=~\"$cluster\"}[1h])))",
                           "legendFormat": "{{ `{{cluster}}` }} p95",
                           "refId": "B"
                         }
@@ -1053,7 +1100,7 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, kind) (increase(infrared_step_tokens_total{cluster=~\"$cluster\"}[1h]))",
+                          "expr": "sum by (cluster, kind) (increase_pure(infrared_step_tokens_total{cluster=~\"$cluster\"}[1h]))",
                           "legendFormat": "{{ `{{cluster}}` }} {{ `{{kind}}` }}",
                           "refId": "A"
                         }
@@ -1449,7 +1496,7 @@ spec:
                     {
                       "id": 33,
                       "type": "timeseries",
-                      "title": "Sessions per hour",
+                      "title": "Sessions per hour, by platform, role and product",
                       "description": "",
                       "gridPos": {
                         "x": 0,
@@ -1459,8 +1506,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (increase({__name__=~\"claude_code_session_count.*\", cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (cluster, role, product) (increase_pure({__name__=~\"claude_code_session_count.*\", cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{role}}` }} {{ `{{product}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1503,7 +1550,7 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, model) (increase({__name__=~\"claude_code_cost_usage.*\", cluster=~\"$cluster\"}[1h]))",
+                          "expr": "sum by (cluster, model) (increase_pure({__name__=~\"claude_code_cost_usage.*\", cluster=~\"$cluster\"}[1h]))",
                           "legendFormat": "{{ `{{cluster}}` }} {{ `{{model}}` }}",
                           "refId": "A"
                         }
@@ -1547,7 +1594,7 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster, type) (increase({__name__=~\"claude_code_token_usage.*\", cluster=~\"$cluster\"}[1h]))",
+                          "expr": "sum by (cluster, type) (increase_pure({__name__=~\"claude_code_token_usage.*\", cluster=~\"$cluster\"}[1h]))",
                           "legendFormat": "{{ `{{cluster}}` }} {{ `{{type}}` }}",
                           "refId": "A"
                         }
@@ -1581,7 +1628,7 @@ spec:
                     {
                       "id": 36,
                       "type": "timeseries",
-                      "title": "Active time per hour",
+                      "title": "Active time per hour, by type (user, cli)",
                       "description": "",
                       "gridPos": {
                         "x": 18,
@@ -1591,8 +1638,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (cluster) (increase({__name__=~\"claude_code_active_time.*\", cluster=~\"$cluster\"}[1h]))",
-                          "legendFormat": "{{ `{{cluster}}` }}",
+                          "expr": "sum by (cluster, type) (increase_pure({__name__=~\"claude_code_active_time.*\", cluster=~\"$cluster\"}[1h]))",
+                          "legendFormat": "{{ `{{cluster}}` }} {{ `{{type}}` }}",
                           "refId": "A"
                         }
                       ],
