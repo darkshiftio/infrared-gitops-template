@@ -126,6 +126,55 @@ spec:
               memory: 128Mi
             limits:
               memory: 512Mi
+[[- if and .OIDC .GrafanaURL .InfraredHost ]]
+          # People sign in through Infrared (infrared-docs-internal ADR 0053),
+          # which signs them in as it signs them in to itself, Google first. A
+          # person's role here is their role in the platform org: platform-admin
+          # is Admin and server admin, org-admin Admin, member Editor and viewer
+          # Viewer; anyone else is refused, by Infrared and here
+          # (role_attribute_strict). The browser goes to Infrared's own address;
+          # Grafana's own calls (the token, the person's claims and the signing
+          # keys) stay in the cluster, on the API's Service. The admin keeps its
+          # password as break glass, at /login?disableAutoLogin.
+          grafana.ini:
+            server:
+              root_url: [[ printf "%s/" .GrafanaURL | quote ]]
+            auth:
+              disable_login_form: false
+              # As long as Infrared's own session.
+              login_maximum_lifetime_duration: 12h
+            auth.generic_oauth:
+              enabled: true
+              name: Infrared
+              client_id: grafana
+              scopes: openid email profile offline_access
+              auth_url: [[ printf "https://%s/api/v1/oidc/authorize" .InfraredHost | quote ]]
+              token_url: [[ printf "http://infrared-api.%s.svc.cluster.local:8080/v1/oidc/token" .InfraredNamespace | quote ]]
+              api_url: [[ printf "http://infrared-api.%s.svc.cluster.local:8080/v1/oidc/userinfo" .InfraredNamespace | quote ]]
+              jwk_set_url: [[ printf "http://infrared-api.%s.svc.cluster.local:8080/v1/oidc/jwks" .InfraredNamespace | quote ]]
+              validate_id_token: true
+              use_pkce: true
+              use_refresh_token: true
+              auto_login: true
+              allow_sign_up: true
+              login_attribute_path: preferred_username
+              email_attribute_path: email
+              name_attribute_path: name
+              role_attribute_path: "infrared_platform_role == 'platform-admin' && 'GrafanaAdmin' || infrared_platform_role == 'org-admin' && 'Admin' || infrared_platform_role == 'member' && 'Editor' || infrared_platform_role == 'viewer' && 'Viewer'"
+              role_attribute_strict: true
+              allow_assign_grafana_admin: true
+              skip_org_role_sync: false
+          # The client's secret, which infrared-api writes to the Secret
+          # monitoring/infrared-oidc-grafana and never returns. Not optional:
+          # Grafana waits for the API to write it. It stays out of grafana.ini,
+          # which the grafana chart renders into a ConfigMap and refuses
+          # secrets in (assertNoLeakedSecrets).
+          envValueFrom:
+            GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+              secretKeyRef:
+                name: infrared-oidc-grafana
+                key: client-secret
+[[- end ]]
         # Neither flavor exposes these: EKS runs the control plane for you,
         # and k3s runs it inside the k3s process without these endpoints.
         kubeControllerManager:

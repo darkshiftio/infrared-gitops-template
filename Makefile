@@ -51,6 +51,12 @@ PULL_SECRET ?=
 #   REGISTRY_TOKEN='{"gcpServiceAccount": "registry-reader@darkshift-preprod.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}'
 SUBSTRATE_REGISTRY ?=
 REGISTRY_TOKEN     ?=
+# OIDC: true, with GRAFANA_URL (Grafana's address in a browser) and INFRARED_HOST,
+# signs people in to Grafana through Infrared (as INFRARED_OIDC and
+# INFRARED_OIDC_GRAFANA_URL; infrared-docs-internal ADR 0053). E.g.
+# make render OIDC=true GRAFANA_URL=https://grafana.example.com INFRARED_HOST=infrared.example.com
+OIDC        ?= false
+GRAFANA_URL ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -62,7 +68,8 @@ render:
 		-stores=$(STORES) -stores-single-node=$(STORES_SINGLE_NODE) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
-		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)'
+		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)' \
+		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)"
 
 ## verify: the gate CI runs
 verify:

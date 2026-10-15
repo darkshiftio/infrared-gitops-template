@@ -76,6 +76,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.RegistryToken` | `{"GCPServiceAccount": "", "Registry": ""}`, `{"GCPServiceAccount": "registry-reader@darkshift-preprod.iam.gserviceaccount.com", "Registry": "us-central1-docker.pkg.dev"}` or `{"AWSRegion": "us-east-1", "AWSRoleARN": "", "Registry": "123456789012.dkr.ecr.us-east-1.amazonaws.com"}` | the operator's `INFRARED_REGISTRY_TOKEN`, the Infrared chart's `registryToken`: `.ImagePullSecret` is not a lasting credential but a token for the registry host `Registry`, which the chart's CronJob rewrites every 30 minutes: an access token of the Google service account `GCPServiceAccount` (Workload Identity; no key), or on AWS an ECR token of the cluster's role in `AWSRegion` (`AWSRoleARN`, optional, the IRSA role; `Registry` ECR's host in that region). A template reads the AWS fields only where `Registry` is set without `GCPServiceAccount`, so an operator older than them still renders it. The template carries it in the `infrared` Application, leaves the chart's `imagePullSecrets` empty there (the chart names the Secret itself), and copies the pull secret into other namespaces every 5 minutes instead of every hour. `Registry` with exactly one of `GCPServiceAccount` and `AWSRegion`, or nothing, and only with an `.ImagePullSecret`. The zero value is none, as before the field existed |
 | `.CloudIdentity` | absent (none), `{"GCPServiceAccount": "infrared-cloud@darkshift-preprod.iam.gserviceaccount.com", "AWSWebIdentity": true}`, `{"AWSRoleARN": "arn:aws:iam::<account>:role/<name>"}` or `{"AWSHostNetwork": true}` | the operator's `INFRARED_CLOUD_IDENTITY`, the chart's `cloudIdentity` (ADR 0033): the ServiceAccount `infrared-cloud`'s Google service account and at most one AWS mode; carried in the `infrared` Application |
 | `.RunningChartVersion` | absent (an older operator), `0.1.0-alpha.153` | the chart version of the operator that renders; the `infrared` Application carries Infrared's image pins (`.Images`) only while `.InfraredChartVersion` equals it, so an upgrade that pins a newer chart runs that chart's images, its operator included, which then pins its own |
+| `.OIDC` | absent or `false`, `true` | the operator's `INFRARED_OIDC`, the Infrared chart's `oidc.enabled`: Infrared is the OpenID Connect provider of the install's own tools (infrared-docs-internal ADR 0053). With `.GrafanaURL` and `.InfraredHost`, Grafana signs people in through Infrared (see "Grafana's sign-in through Infrared"); without either, it changes nothing |
+| `.GrafanaURL` | absent or ``, `https://grafana.infrared-cp-google.private.darkshift.io` | the operator's `INFRARED_OIDC_GRAFANA_URL`, the chart's `oidc.grafanaURL`: Grafana's address in a browser, http(s) with no trailing slash. Grafana's `root_url` is it with a slash, and its redirect URI `<GrafanaURL>/login/generic_oauth`, which infrared-api matches exactly |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -86,7 +88,7 @@ array, exactly as the operator's environment carries them, `-forge` with
 `-forge-url`, and `-registry`; `-registry-retention` as JSON, as
 `INFRARED_REGISTRY_RETENTION` carries it (camelCase keys); `-copies`,
 `-postgres-archive` and `-restore` as their Data in JSON (camelCase keys too);
-and `-postgres-server-name`.
+`-postgres-server-name`; and `-oidc` with `-grafana-url`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -117,7 +119,10 @@ spelled out. `.Copies.Recipients` turns backups on, with the stores and a
 backup bucket: the Postgres roles' copy into `.InfraredNamespace` and the
 backup in the mirror's run mark. `.Restore` adds the restore's pieces, with the
 same two: with neither, both change only what the `infrared` Application
-carries (`make verify` checks it).
+carries (`make verify` checks it). `.OIDC` with `.GrafanaURL` and
+`.InfraredHost` changes only the `victoria-metrics-k8s-stack` Application, its
+Grafana; with any of the three unset, nothing (`make verify` checks it). The
+operator leaves `.OIDC` and `.GrafanaURL` out of its data while they are unset.
 
 ### What the operator does after rendering
 
@@ -874,6 +879,34 @@ it. Two shapes of install feed it.
   those jobs is kept. It also takes OpenTelemetry metrics from a person's
   Claude Code sessions and the localred app, and drops `user.email`,
   `user.id` and `organization.id` from them.
+
+### Grafana's sign-in through Infrared
+
+With `.OIDC`, `.GrafanaURL` and `.InfraredHost` all set, Grafana signs people
+in through Infrared, the OpenID Connect provider of the install's own tools
+(infrared-docs-internal ADR 0053), which signs them in as it does itself,
+Google first. With any of them unset, Grafana keeps its local `admin` alone, as
+before. The `victoria-metrics-k8s-stack` Application's `grafana` values gain:
+
+| Setting | Value |
+|---|---|
+| `grafana.ini` `server.root_url` | `<GrafanaURL>/` |
+| `auth.disable_login_form` | `false`: the local `admin` keeps its password as break glass, at `/login?disableAutoLogin` |
+| `auth.login_maximum_lifetime_duration` | `12h`, as long as Infrared's own session |
+| `auth.generic_oauth` | `enabled`, `name: Infrared`, `client_id: grafana`, `auto_login`, `allow_sign_up`, `use_pkce`, `use_refresh_token`, scopes `openid email profile offline_access` |
+| `auth_url` | `https://<InfraredHost>/api/v1/oidc/authorize`, where the browser goes |
+| `token_url`, `api_url`, `jwk_set_url` | `http://infrared-api.<InfraredNamespace>.svc.cluster.local:8080/v1/oidc/token`, `.../userinfo` and `.../jwks`: Grafana's own calls stay in the cluster |
+| `validate_id_token` | `true`, against those keys |
+| `login_attribute_path`, `email_attribute_path`, `name_attribute_path` | `preferred_username`, `email`, `name` |
+| `role_attribute_path` | `infrared_platform_role`, the person's role in the platform org: `platform-admin` is `GrafanaAdmin` (Admin and server admin, with `allow_assign_grafana_admin`), `org-admin` `Admin`, `member` `Editor`, `viewer` `Viewer`; with `role_attribute_strict` anyone else is refused, and `skip_org_role_sync: false` sets the role at each sign-in |
+| `envValueFrom` | `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET` from the Secret `infrared-oidc-grafana`, key `client-secret`, in `monitoring` |
+
+infrared-api writes that Secret and never returns its value; this repo never
+holds it, and it stays out of `grafana.ini`, which the grafana chart renders into
+a ConfigMap and refuses secrets in (`assertNoLeakedSecrets`). The reference is
+not optional: Grafana waits for the API to write the Secret. Nothing in these
+values holds `{{`, since the grafana chart passes `grafana.ini`'s strings through
+`tpl`.
 
 ### Order on a fresh cluster
 
