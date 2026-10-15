@@ -195,6 +195,19 @@ type Data struct {
 	// which then pins its own. Empty is an operator from before the field, and
 	// the pins render as they always did.
 	RunningChartVersion string `json:"RunningChartVersion,omitempty"`
+	// OIDC is the operator's INFRARED_OIDC, the Infrared chart's oidc.enabled:
+	// Infrared is the OpenID Connect provider of the install's own tools
+	// (infrared-docs-internal ADR 0053). With GrafanaURL and InfraredHost set
+	// too, Grafana signs people in through Infrared. False renders as before
+	// the field existed, and an operator leaves it out of the data.
+	OIDC bool `json:"OIDC,omitempty"`
+	// GrafanaURL is the operator's INFRARED_OIDC_GRAFANA_URL, the Infrared
+	// chart's oidc.grafanaURL: Grafana's address in a browser, such as
+	// https://grafana.infrared-cp-google.private.darkshift.io, http(s) with no
+	// trailing slash. It is Grafana's root_url, and Grafana's redirect URI is
+	// <GrafanaURL>/login/generic_oauth. Empty renders as before the field
+	// existed.
+	GrafanaURL string `json:"GrafanaURL,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -529,6 +542,8 @@ func main() {
 	flag.StringVar(&d.RunningChartVersion, "running-chart-version", "", "RunningChartVersion: the rendering operator's chart version; image pins render only when it equals InfraredChartVersion (empty: always, as before)")
 	flag.Var(jsonFlag[*CloudIdentity]{&d.CloudIdentity, "cloud-identity"}, "cloud-identity",
 		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
+	flag.BoolVar(&d.OIDC, "oidc", false, "OIDC: Infrared is the OpenID Connect provider of the install's own tools (INFRARED_OIDC); with -grafana-url and -infrared-host, Grafana signs people in through it")
+	flag.StringVar(&d.GrafanaURL, "grafana-url", "", "GrafanaURL: Grafana's address in a browser, http(s) with no trailing slash (INFRARED_OIDC_GRAFANA_URL; empty for none)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -607,6 +622,8 @@ func mergeDataFile(d *Data, path string) error {
 		"registry-token":        func() { d.RegistryToken = explicit.RegistryToken },
 		"cloud-identity":        func() { d.CloudIdentity = explicit.CloudIdentity },
 		"running-chart-version": func() { d.RunningChartVersion = explicit.RunningChartVersion },
+		"oidc":                  func() { d.OIDC = explicit.OIDC },
+		"grafana-url":           func() { d.GrafanaURL = explicit.GrafanaURL },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -678,7 +695,27 @@ func validate(d Data) error {
 	}
 	errs = append(errs, validateRegistryToken(d.RegistryToken, d.ImagePullSecret)...)
 	errs = append(errs, validateCloudIdentity(d.CloudIdentity)...)
+	if err := validateGrafanaURL(d.GrafanaURL); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// validateGrafanaURL checks GrafanaURL: empty, or Grafana's address in a
+// browser, http(s) and a host with no trailing slash, user, query or fragment,
+// as the operator hands it over. Grafana's root_url is it with a slash, and its
+// redirect URI <GrafanaURL>/login/generic_oauth, which infrared-api matches
+// exactly.
+func validateGrafanaURL(grafanaURL string) error {
+	if grafanaURL == "" {
+		return nil
+	}
+	u, err := url.Parse(grafanaURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
+		strings.HasSuffix(grafanaURL, "/") || strings.ContainsAny(grafanaURL, "?# \t\"'") {
+		return fmt.Errorf("GrafanaURL must be Grafana's address in a browser, http(s) and a host with no trailing slash, user, query or fragment, got %q", grafanaURL)
+	}
+	return nil
 }
 
 // validateCloudIdentity checks the cloud identity: none, or a Google service

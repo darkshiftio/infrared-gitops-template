@@ -149,6 +149,15 @@
 #   - a component named in Disabled renders its Application to comments only,
 #     and nothing else changes but the repo's README.md and the infrared
 #     Application's components.disabled
+#   - Grafana's sign-in through Infrared (infrared-docs-internal ADR 0053):
+#     with OIDC, GrafanaURL and InfraredHost, the metrics stack's Grafana takes
+#     generic OAuth from Infrared (the browser at Infrared's address, Grafana's
+#     own calls on the API's Service in InfraredNamespace, the role from
+#     infrared_platform_role, the login form kept for the admin's break glass)
+#     and the client's secret from the Secret infrared-oidc-grafana, never in
+#     grafana.ini; the grafana chart takes the values; with any of the three
+#     unset nothing changes, and a GrafanaURL with a trailing slash, a query or
+#     no scheme is refused
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
@@ -284,6 +293,9 @@ yq -p json -o json '.Telemetry = {"URL": "https://infrared.example.com/api/v1/te
   "$work/stores.json" >"$work/telemetry.json"
 yq -p json -o json '.Telemetry = {"URL": "https://infrared.example.com/api/v1/telemetry/write", "Platform": "demo-mac"}' \
   "$work/stores.json" >"$work/telemetry-metrics.json"
+# Grafana's sign-in through Infrared (ADR 0053): the gateway's Data with the
+# provider on and Grafana's address in a browser, as the operator passes them.
+yq -p json -o json '. + {"OIDC": true, "GrafanaURL": "https://grafana.'"$gw_domain"'"}' "$work/gateway.json" >"$work/oidc.json"
 yq -p json -o json '. + {"Copies": {"Recipients": ["'"$age_recipient"'"]}}' "$work/stores.json" >"$work/copies-noreg.json"
 yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": "'"$restore_point"'.irbackup", "MirrorRun": "'"$restore_run"'"}}' \
   "$work/copies.json" >"$work/restore.json"
@@ -356,6 +368,7 @@ variants=(
   "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
   "telemetry demo-tm k3s - -data $work/telemetry.json"
   "telemetry-metrics demo-te k3s - -data $work/telemetry-metrics.json"
+  "oidc demo-oi k3s - -data $work/oidc.json"
   "code-index-pull demo-cq k3s - -image-registry ghcr.io/demo-org -pull-secret ghcr-pull -images $ci_images"
   "code-index-nopull demo-cy k3s - -image-registry ghcr.io/demo-org -images $ci_images"
 )
@@ -1774,6 +1787,8 @@ done
 # the stores runs no registry, and changes only the infrared Application too.
 # Changes are comma-separated.
 infrared_app=registry/clusters/demo/components/infrared.yaml
+vmks_rel=registry/clusters/demo/components/victoria-metrics-k8s-stack.yaml
+grafana_url=https://grafana.example.com
 for v in "traefik - -edge traefik" \
     "traefik-facts - -platform-domain preprod.example.com -infrared-host infrared.example.com -cloud aws -substrate-capable" \
     "traefik-linode - -edge traefik -platform-domain $gw_domain -infrared-host $gw_host -cloud linode" \
@@ -1788,7 +1803,12 @@ for v in "traefik - -edge traefik" \
     "code-index-alone - -images $ci_images" \
     "cloud-identity-gcp-alone $infrared_app -cloud-identity {\"gcpServiceAccount\":\"infrared-cloud@acme-preprod.iam.gserviceaccount.com\",\"awsWebIdentity\":true}" \
     "cloud-identity-aws-alone $infrared_app -cloud-identity {\"awsRoleArn\":\"arn:aws:iam::123456789012:role/infrared-cloud\"}" \
-    "cloud-identity-ec2-alone $infrared_app -cloud-identity {\"awsHostNetwork\":true}"; do
+    "cloud-identity-ec2-alone $infrared_app -cloud-identity {\"awsHostNetwork\":true}" \
+    "oidc-alone - -oidc" \
+    "oidc-no-host - -oidc -grafana-url $grafana_url" \
+    "oidc-no-grafana - -oidc -infrared-host infrared.example.com" \
+    "grafana-url-alone - -grafana-url $grafana_url -infrared-host infrared.example.com" \
+    "oidc-grafana $vmks_rel -oidc -grafana-url $grafana_url -infrared-host infrared.example.com"; do
   read -r variant changes extra <<<"$v"
   [ "$changes" = - ] && changes=""
   changes="${changes//,/ }"
@@ -1824,6 +1844,57 @@ for bad_identity in '{}' '{"awsRoleArn":"arn:aws:iam::123456789012:role/x","awsW
     bad "cloud identity $bad_identity: rendered, want a refusal"
   else
     ok "cloud identity $bad_identity: refused"
+  fi
+done
+
+# --- Grafana's sign-in through Infrared (ADR 0053) ---------------------------------
+# With OIDC, GrafanaURL and InfraredHost (variant oidc, from a -data file as the
+# operator passes them), Grafana signs people in through Infrared: the browser
+# goes to Infrared's own address, Grafana's own calls go to the API's Service,
+# the role comes from infrared_platform_role, the login form stays for the
+# admin's break glass, and the client's secret comes from the Secret
+# infrared-oidc-grafana, never from grafana.ini. The comparisons above show
+# that any of the three alone, or any two, change nothing, and all three only
+# the metrics stack's Application.
+oidc_vm="$work/oidc/registry/clusters/demo-oi/components/victoria-metrics-k8s-stack.yaml"
+oidc_api=http://infrared-api.infrared.svc.cluster.local:8080/v1/oidc
+oidc_role="infrared_platform_role == 'platform-admin' && 'GrafanaAdmin' || infrared_platform_role == 'org-admin' && 'Admin'"
+oidc_role="$oidc_role || infrared_platform_role == 'member' && 'Editor' || infrared_platform_role == 'viewer' && 'Viewer'"
+got="$(yq -o json -I0 '.spec.source.helm.valuesObject.grafana["grafana.ini"]' "$oidc_vm" | jq -S -c .)"
+want="$(jq -S -c -n --arg root "https://grafana.$gw_domain/" --arg auth "https://$gw_host/api/v1/oidc/authorize" \
+  --arg api "$oidc_api" --arg role "$oidc_role" '{
+    server: {root_url: $root},
+    auth: {disable_login_form: false, login_maximum_lifetime_duration: "12h"},
+    "auth.generic_oauth": {enabled: true, name: "Infrared", client_id: "grafana", scopes: "openid email profile offline_access",
+      auth_url: $auth, token_url: ($api + "/token"), api_url: ($api + "/userinfo"), jwk_set_url: ($api + "/jwks"),
+      validate_id_token: true, use_pkce: true, use_refresh_token: true, auto_login: true, allow_sign_up: true,
+      login_attribute_path: "preferred_username", email_attribute_path: "email", name_attribute_path: "name",
+      role_attribute_path: $role, role_attribute_strict: true, allow_assign_grafana_admin: true, skip_org_role_sync: false}}')"
+[ "$got" = "$want" ] \
+  && ok "oidc: Grafana's grafana.ini signs people in through Infrared, the role from the platform org's" \
+  || bad "oidc: Grafana's grafana.ini is $got, want $want"
+[ "$(yq -o json -I0 '.spec.source.helm.valuesObject.grafana.envValueFrom' "$oidc_vm")" \
+    = '{"GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET":{"secretKeyRef":{"name":"infrared-oidc-grafana","key":"client-secret"}}}' ] \
+  && ok "oidc: the client's secret comes from infrared-oidc-grafana, key client-secret, and is not optional" \
+  || bad "oidc: Grafana's envValueFrom is not GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET from infrared-oidc-grafana"
+if grep -qiE 'client_secret|\{\{' <<<"$got"; then
+  bad "oidc: grafana.ini holds a client secret, or a {{ the grafana chart's tpl would read"
+else
+  ok "oidc: grafana.ini holds no client secret and no {{"
+fi
+"$work/render" -out "$work/oidc-ns" -cluster demo -flavor k3s -build-registry "" -namespace ir-test \
+  -oidc -grafana-url "$grafana_url" -infrared-host infrared.example.com >/dev/null
+got="$(yq -r '.spec.source.helm.valuesObject.grafana["grafana.ini"]["auth.generic_oauth"] | [.token_url, .api_url, .jwk_set_url] | join(" ")' \
+  "$work/oidc-ns/$vmks_rel")"
+ns_api=http://infrared-api.ir-test.svc.cluster.local:8080/v1/oidc
+[ "$got" = "$ns_api/token $ns_api/userinfo $ns_api/jwks" ] \
+  && ok "oidc: Grafana reaches the API's Service in Infrared's own namespace" \
+  || bad "oidc: Grafana's token, userinfo and keys URLs are $got, want them in ir-test"
+for bad_url in "$grafana_url/" grafana.example.com "$grafana_url/?orgId=1" "https://someone@grafana.example.com"; do
+  if "$work/render" -out "$work/oidc-refused" -cluster demo -flavor k3s -build-registry "" -oidc -grafana-url "$bad_url" >/dev/null 2>&1; then
+    bad "GrafanaURL $bad_url: rendered, want a refusal"
+  else
+    ok "GrafanaURL $bad_url: refused"
   fi
 done
 
@@ -2277,6 +2348,29 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
       && ok "gcs-gke: the metrics' nightly copy survives the chart's tpl" || bad "gcs-gke: the metrics' nightly copy is wrong after tpl"
   else
     bad "gcs-gke: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-gke.err")"
+  fi
+  # Grafana's sign-in through Infrared (variant oidc): the grafana chart takes
+  # the values (its assertNoLeakedSecrets passes, the secret being outside
+  # grafana.ini), writes the generic OAuth section into Grafana's ConfigMap,
+  # and gives Grafana the client's secret from infrared-oidc-grafana.
+  yq '.spec.source.helm.valuesObject' "$oidc_vm" >"$work/vmks-oidc-values.yaml"
+  if helm template victoria-metrics-k8s-stack "$work/vmks-chart/victoria-metrics-k8s-stack" -n monitoring \
+      -f "$work/vmks-oidc-values.yaml" >"$work/vmks-oidc.yaml" 2>"$work/vmks-oidc.err"; then
+    ini="$(yq -N -r 'select(.kind == "ConfigMap" and .metadata.name == "victoria-metrics-k8s-stack-grafana") | .data["grafana.ini"]' "$work/vmks-oidc.yaml")"
+    if grep -qx '\[auth.generic_oauth\]' <<<"$ini" && grep -qx "root_url = https://grafana.$gw_domain/" <<<"$ini" \
+      && grep -qx "auth_url = https://$gw_host/api/v1/oidc/authorize" <<<"$ini" \
+      && grep -qx 'login_maximum_lifetime_duration = 12h' <<<"$ini" && ! grep -qi 'client_secret' <<<"$ini"; then
+      ok "oidc: the grafana chart writes the generic OAuth section into Grafana's ConfigMap, and no secret"
+    else
+      bad "oidc: Grafana's grafana.ini from the chart lacks the generic OAuth section, or holds a secret"
+    fi
+    [ "$(yq -N -o json -I0 'select(.kind == "Deployment" and .metadata.name == "victoria-metrics-k8s-stack-grafana")
+        | .spec.template.spec.containers[] | select(.name == "grafana") | .env[] | select(.name == "GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET") | .valueFrom' \
+        "$work/vmks-oidc.yaml")" = '{"secretKeyRef":{"key":"client-secret","name":"infrared-oidc-grafana"}}' ] \
+      && ok "oidc: the grafana chart gives Grafana the client's secret from infrared-oidc-grafana" \
+      || bad "oidc: Grafana's container lacks GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET from infrared-oidc-grafana"
+  else
+    bad "oidc: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-oidc.err")"
   fi
 else
   echo "skip: victoria-metrics-k8s-stack $vmks_version could not be fetched; its render is not checked"

@@ -799,6 +799,59 @@ func TestRegistryTokenAndSubstrateRegistry(t *testing.T) {
 	}
 }
 
+// Grafana's sign-in through Infrared (ADR 0053): OIDC and GrafanaURL load from
+// the operator's Data by their Go names, absent is off, and GrafanaURL is
+// Grafana's address in a browser with no trailing slash.
+func TestOIDCFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "InfraredHost": "infrared.example.com", "OIDC": true,
+		"GrafanaURL": "https://grafana.infrared-cp-google.private.darkshift.io"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if !d.OIDC || d.GrafanaURL != "https://grafana.infrared-cp-google.private.darkshift.io" {
+		t.Errorf("loaded OIDC %t, GrafanaURL %q", d.OIDC, d.GrafanaURL)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.OIDC || d.GrafanaURL != "" {
+		t.Errorf("an operator's data without them loaded OIDC %t, GrafanaURL %q, %v; want off", d.OIDC, d.GrafanaURL, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, u := range []string{"", "https://grafana.example.com", "https://tools.example.com:8443/grafana", "http://localhost:3000"} {
+		d := base
+		d.OIDC, d.GrafanaURL = true, u
+		if err := validate(d); err != nil {
+			t.Errorf("GrafanaURL %q: %v", u, err)
+		}
+	}
+	for _, u := range []string{
+		"grafana.example.com",
+		"https://grafana.example.com/",
+		"ftp://grafana.example.com",
+		"https://",
+		"https://someone@grafana.example.com",
+		"https://grafana.example.com/?orgId=1",
+		"https://grafana.example.com/#x",
+		"https://grafana.example.com/a b",
+		`https://grafana.example.com/"`,
+	} {
+		d := base
+		d.OIDC, d.GrafanaURL = true, u
+		if err := validate(d); err == nil {
+			t.Errorf("GrafanaURL %q: validated", u)
+		}
+	}
+}
+
 func TestValidateCloudIdentity(t *testing.T) {
 	gsa := "infrared-cloud@acme-preprod.iam.gserviceaccount.com"
 	role := "arn:aws:iam::123456789012:role/infrared-cloud"
