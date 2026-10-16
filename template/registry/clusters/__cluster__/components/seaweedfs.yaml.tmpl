@@ -250,12 +250,16 @@ spec:
             createBuckets:
               - name: ate-snapshots
               - name: registry
+            # A registry blob is streamed through the gateway whole: zot reads
+            # each upload back to check its digest. At 512Mi a ~750MB image
+            # layer OOMKilled the gateway mid-read and the push failed with
+            # DIGEST_INVALID, so the limit leaves room for large layers.
             resources:
               requests:
                 cpu: 20m
-                memory: 64Mi
+                memory: 256Mi
               limits:
-                memory: 512Mi
+                memory: 2Gi
   destination:
     server: https://kubernetes.default.svc
     namespace: stores

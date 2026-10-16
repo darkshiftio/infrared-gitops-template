@@ -114,12 +114,14 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 60
+          # Large image layers (hundreds of MB) stream through zot on push;
+          # 2Gi keeps a big push from OOMKilling the registry.
           resources:
             requests:
               cpu: 50m
               memory: 256Mi
             limits:
-              memory: 1Gi
+              memory: 2Gi
   destination:
     server: https://kubernetes.default.svc
     namespace: registry
