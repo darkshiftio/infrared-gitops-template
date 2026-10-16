@@ -766,6 +766,7 @@ the layer `infrared`.
 | NetworkPolicy `code-index` | Admits only infrared-api's pods (namespace `.InfraredNamespace`, `app.kubernetes.io/name: infrared`, `app.kubernetes.io/component: api`), on 8080. The code service has no authentication of its own |
 | Its cache | An `emptyDir` of up to 40Gi: the mirrors and the shards, rebuilt from upstream whenever the pod starts, and never backed up |
 | ExternalSecrets `code-index-settings` and `code-index-credentials` (wave -1) and the hook `code-index-wait` (PreSync) | Its record and its credential, copied from the install's Secret `infrared-platform-tokens` through the store `infrared-platform`, which then admits `code-index`, after a wait for that store (below) |
+| ConfigMap `code-index-sources` (mounted, not rendered here) | The install's knowledge sources, which the operator renders from its KnowledgeSources, mounted at `/etc/code-index/sources` (`CODEINDEX_SOURCES`) and merged into the record. Absent until the first source, so the mount is optional |
 | ExternalSecret `<ImagePullSecret>` (wave -1) | With an `.ImagePullSecret`: its image is private, so it pulls with a copy of the install's pull secret through the same store |
 
 Its settings are the install's, never this repo's, because they name a stack.
@@ -780,8 +781,9 @@ The Infrared chart writes them into the install's Secret
 
 With the code index on, the chart always writes all five keys; without an App
 the App's three are empty, which the code index reads as no credential (public
-repositories only). Both mounts are optional: the pod starts without them and
-says at `/readyz` what it lacks. A change to the install's Secret arrives
+repositories only). Both mounts are optional, and so is the ConfigMap's: the
+pod starts without them and says at `/readyz` what it lacks. A change to the
+install's Secret arrives
 within the hour (`refreshInterval`), and the code index reads its record again
 every hour and its credential at every use, so neither needs a restart. The
 `infrared` Application carries `codeIndex: {enabled: true, image: ...}` while

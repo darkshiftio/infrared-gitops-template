@@ -23,7 +23,10 @@
 # repositories with, a GitHub App, or nothing, and then it reads public
 # repositories only. External Secrets copies both from the install's
 # infrared-platform-tokens (settings.yaml). Both mounts are optional, so the pod
-# starts without them and says, at /readyz, what it lacks.
+# starts without them and says, at /readyz, what it lacks. The ConfigMap
+# code-index-sources, which the operator renders from the install's
+# KnowledgeSources, adds sources to the record: absent until the first source,
+# so its mount is optional too.
 #
 # One replica, replaced and never rolled (strategy Recreate): a second pod would
 # build a second cache for nothing.
@@ -102,6 +105,8 @@ spec:
               value: /etc/code-index/settings
             - name: CODEINDEX_CREDENTIALS
               value: /etc/code-index/credentials
+            - name: CODEINDEX_SOURCES
+              value: /etc/code-index/sources
             - name: CODEINDEX_ZOEKT
               value: "127.0.0.1:6070"
             - name: GOMEMLIMIT
@@ -156,6 +161,9 @@ spec:
             - name: credentials
               mountPath: /etc/code-index/credentials
               readOnly: true
+            - name: sources
+              mountPath: /etc/code-index/sources
+              readOnly: true
         - name: zoekt
           image: [[ $image ]]
           imagePullPolicy: IfNotPresent
@@ -194,6 +202,13 @@ spec:
             secretName: code-index-credentials
             optional: true
             defaultMode: 0400
+        # The install's knowledge sources, which the operator renders from its
+        # KnowledgeSources: absent until the first source, so the mount is
+        # optional and the pod starts without it.
+        - name: sources
+          configMap:
+            name: code-index-sources
+            optional: true
 ---
 apiVersion: v1
 kind: Service
