@@ -92,7 +92,8 @@
 #     code-index under Pod Security restricted); one replica replaced not
 #     rolled, both containers not root on a read-only filesystem, the image the
 #     pin names, the cache on an emptyDir, its settings and credential Secrets
-#     optional; the Service code-index on 8080; a NetworkPolicy that admits
+#     and its sources ConfigMap optional; the Service code-index on 8080; a
+#     NetworkPolicy that admits
 #     infrared-api's pods alone; its record and its GitHub App copied from the
 #     install's infrared-platform-tokens through infrared-platform, which then
 #     admits code-index, after a wait for that store; with a pull secret, its
@@ -1646,7 +1647,7 @@ for v in "${variants[@]}"; do
       && [ "$(line "$b" "$d | .spec.template.spec | (.securityContext.runAsNonRoot, .securityContext.seccompProfile.type, .automountServiceAccountToken)")" = "true RuntimeDefault false" ] \
       && [ "$(sel "$b" "$d | .spec.template.spec.containers[] | [.securityContext.readOnlyRootFilesystem, .securityContext.allowPrivilegeEscalation, .securityContext.capabilities.drop[0], (.resources.limits.memory != null)] | join(\" \")" | grep -v '^$' | sort -u)" = "true false ALL true" ] \
       && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"cache\") | .emptyDir.sizeLimit")" = 40Gi ] \
-      && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"settings\" or .name == \"credentials\") | (.configMap.name // .secret.secretName) + \":\" + ((.configMap.optional // .secret.optional) | tostring)")" = "code-index-settings:true code-index-credentials:true" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.volumes[] | select(.name == \"settings\" or .name == \"credentials\" or .name == \"sources\") | (.configMap.name // .secret.secretName) + \":\" + ((.configMap.optional // .secret.optional) | tostring)")" = "code-index-settings:true code-index-credentials:true code-index-sources:true" ] \
       && [ "$(sel "$b" "$d | .spec.template.spec.containers[] | select(.name == \"code\") | .readinessProbe.httpGet.path + \" \" + (.ports[0].containerPort | tostring)")" = "/readyz 8080" ] \
       && [ "$(line "$b" "$d | .spec.template.spec.containers[] | select(.name == \"zoekt\") | .args[]")" = "zoekt-webserver -index /cache/index -listen 127.0.0.1:6070" ] \
       && ok "$variant: the code index runs one replica, not root, read-only, from $want_image, its cache on an emptyDir, Zoekt on the pod's loopback" \
@@ -1666,11 +1667,11 @@ for v in "${variants[@]}"; do
         (.spec.data[] | .secretKey + \"<\" + .remoteRef.key + \"/\" + .remoteRef.property))"; }
     [ "$(es code-index-settings)" = "code-index -1 ClusterSecretStore/infrared-platform code-index-settings Owner knowledge-url<infrared-platform-tokens/code-index-knowledge-url knowledge-ref<infrared-platform-tokens/code-index-knowledge-ref" ] \
       && [ "$(es code-index-credentials)" = "code-index -1 ClusterSecretStore/infrared-platform code-index-credentials Owner github-app-id<infrared-platform-tokens/code-index-github-app-id github-app-installation-id<infrared-platform-tokens/code-index-github-app-installation-id github-app-private-key<infrared-platform-tokens/code-index-github-app-private-key" ] \
-      && [ "$(line "$b" "$d | .spec.template.spec.containers[] | select(.name == \"code\") | [(.env[] | select(.name == \"CODEINDEX_SETTINGS\" or .name == \"CODEINDEX_CREDENTIALS\") | .value), (.volumeMounts[] | select(.name == \"settings\" or .name == \"credentials\") | .mountPath)] | join(\" \")")" \
-        = "/etc/code-index/settings /etc/code-index/credentials /etc/code-index/settings /etc/code-index/credentials" ] \
+      && [ "$(line "$b" "$d | .spec.template.spec.containers[] | select(.name == \"code\") | [(.env[] | select(.name == \"CODEINDEX_SETTINGS\" or .name == \"CODEINDEX_CREDENTIALS\" or .name == \"CODEINDEX_SOURCES\") | .value), (.volumeMounts[] | select(.name == \"settings\" or .name == \"credentials\" or .name == \"sources\") | .mountPath)] | join(\" \")")" \
+        = "/etc/code-index/settings /etc/code-index/credentials /etc/code-index/sources /etc/code-index/settings /etc/code-index/credentials /etc/code-index/sources" ] \
       && [ "$(sel "$b" 'select(.kind == "Job" and .metadata.name == "code-index-wait") | .metadata.annotations["argocd.argoproj.io/hook"] + " " + (.spec.template.spec.containers[0].env[] | select(.name == "WAIT_STORES") | .value)')" = "PreSync infrared-platform" ] \
-      && ok "$variant: the code index's record and GitHub App copied from infrared-platform-tokens into code-index-settings and code-index-credentials, after a wait for the store" \
-      || bad "$variant: the code index's record or credential is not copied from the install's Secret, or not mounted where it reads them"
+      && ok "$variant: the code index's record and GitHub App copied from infrared-platform-tokens into code-index-settings and code-index-credentials, after a wait for the store; the ConfigMap code-index-sources mounted beside them, optional" \
+      || bad "$variant: the code index's record, credential or sources are not copied from the install's Secret, or not mounted where it reads them"
     if [ "$ci_pull" = true ]; then
       [ "$(sel "$b" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$pull_secret\") | .metadata.namespace + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] + \" \" + .spec.secretStoreRef.name + \" \" + .spec.dataFrom[0].extract.key + \" \" + .spec.target.template.type")" \
           = "code-index -1 infrared-platform $pull_secret kubernetes.io/dockerconfigjson" ] \
