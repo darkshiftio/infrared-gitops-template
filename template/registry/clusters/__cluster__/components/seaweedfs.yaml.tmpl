@@ -250,12 +250,15 @@ spec:
             createBuckets:
               - name: ate-snapshots
               - name: registry
+            # The gateway holds each upload's parts in memory: at 512Mi it was
+            # OOMKilled while eight image builds pushed their layers at once
+            # (2026-10-16).
             resources:
               requests:
                 cpu: 20m
-                memory: 64Mi
+                memory: 128Mi
               limits:
-                memory: 512Mi
+                memory: 1536Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: stores
