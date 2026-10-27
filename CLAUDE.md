@@ -16,6 +16,10 @@ anything under `template/`.
   exactly; templates use only text/template builtins plus the operator's
   small helper set (contains, hasPrefix, hasSuffix, quote, ...; listed in
   README.md), never sprig.
+- Template content is not flagged (infrared-docs-internal ADR 0061): it
+  reaches an install with the template version the operator pins. A component
+  an install opts into needs a Data field the operator fills, whose zero value
+  renders what the template rendered before: a change to both repos, in step.
 - `components/argocd`, `components/kpack` and `components/infisical` are
   verbatim (no `.tmpl`): the operator kustomize-builds `components/argocd`
   directly. Re-vendor upstream with `scripts/vendor-*.sh`, never by hand.
