@@ -24,7 +24,7 @@ on the management cluster. The `builds` Application (sync wave 26, right after
 | ClusterStore `paketo` | Paketo `go`, `nodejs` and `web-servers` buildpacks, pinned by tag and digest. |
 | ClusterStack `noble` | Paketo's Ubuntu 24.04 build and run images, pinned. |
 [[- if $internal ]]
-| ClusterBuilder `infrared-builder` | Order `go`, `web-servers`, `nodejs`; pushed to `[[ .Registry ]]/platform/kpack-builder` as the user `platform`. |
+| ClusterBuilder `infrared-builder` | Order Go with a UI built by Node, `go`, `web-servers`, `nodejs`; pushed to `[[ .Registry ]]/platform/kpack-builder` as the user `platform`. |
 | ServiceAccount `kpack/infrared-builder` | What the ClusterBuilder pushes with; lists `registry-push`, the user `platform`'s credential, which the Infrared operator writes. |
 | ServiceAccount `builds/builder-<org>` | The Infrared operator's, one per organization: what its builds run as; lists `registry-push-<org>` and `[[ if eq .Forge "gitea" ]]gitea-git[[ else ]]github-git[[ end ]]`. |
 | Job `builds/registry-wait` | Once per sync, before the builder: waits until [[ if .Stores ]]Zot answers and [[ end ]]`kpack/registry-push` exists. |
@@ -32,7 +32,7 @@ on the management cluster. The `builds` Application (sync wave 26, right after
 | CronJob `builds/github-token` | Every 45m (and once per sync) writes `builds/github-git` and `builds/git-credentials` from Infrared's GitHub App for the org. |
 [[- end ]]
 [[- else ]]
-| ClusterBuilder `infrared-builder` | Order `go`, `web-servers`, `nodejs`; pushed to `<build registry>/kpack-builder`. |
+| ClusterBuilder `infrared-builder` | Order Go with a UI built by Node, `go`, `web-servers`, `nodejs`; pushed to `<build registry>/kpack-builder`. |
 [[- if eq .Forge "gitea" ]]
 | ServiceAccount `builds/builder` | What builds and the ClusterBuilder run as; lists `registry-push` and `gitea-git`. |
 | CronJob `build-credentials/ecr-login` | ECR only: every 6h (and once per sync) writes `builds/registry-push` from the node's IAM role. |
