@@ -117,15 +117,28 @@ spec:
     image: docker.io/paketobuildpacks/ubuntu-noble-run:0.0.136@sha256:1fc3397ff5fb46923b8dd91548b9196ecc7d56fd7ea79d9814cef8e3bcc3450a
 ---
 # =============================================================================
-# `infrared-builder`: Go services, and web UIs (a Node build served by nginx).
+# `infrared-builder`: Go services, Go services with a UI built by Node, and web
+# UIs (a Node build served by nginx).
 # =============================================================================
 # Order groups, first match wins:
-#   1. go           Go services
-#   2. web-servers  a UI: BP_WEB_SERVER=nginx on the Image makes it detect.
+#   1. Go with a UI a Go service that embeds a UI Node builds first, such as a
+#                   React app in web/ built into web/dist: node-engine,
+#                   npm-install and node-run-script, then the Go composite's
+#                   own first group. It detects only with a package.json
+#                   where BP_NODE_PROJECT_PATH points (the top when unset),
+#                   BP_NODE_RUN_SCRIPTS naming its build script, and go.mod.
+#                   kpack reads a repo's project.toml for its build env and
+#                   include/exclude but ignores its io.buildpacks.group tables
+#                   (kpack pkg/cnb/project_descriptor.go), so a group a repo
+#                   asks for there has to be one of the builder's.
+#   2. go           Go services
+#   3. web-servers  a UI: BP_WEB_SERVER=nginx on the Image makes it detect.
 #                   The web-servers composite already carries node-engine,
 #                   npm-install and node-run-script, so the Node build
 #                   (BP_NODE_RUN_SCRIPTS=build) happens inside this group.
-#   3. nodejs       a plain Node server.
+#   4. nodejs       a plain Node server.
+# A Go repo with no package.json or no BP_NODE_RUN_SCRIPTS, and a Node repo
+# with no go.mod, fail group 1 and build as they did before it.
 # web-servers and nodejs are separate groups rather than one: both composites
 # contain node-engine and npm-install, and one group would run the install
 # twice. This is also the order Paketo's own builder uses.
@@ -164,6 +177,23 @@ spec:
     kind: ClusterStore
     name: paketo
   order:
+    - group:
+        - id: paketo-buildpacks/ca-certificates
+          optional: true
+        - id: paketo-buildpacks/node-engine
+        - id: paketo-buildpacks/npm-install
+        - id: paketo-buildpacks/node-run-script
+        - id: paketo-buildpacks/go-dist
+        - id: paketo-buildpacks/git
+          optional: true
+        - id: paketo-buildpacks/go-mod-vendor
+        - id: paketo-buildpacks/go-build
+        - id: paketo-buildpacks/procfile
+          optional: true
+        - id: paketo-buildpacks/environment-variables
+          optional: true
+        - id: paketo-buildpacks/image-labels
+          optional: true
     - group:
         - id: paketo-buildpacks/go
     - group:
