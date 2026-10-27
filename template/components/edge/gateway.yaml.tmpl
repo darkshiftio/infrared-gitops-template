@@ -1,4 +1,6 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+[[- /* The platform domain on a Cloudflare token of its own (ADR 0063): the zones' wildcard listener takes the certificate edge-domain (certificate.yaml). */ -]]
+[[- $split := and .PlatformDomain .DomainTokenKey -]]
 # =============================================================================
 # The Envoy fleet: one Envoy on every node, on the node's own ports 80 and 443.
 # =============================================================================
@@ -82,7 +84,13 @@ spec:
 # =============================================================================
 # The Gateway `edge`: every name the cluster serves.
 # =============================================================================
+[[- if $split ]]
+# Two certificates (certificate.yaml), one for each Cloudflare zone:
+# edge-domain-tls, *.[[ .PlatformDomain ]], for the zones' listener https[[ if .InfraredHost ]], and edge-tls,
+# Infrared's own name, for its listener infrared-https[[ end ]].
+[[- else ]]
 # One certificate, edge-tls (certificate.yaml), for every HTTPS listener.
+[[- end ]]
 # Plain HTTP only redirects to HTTPS (routes.yaml), so its listeners admit
 # routes from this namespace alone. The listener http-any takes plain HTTP for
 # every other name, a zone's own address among them, so it redirects too
@@ -137,7 +145,7 @@ spec:
         certificateRefs:
           - group: ""
             kind: Secret
-            name: edge-tls
+            name: [[ if $split ]]edge-domain-tls[[ else ]]edge-tls[[ end ]]
       allowedRoutes:
         namespaces:
           from: Selector

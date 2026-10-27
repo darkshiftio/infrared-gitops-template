@@ -15,6 +15,13 @@
 #   cloudflare-api-token   external-dns/cloudflare-api-token (DNS records)
 #                          envoy-gateway-system/cloudflare-api-token (origin
 #                          certificates)
+[[- if and .PlatformDomain .DomainTokenKey ]]
+#   [[ .DomainTokenKey ]], the platform domain's own token (spec.previews.domainTokenKey)
+#                          external-dns/cloudflare-domain-api-token (its DNS
+#                          records, external-dns-domain's)
+#                          envoy-gateway-system/cloudflare-domain-api-token
+#                          (its origin certificate, edge-domain)
+[[- end ]]
 [[- end ]]
 [[- if and .Stores .Backup.Bucket ]]
 #   backup-access-key-id   stores/postgres-backup (Postgres's backups) and

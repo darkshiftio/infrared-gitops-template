@@ -26,6 +26,16 @@
 #     operator passes it) Envoy Gateway, the origin issuer, external-dns, the
 #     platform's tokens and the edge's Gateway, certificate and routes are
 #     there and wired to each other; without it no file of them holds an object
+#   - the platform domain on a Cloudflare token of its own (DomainTokenKey,
+#     infrared-docs-internal ADR 0063): two copies of a token, two
+#     OriginIssuers and two certificates in the edge, the zones' listener on
+#     edge-domain-tls and Infrared's own on edge-tls, and a second
+#     external-dns, external-dns-domain, on that token, beside external-dns in
+#     its namespace; the key changes only those files, the store's and the
+#     routes' comments, the README and the infrared Application, and it needs
+#     a gateway edge with a platform domain; without it every gateway variant
+#     keeps one token, one issuer and one certificate, and nothing of
+#     external-dns-domain holds an object
 #   - the stores: with Stores, CloudNativePG and one Postgres instance on one
 #     20Gi volume (Linode's Retain class on Linode), with a role and a database
 #     each for seaweedfs and substrate; SeaweedFS across the nodes with every
@@ -228,6 +238,17 @@ EOF
 # It also serves custom hostnames (Cloudflare for SaaS), as infrared-cp-google does.
 yq -p json -o json '. + {"Cloud": "", "CustomHostnames": true, "ACMEEmail": "alerts@example.com"}' "$work/gateway.json" >"$work/gateway-nocloud.json"
 
+# The platform domain in a Cloudflare zone of its own (ADR 0063), a hosted
+# plane's shape: its tenants' domain apart from Infrared's own name, which the
+# wildcard does not cover. Once on the one token, as before (gateway-zones),
+# and once on a token of its own (gateway-split), with the DomainTokenKey the
+# operator hands over. The two differ in that key alone.
+split_domain=example.net
+split_host=infrared.example.com
+split_key=cloudflare-domain-api-token
+yq -p json -o json '. + {"PlatformDomain": "'"$split_domain"'", "InfraredHost": "'"$split_host"'"}' "$work/gateway.json" >"$work/gateway-zones.json"
+yq -p json -o json '. + {"DomainTokenKey": "'"$split_key"'"}' "$work/gateway-zones.json" >"$work/gateway-split.json"
+
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
 # the forge: the shape of a Linode install that runs Gitea.
@@ -344,6 +365,8 @@ variants=(
   "eks-builds demo-eks-b eks $ecr_registry -region us-west-2 -pull-secret infrared-pull"
   "gateway demo-gw k3s - -data $work/gateway.json"
   "gateway-nocloud demo-gn k3s - -data $work/gateway-nocloud.json"
+  "gateway-zones demo-gz k3s - -data $work/gateway-zones.json"
+  "gateway-split demo-gs k3s - -data $work/gateway-split.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
@@ -406,6 +429,11 @@ holds_objects() { [ -n "$(yq -N -r '.kind // ""' "$1" 2>/dev/null | grep -v '^$'
 sel() { yq -N -r "$2" "$1" 2>/dev/null || true; }
 # line <file> <yq expression>: the same, joined on one line with spaces.
 line() { sel "$1" "$2" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//'; }
+# sorted <file> <yq expression>: the same, sorted, for objects of one kind in
+# no order of their own.
+sorted() { sel "$1" "$2" | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ $//'; }
+# words <words>: the words sorted the way sorted sorts them, on one line.
+words() { tr ' ' '\n' <<<"$1" | grep -v '^$' | sort | tr '\n' ' ' | sed 's/ $//'; }
 
 for v in "${variants[@]}"; do
   read -r variant cluster flavor registry extra <<<"$v"
@@ -477,7 +505,7 @@ for v in "${variants[@]}"; do
   # The variant's edge, stores, cloud, names, backup bucket, components left
   # out and forge, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
-  stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" disabled="[]"
+  stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" token_key="" disabled="[]"
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
@@ -499,6 +527,7 @@ for v in "${variants[@]}"; do
     provider="$(yq -p json -r '.Backup.Provider // ""' "$data_file")"
     domain="$(yq -p json -r '.PlatformDomain // ""' "$data_file")"
     host="$(yq -p json -r '.InfraredHost // ""' "$data_file")"
+    token_key="$(jq -r '.DomainTokenKey // ""' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
     forge="$(yq -p json -r '.Forge // ""' "$data_file")"
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
@@ -524,6 +553,10 @@ for v in "${variants[@]}"; do
       | {untaggedAfter: .UntaggedAfter, keepTags: .KeepTags, keepNewest: .KeepNewest, gcInterval: .GCInterval, gcDelay: .GCDelay}
       | with_entries(select(.value != null and .value != "" and .value != [] and .value != 0))' "$data_file")"
   fi
+  # The platform domain on a Cloudflare token of its own (ADR 0063): a
+  # gateway edge, a platform domain and the key.
+  split=false
+  [ "$edge" = gateway ] && [ -n "$domain" ] && [ -n "$token_key" ] && split=true
   # Agent Substrate: the stores, the registry and the preflight's yes.
   substrate=false
   [ "$stores" = true ] && [ -n "$zot_addr" ] && [ "$capable" = true ] && substrate=true
@@ -703,7 +736,8 @@ for v in "${variants[@]}"; do
   want=""
   if [ "$edge" = gateway ]; then
     want="installation: {edge: gateway"
-    [ -n "$domain" ] && [ -n "$host" ] && want="$want, previews: {domain: \"$domain\", signInURL: \"https://$host\"}"
+    [ -n "$domain" ] && [ -n "$host" ] \
+      && want="$want, previews: {domain: \"$domain\", signInURL: \"https://$host\"${token_key:+, domainTokenKey: \"$token_key\"}}"
     want="$want}"$'\n'
   fi
   [ "$stores" = true ] && want="${want}stores: {enabled: true}"$'\n'
@@ -882,8 +916,10 @@ for v in "${variants[@]}"; do
 
   # The edge: all of it with Edge gateway, none of it without.
   edge_files="$(printf '%s\n' "$reg/components/envoy-gateway.yaml" "$reg/components/origin-ca-issuer.yaml" \
-    "$reg/components/platform-tokens.yaml" "$reg/components/external-dns.yaml" "$reg/components/edge.yaml"
-    find "$out/components/edge" "$out/components/external-dns" "$out/components/platform-tokens" -name '*.yaml')"
+    "$reg/components/platform-tokens.yaml" "$reg/components/external-dns.yaml" "$reg/components/external-dns-domain.yaml" \
+    "$reg/components/edge.yaml"
+    find "$out/components/edge" "$out/components/external-dns" "$out/components/external-dns-domain" \
+      "$out/components/platform-tokens" -name '*.yaml')"
   if [ "$edge" = gateway ]; then
     for a in envoy-gateway:11 origin-ca-issuer:11 platform-tokens:11 external-dns:12 edge:13; do
       name="${a%%:*}" f="$reg/components/${a%%:*}.yaml"
@@ -909,20 +945,52 @@ for v in "${variants[@]}"; do
       && ok "$variant: Envoy answers on each node's ports 80 and 443, no load balancer, behind the Service edge" || bad "$variant: the Envoy fleet is not on host ports behind a NodePort Service"
     # One Gateway: the platform domain's wildcard for zones, Infrared's own name apart.
     [ "$(line "$e" 'select(.kind == "Gateway") | .spec.listeners[] | .name + "=" + .hostname')" \
-        = "http=*.$gw_domain https=*.$gw_domain infrared-http=$gw_host infrared-https=$gw_host http-any=" ] \
+        = "http=*.$domain https=*.$domain infrared-http=$host infrared-https=$host http-any=" ] \
       && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.name == "http-any") | .protocol + ":" + (.port | tostring) + ":" + .allowedRoutes.namespaces.from')" = HTTP:80:Same ] \
       && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.allowedListeners.namespaces.from')" = Same ] \
       && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.name == "https") | .allowedRoutes.namespaces.selector.matchExpressions[0].key')" = infrared.darkshift.io/zone ] \
       && [ "$(sel "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.name == "infrared-https") | .allowedRoutes.namespaces.selector.matchLabels["kubernetes.io/metadata.name"]')" = infrared ] \
-      && ok "$variant: Gateway edge serves *.$gw_domain and $gw_host, plain HTTP for any name, and ListenerSets from its own namespace" || bad "$variant: Gateway edge listeners are wrong"
-    [ "$(line "$e" 'select(.kind == "Certificate") | .spec.dnsNames[]')" = "*.$gw_domain" ] \
-      && [ "$(sel "$e" 'select(.kind == "Certificate") | .spec.issuerRef.kind + "/" + .spec.issuerRef.name')" = "OriginIssuer/$(sel "$e" 'select(.kind == "OriginIssuer") | .metadata.name')" ] \
-      && [ "$(line "$e" 'select(.kind == "Gateway") | .spec.listeners[] | .tls.certificateRefs[]?.name' | tr ' ' '\n' | sort -u)" = "$(sel "$e" 'select(.kind == "Certificate") | .spec.secretName')" ] \
-      && ok "$variant: one origin certificate for *.$gw_domain on every HTTPS listener" || bad "$variant: the edge certificate is wrong"
+      && ok "$variant: Gateway edge serves *.$domain and $host, plain HTTP for any name, and ListenerSets from its own namespace" || bad "$variant: Gateway edge listeners are wrong"
+    # The edge's tokens, issuers and certificates. On the one token: one
+    # certificate, edge (Secret edge-tls), for *.<domain> and Infrared's name
+    # unless the wildcard covers it (one label under the domain), on every
+    # HTTPS listener. On the platform domain's own token (ADR 0063): edge-domain
+    # (edge-domain-tls) for *.<domain> alone, from cloudflare-origin-domain on
+    # a copy of that token, for the zones' listener https, and edge for
+    # Infrared's name alone, on cloudflare-api-token, for infrared-https.
+    covered=false label="${host%."$domain"}"
+    if [ "$label" != "$host" ] && [ "${label#*.}" = "$label" ]; then covered=true; fi
+    certs="$(sorted "$e" 'select(.kind == "Certificate") | .metadata.name + "=" + (.spec.dnsNames | join(",")) + "@" + .spec.issuerRef.kind + "/" + .spec.issuerRef.name + ">" + .spec.secretName')"
+    refs="$(sorted "$e" 'select(.kind == "Gateway") | .spec.listeners[] | select(.tls) | .name + ">" + (.tls.certificateRefs | map(.name) | join(","))')"
+    issuers="$(sorted "$e" 'select(.kind == "OriginIssuer") | .metadata.name + "<" + .spec.auth.tokenRef.name + "/" + .spec.auth.tokenRef.key')"
+    tokens="$(sorted "$e" 'select(.kind == "ExternalSecret") | .metadata.name + "<" + .spec.secretStoreRef.kind + "/" + .spec.secretStoreRef.name + ":" + .spec.data[0].remoteRef.key + "/" + .spec.data[0].remoteRef.property + ">" + .spec.target.name + "/" + .spec.data[0].secretKey')"
+    store_copy="ClusterSecretStore/infrared-platform:infrared-platform-tokens"
+    if [ "$split" = true ]; then
+      want_certs="edge-domain=*.$domain@OriginIssuer/cloudflare-origin-domain>edge-domain-tls edge=$host@OriginIssuer/cloudflare-origin>edge-tls"
+      want_refs="https>edge-domain-tls infrared-https>edge-tls"
+      want_issuers="cloudflare-origin-domain<cloudflare-domain-api-token/api-token cloudflare-origin<cloudflare-api-token/api-token"
+      want_tokens="cloudflare-api-token<$store_copy/cloudflare-api-token>cloudflare-api-token/api-token cloudflare-domain-api-token<$store_copy/$token_key>cloudflare-domain-api-token/api-token"
+      what="the zones' certificate edge-domain for *.$domain on the domain's own token, and edge for $host alone on cloudflare-api-token"
+    else
+      names="*.$domain"
+      [ "$covered" = true ] || names="$names,$host"
+      want_certs="edge=$names@OriginIssuer/cloudflare-origin>edge-tls"
+      want_refs="https>edge-tls infrared-https>edge-tls"
+      want_issuers="cloudflare-origin<cloudflare-api-token/api-token"
+      want_tokens="cloudflare-api-token<$store_copy/cloudflare-api-token>cloudflare-api-token/api-token"
+      what="one origin certificate for $names on every HTTPS listener, one issuer, one token"
+    fi
+    want_certs="$(words "$want_certs")" want_refs="$(words "$want_refs")"
+    want_issuers="$(words "$want_issuers")" want_tokens="$(words "$want_tokens")"
+    [ "$certs" = "$want_certs" ] && [ "$refs" = "$want_refs" ] && [ "$issuers" = "$want_issuers" ] && [ "$tokens" = "$want_tokens" ] \
+      && ok "$variant: $what" \
+      || bad "$variant: the edge's certificates, listeners, issuers or tokens are wrong: '$certs' '$refs' '$issuers' '$tokens'; want '$want_certs' '$want_refs' '$want_issuers' '$want_tokens'"
     # The token's copy, the issuer and the certificate, each in a wave of its
     # own, before the Envoy fleet and the Gateway that need them.
+    # One wave for every object of a kind: a second token, issuer or
+    # certificate takes the first one's.
     order="$(for k in ExternalSecret OriginIssuer Certificate EnvoyProxy GatewayClass Gateway; do
-        sel "$e" "select(.kind == \"$k\") | .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] // \"0\""; done | tr '\n' ' ')"
+        sel "$e" "select(.kind == \"$k\") | .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] // \"0\"" | sort -u; done | tr '\n' ' ')"
     awk '{ for (i = 2; i <= NF; i++) if ($i + 0 <= $(i - 1) + 0) exit 1; exit NF != 6 }' <<<"$order" \
       && ok "$variant: the edge applies its token, issuer and certificate before the Gateway (waves $order)" \
       || bad "$variant: the edge's waves are not token < issuer < certificate < EnvoyProxy < GatewayClass < Gateway: $order"
@@ -942,10 +1010,10 @@ for v in "${variants[@]}"; do
         && ok "$variant: no custom hostnames, no Let's Encrypt issuer" || bad "$variant: a Let's Encrypt issuer without custom hostnames"
     fi
     [ "$(line "$e" 'select(.metadata.name == "https-redirect") | .spec.parentRefs[].sectionName')" = "http infrared-http http-any" ] \
-      && [ "$(line "$e" 'select(.metadata.name == "edge-name") | .spec.parentRefs[].sectionName + " " + .spec.hostnames[0] + " " + .spec.rules[0].filters[0].requestRedirect.scheme')" = "http edge.$gw_domain https" ] \
+      && [ "$(line "$e" 'select(.metadata.name == "edge-name") | .spec.parentRefs[].sectionName + " " + .spec.hostnames[0] + " " + .spec.rules[0].filters[0].requestRedirect.scheme')" = "http edge.$domain https" ] \
       && [ "$(sel "$e" 'select(.metadata.name == "https-redirect") | .spec.rules[0].filters[0].requestRedirect.scheme')" = https ] \
-      && [ "$(line "$e" 'select(.kind == "HTTPRoute" and .metadata.name == "infrared") | .metadata.namespace + " " + .spec.hostnames[0] + " " + .spec.rules[0].backendRefs[0].name + ":" + (.spec.rules[0].backendRefs[0].port | tostring)')" = "infrared $gw_host infrared:80" ] \
-      && ok "$variant: the redirect from port 80, the edge's own name edge.$gw_domain, and Infrared's route" || bad "$variant: the edge's routes are wrong"
+      && [ "$(line "$e" 'select(.kind == "HTTPRoute" and .metadata.name == "infrared") | .metadata.namespace + " " + .spec.hostnames[0] + " " + .spec.rules[0].backendRefs[0].name + ":" + (.spec.rules[0].backendRefs[0].port | tostring)')" = "infrared $host infrared:80" ] \
+      && ok "$variant: the redirect from port 80, the edge's own name edge.$domain, and Infrared's route" || bad "$variant: the edge's routes are wrong"
     # external-dns publishes the edge's labelled route only, as this cluster's owner.
     label="$(sel "$dns" '.spec.sources[0].helm.valuesObject.labelFilter')"
     [ "$(sel "$e" "select(.metadata.name == \"https-redirect\") | .metadata.labels[\"${label%%=*}\"]")" = "${label#*=}" ] \
@@ -956,6 +1024,32 @@ for v in "${variants[@]}"; do
       && [ "$(line "$dns" '.spec.sources[0].helm.valuesObject.extraArgs[]')" = "--gateway-name=$(sel "$e" 'select(.kind == "Gateway") | .metadata.name') --cloudflare-proxied --txt-wildcard-replacement=wildcard" ] \
       && [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.domainFilters // [] | length')" = 0 ] \
       && ok "$variant: external-dns publishes the edge's names, proxied, as owner $cluster" || bad "$variant: external-dns is not wired to the edge"
+    # external-dns-domain (ADR 0063): on the platform domain's own token, the
+    # same chart, version, values and sync as external-dns but for its release
+    # name, its token's Secret and its second source; in the namespace
+    # external-dns, which the store already admits (checked below), with no
+    # object of the same name as external-dns's; its token copied from the key
+    # the Installation names, at wave -1, after a wait for the store.
+    dnsd="$reg/components/external-dns-domain.yaml" xd="$work/$variant-built/external-dns-domain.yaml"
+    if [ "$split" = true ]; then
+      same='{"chart": (.spec.sources[0] | del(.helm.releaseName) | del(.helm.valuesObject.env)), "sync": .spec.syncPolicy, "project": .spec.project, "server": .spec.destination.server}'
+      [ "$(sel "$dnsd" '.metadata.name + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"] + " " + .metadata.labels["infrared.darkshift.io/layer"] + " " + .spec.destination.namespace + " " + .spec.sources[0].helm.releaseName + " " + .spec.sources[1].path')" \
+          = "external-dns-domain 12 edge external-dns external-dns-domain components/external-dns-domain" ] \
+        && [ "$(yq -o json -I0 "$same" "$dnsd")" = "$(yq -o json -I0 "$same" "$dns")" ] \
+        && [ "$(sel "$dnsd" '.spec.sources[0].helm.valuesObject.env | length')" = 1 ] \
+        && [ "$(sel "$dnsd" '.spec.sources[0].helm.valuesObject.env[] | select(.name == "CF_API_TOKEN") | .valueFrom.secretKeyRef.name + "/" + .valueFrom.secretKeyRef.key')" \
+          = "$(sel "$xd" 'select(.kind == "ExternalSecret") | .spec.target.name + "/" + .spec.data[0].secretKey')" ] \
+        && [ "$(sel "$xd" 'select(.kind == "ExternalSecret") | .metadata.name + " " + .metadata.namespace + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"] + " " + .spec.secretStoreRef.kind + "/" + .spec.secretStoreRef.name + " " + .spec.data[0].remoteRef.key + "/" + .spec.data[0].remoteRef.property')" \
+          = "cloudflare-domain-api-token external-dns -1 ClusterSecretStore/infrared-platform infrared-platform-tokens/$token_key" ] \
+        && [ -z "$(comm -12 <(sel "$xd" '.kind + "/" + .metadata.name' | grep -v '^/$' | sort) <(sel "$x" '.kind + "/" + .metadata.name' | grep -v '^/$' | sort))" ] \
+        && [ -z "$(sel "$xd" 'select(.metadata.namespace != null and .metadata.namespace != "external-dns") | .kind')" ] \
+        && ok "$variant: external-dns-domain publishes the platform domain's names on its own token ($token_key), beside external-dns in its namespace" \
+        || bad "$variant: external-dns-domain is not external-dns on the platform domain's own token"
+    else
+      left="$(for f in "$dnsd" $(find "$out/components/external-dns-domain" -name '*.yaml'); do holds_objects "$f" && echo "$f"; done || true)"
+      [ -z "$left" ] && [ ! -e "$xd" ] && ok "$variant: one Cloudflare token for every name, no external-dns-domain" \
+        || bad "$variant: external-dns-domain rendered without the platform domain's own token: $left"
+    fi
     # The platform's tokens: one store, one Secret, two namespaces; with
     # Substrate and a pull secret, that Secret too, for Substrate's namespaces.
     want_ns="external-dns envoy-gateway-system${backup:+ stores}"
@@ -977,14 +1071,14 @@ for v in "${variants[@]}"; do
       && ok "$variant: ClusterSecretStore infrared-platform reads only $want_names, for $want_ns" || bad "$variant: ClusterSecretStore infrared-platform is wrong"
     for es in "$x:external-dns" "$e:envoy-gateway-system"; do
       f="${es%%:*}" ns="${es#*:}"
-      [ "$(line "$f" "select(.kind == \"ExternalSecret\" and .metadata.namespace == \"$ns\") | .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name + \" \" + .spec.data[0].remoteRef.key + \"/\" + .spec.data[0].remoteRef.property")" \
+      [ "$(line "$f" "select(.kind == \"ExternalSecret\" and .metadata.namespace == \"$ns\" and .metadata.name == \"cloudflare-api-token\") | .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name + \" \" + .spec.data[0].remoteRef.key + \"/\" + .spec.data[0].remoteRef.property")" \
           = "ClusterSecretStore/infrared-platform infrared-platform-tokens/cloudflare-api-token" ] \
         && ok "$variant: $ns gets the Cloudflare token from infrared-platform" || bad "$variant: no Cloudflare token for $ns"
     done
     [ "$(sel "$dns" '.spec.sources[0].helm.valuesObject.env[] | select(.name == "CF_API_TOKEN") | .valueFrom.secretKeyRef.name + "/" + .valueFrom.secretKeyRef.key')" \
         = "$(sel "$x" 'select(.kind == "ExternalSecret") | .spec.target.name + "/" + .spec.data[0].secretKey')" ] \
-      && [ "$(sel "$e" 'select(.kind == "OriginIssuer") | .spec.auth.tokenRef.name + "/" + .spec.auth.tokenRef.key')" \
-        = "$(sel "$e" 'select(.kind == "ExternalSecret") | .spec.target.name + "/" + .spec.data[0].secretKey')" ] \
+      && [ "$(sel "$e" 'select(.kind == "OriginIssuer" and .metadata.name == "cloudflare-origin") | .spec.auth.tokenRef.name + "/" + .spec.auth.tokenRef.key')" \
+        = "$(sel "$e" 'select(.kind == "ExternalSecret" and .metadata.name == "cloudflare-api-token") | .spec.target.name + "/" + .spec.data[0].secretKey')" ] \
       && ok "$variant: external-dns and the origin issuer read the Secrets the ExternalSecrets write" || bad "$variant: a token is read from a Secret nothing writes"
     # The infrared Application keeps the operator's images and a SHA as a string.
     app="$reg/components/infrared.yaml"
@@ -2146,6 +2240,82 @@ for v in "k3s cert-manager external-secrets infisical kpack victoria-metrics-k8s
       bad "disabled $name: changed '$changed'; want $want, an empty $app and components.disabled [\"$name\"]"
     fi
   done
+done
+
+# On the platform domain's own token (ADR 0063), external-dns-domain is left
+# out by its own name, and with external-dns, whose second one it is.
+for v in "external-dns external-dns external-dns-domain" "external-dns-domain external-dns-domain"; do
+  read -r name apps <<<"$v"
+  out="$work/disabled-gateway-split-$name"
+  cluster="$(render_again gateway-split "$out" -disabled "[\"$name\"]")" || { bad "disabled $name: no variant gateway-split"; continue; }
+  want="README.md registry/clusters/$cluster/components/infrared.yaml" empty=true
+  for a in $apps; do
+    want="$want registry/clusters/$cluster/components/$a.yaml"
+    { holds_objects "$work/gateway-split/registry/clusters/$cluster/components/$a.yaml" \
+      && ! holds_objects "$out/registry/clusters/$cluster/components/$a.yaml"; } || empty=false
+  done
+  changed="$({ diff -rq "$work/gateway-split" "$out" || true; } | sed -E "s#^Files $work/gateway-split/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$empty" = true ] && [ "$changed" = "$(words "$want")" ]; then
+    ok "disabled $name on the platform domain's own token: $apps left out, the infrared Application carries it, nothing else changes"
+  else
+    bad "disabled $name on the platform domain's own token: changed '$changed'; want '$(words "$want")', with $apps empty"
+  fi
+done
+
+# --- The platform domain on a Cloudflare token of its own (ADR 0063) -------------
+# The key, on a gateway edge with a platform domain, changes only the edge's
+# certificate and Gateway, the comments of its routes, of external-dns and of
+# the store, the README and the infrared Application, and renders
+# external-dns-domain; every other file is as on the one token. Every gateway
+# variant without the key keeps one token, one issuer and one certificate, and
+# nothing of external-dns-domain (above). With the wildcard covering Infrared's
+# name, the name keeps a certificate of its own on the other token; with no
+# Infrared host, there is no certificate edge, and cloudflare-origin stays for
+# the certificates Infrared asks for a zone's own addresses. hack/render refuses
+# the key without a gateway edge and a platform domain, and a key no Secret takes.
+"$work/render" -out "$work/split-one-token" -cluster demo-sp -flavor k3s -build-registry "" -data "$work/gateway-zones.json" >/dev/null
+"$work/render" -out "$work/split-own-token" -cluster demo-sp -flavor k3s -build-registry "" -data "$work/gateway-split.json" >/dev/null
+split_reg=registry/clusters/demo-sp/components
+want="README.md components/edge/certificate.yaml components/edge/gateway.yaml components/edge/routes.yaml
+  components/external-dns-domain/cloudflare-domain-api-token.yaml components/external-dns-domain/kustomization.yaml
+  components/external-dns-domain/wait.yaml components/platform-tokens/store.yaml
+  $split_reg/external-dns-domain.yaml $split_reg/external-dns.yaml $split_reg/infrared.yaml"
+changed="$({ diff -rq "$work/split-one-token" "$work/split-own-token" || true; } \
+  | sed -E "s#^Files $work/split-one-token/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+[ "$changed" = "$(words "$(tr '\n' ' ' <<<"$want")")" ] \
+  && ok "the platform domain's own token changes only the edge, external-dns-domain, the comments that name them, the README and the infrared Application" \
+  || bad "the platform domain's own token changes '$changed', want '$(words "$(tr '\n' ' ' <<<"$want")")'"
+yq -p json -o json '. + {"PlatformDomain": "'"$gw_domain"'", "InfraredHost": "'"$gw_host"'"}' "$work/gateway-split.json" >"$work/split-covered.json"
+"$work/render" -out "$work/split-covered" -cluster demo-sc -flavor k3s -build-registry "" -data "$work/split-covered.json" >/dev/null
+f="$work/split-covered/components/edge/certificate.yaml" g="$work/split-covered/components/edge/gateway.yaml"
+[ "$(sorted "$f" 'select(.kind == "Certificate") | .metadata.name + "=" + (.spec.dnsNames | join(",")) + "@" + .spec.issuerRef.name')" \
+    = "$(words "edge-domain=*.$gw_domain@cloudflare-origin-domain edge=$gw_host@cloudflare-origin")" ] \
+  && [ "$(sorted "$g" 'select(.kind == "Gateway") | .spec.listeners[] | select(.tls) | .name + ">" + .tls.certificateRefs[0].name')" \
+    = "$(words "https>edge-domain-tls infrared-https>edge-tls")" ] \
+  && ok "the platform domain's own token, the wildcard covering $gw_host: Infrared's name keeps the certificate edge on cloudflare-api-token" \
+  || bad "the platform domain's own token, the wildcard covering $gw_host: the certificates or listeners are wrong"
+yq -p json -o json 'del(.InfraredHost)' "$work/gateway-split.json" >"$work/split-nohost.json"
+"$work/render" -out "$work/split-nohost" -cluster demo-sn -flavor k3s -build-registry "" -data "$work/split-nohost.json" >/dev/null
+f="$work/split-nohost/components/edge/certificate.yaml" g="$work/split-nohost/components/edge/gateway.yaml"
+[ "$(sorted "$f" 'select(.kind == "Certificate") | .metadata.name')" = edge-domain ] \
+  && [ "$(sorted "$f" 'select(.kind == "OriginIssuer") | .metadata.name')" = "$(words "cloudflare-origin cloudflare-origin-domain")" ] \
+  && [ "$(sorted "$g" 'select(.kind == "Gateway") | .spec.listeners[] | .name')" = "$(words "http https http-any")" ] \
+  && kubectl kustomize "$work/split-nohost/components/edge" >/dev/null \
+  && ok "the platform domain's own token, no Infrared host: no certificate edge, cloudflare-origin kept for a zone's own addresses" \
+  || bad "the platform domain's own token, no Infrared host: the edge is wrong"
+i=0
+for refused in "-domain-token-key $split_key" \
+    "-edge traefik -platform-domain $split_domain -domain-token-key $split_key" \
+    "-edge gateway -infrared-host $split_host -domain-token-key $split_key" \
+    "-edge gateway -platform-domain $split_domain -domain-token-key tokens/cloudflare" \
+    "-edge gateway -platform-domain $split_domain -domain-token-key .."; do
+  i=$((i + 1))
+  # shellcheck disable=SC2086 # the flags split on purpose
+  if "$work/render" -out "$work/split-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
+    bad "hack/render $refused: rendered, want a refusal"
+  else
+    ok "hack/render $refused: refused"
+  fi
 done
 
 # --- A code index pin that is the chart's own default -----------------------------

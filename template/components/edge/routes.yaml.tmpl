@@ -17,6 +17,13 @@
 [[- end ]]
 # external-dns publishes only routes with the label below, at the Gateway's
 # addresses: the ExternalIP of each node with a ready Envoy (gateway.yaml).
+[[- if and .PlatformDomain .DomainTokenKey ]]
+# Two of them read these routes, one for each Cloudflare zone (ADR 0063):
+# external-dns-domain, on the platform domain's own token, publishes
+# *.[[ .PlatformDomain ]] and edge.[[ .PlatformDomain ]][[ if .InfraredHost ]], and external-dns, on
+# cloudflare-api-token, [[ .InfraredHost ]][[ end ]]. Each skips the names in a zone its token
+# cannot see.
+[[- end ]]
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
