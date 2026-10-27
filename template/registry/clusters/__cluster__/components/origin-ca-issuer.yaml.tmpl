@@ -2,6 +2,13 @@
 [[- if not $on -]]
 # origin-ca-issuer is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and (eq .Edge "gateway") .TunnelID -]]
+# Cloudflare's origin issuer is left out behind a Cloudflare Tunnel (the
+# Installation's spec.tunnel, infrared-docs-internal ADR 0064): cloudflared
+# checks the edge's certificate against a certificate authority inside the
+# cluster (components/edge), and Cloudflare's edge shows visitors its own, so
+# no name needs an origin certificate from Cloudflare, nor the token that asks
+# for one. This file holds no objects.
 [[- else if eq .Edge "gateway" -]]
 # Cloudflare's origin issuer (origin-ca-issuer v0.15.0): a cert-manager issuer
 # that has Cloudflare's Origin CA sign the edge's certificate. Cloudflare trusts

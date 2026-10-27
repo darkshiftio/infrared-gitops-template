@@ -1,4 +1,5 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
 # =============================================================================
 # The edge's own routes. Every Gateway API default is written out (parentRef
 # group and kind, the PathPrefix / match, backendRef group, kind and weight), or
@@ -6,6 +7,22 @@
 # =============================================================================
 # Plain HTTP, every name: a redirect to HTTPS, nothing served in the clear,
 # a zone's own addresses too (on the listener http-any, which names no host).
+[[- if $tunnel ]]
+#
+# Behind the Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064)
+# no plain HTTP from outside reaches it: cloudflared sends every request to
+# the HTTPS listeners, so only Cloudflare's edge can redirect it, with each
+# zone's Always Use HTTPS on. Nor does anything publish DNS from these routes:
+# external-dns does not run, and the edge's names are proxied CNAMEs to the
+# tunnel, made once by a person:
+[[- if .PlatformDomain ]]
+#   [[ printf "*.%s" .PlatformDomain ]]  one wildcard record, for every zone
+[[- end ]]
+[[- if .InfraredHost ]]
+#   [[ .InfraredHost ]]  Infrared's own record
+[[- end ]]
+# The label below stays, so the routes are the same either way.
+[[- else ]]
 #
 # It is also where the edge's DNS records come from. It names no host, so it
 # takes each listener's own (http-any has none, so it publishes nothing):
@@ -17,7 +34,8 @@
 [[- end ]]
 # external-dns publishes only routes with the label below, at the Gateway's
 # addresses: the ExternalIP of each node with a ready Envoy (gateway.yaml).
-[[- if and .PlatformDomain .DomainTokenKey ]]
+[[- end ]]
+[[- if and .PlatformDomain .DomainTokenKey (not $tunnel) ]]
 # Two of them read these routes, one for each Cloudflare zone (ADR 0063):
 # external-dns-domain, on the platform domain's own token, publishes
 # *.[[ .PlatformDomain ]] and edge.[[ .PlatformDomain ]][[ if .InfraredHost ]], and external-dns, on
@@ -61,12 +79,21 @@ spec:
             statusCode: 301
 [[- if .PlatformDomain ]]
 ---
+[[- if $tunnel ]]
+# The edge's own name, [[ printf "edge.%s" .PlatformDomain ]], the target Infrared points
+# a zone's own addresses at (a proxied CNAME each; Cloudflare flattens one at
+# a zone's apex). Behind the tunnel the wildcard's CNAME to the tunnel answers
+# for it, and cloudflared's route for the wildcard takes it to Envoy. Plain
+# HTTP only, a redirect like the one above: on HTTPS the name is the wildcard
+# listener's.
+[[- else ]]
 # The edge's own name, [[ printf "edge.%s" .PlatformDomain ]]: one proxied record at the
 # Gateway's addresses, which follow the nodes. Infrared points a zone's own
 # addresses there (a proxied CNAME each; Cloudflare flattens one at a zone's
 # apex), so none of them needs a node's IP. The wildcard record answers for
 # the name too; this one is published by name, not by chance. Plain HTTP only,
 # a redirect like the one above: on HTTPS the name is the wildcard listener's.
+[[- end ]]
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

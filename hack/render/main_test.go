@@ -927,3 +927,62 @@ func TestDomainTokenKey(t *testing.T) {
 		}
 	}
 }
+
+// The Cloudflare Tunnel (infrared-docs-internal ADR 0064): the operator hands
+// TunnelID and TunnelCredentialsKey by their Go names, only on a gateway edge,
+// and leaves them out otherwise; the id is a lower-case UUID, the key a
+// Secret's, and either needs a gateway edge.
+func TestTunnel(t *testing.T) {
+	id := "6ff42ae2-765d-4adf-8112-31c55c1551ef"
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "darkshift.cloud", "InfraredHost": "saas2.darkshift.io",
+		"TunnelID": "` + id + `", "TunnelCredentialsKey": "cloudflare-tunnel-credentials"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.TunnelID != id || d.TunnelCredentialsKey != "cloudflare-tunnel-credentials" {
+		t.Errorf("loaded TunnelID %q, TunnelCredentialsKey %q", d.TunnelID, d.TunnelCredentialsKey)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.TunnelID != "" || d.TunnelCredentialsKey != "" {
+		t.Errorf("an operator's data without a tunnel loaded TunnelID %q, TunnelCredentialsKey %q, %v; want none",
+			d.TunnelID, d.TunnelCredentialsKey, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct {
+		name          string
+		edge, id, key string
+		wantValidated bool
+	}{
+		{"none, any edge", "", "", "", true},
+		{"none, the flag's default key", "", "", defaultTunnelCredentialsKey, true},
+		{"a gateway edge with a tunnel and the default key", "gateway", id, defaultTunnelCredentialsKey, true},
+		{"a key the operator never leaves empty, empty", "gateway", id, "", true},
+		{"a key of dots, underscores and digits", "gateway", id, "tunnel_saas2.json", true},
+		{"no gateway edge", "traefik", id, defaultTunnelCredentialsKey, false},
+		{"the default edge, Traefik", "", id, defaultTunnelCredentialsKey, false},
+		{"an upper-case id", "gateway", strings.ToUpper(id), defaultTunnelCredentialsKey, false},
+		{"an id without hyphens", "gateway", strings.ReplaceAll(id, "-", ""), defaultTunnelCredentialsKey, false},
+		{"the tunnel's name for its id", "gateway", "saas2", defaultTunnelCredentialsKey, false},
+		{"a key with a slash", "gateway", id, "tokens/tunnel", false},
+		{"a key no Secret takes", "gateway", id, "..", false},
+		{"a key past 253 characters", "gateway", id, strings.Repeat("k", 254), false},
+		{"a key of its own without a tunnel", "gateway", "", "tunnel-saas2", false},
+	} {
+		d := base
+		d.Edge, d.PlatformDomain, d.InfraredHost = c.edge, "darkshift.cloud", "saas2.darkshift.io"
+		d.TunnelID, d.TunnelCredentialsKey = c.id, c.key
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}

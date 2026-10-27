@@ -12,9 +12,16 @@
 # the Google root keeps off so no load balancer appears (Google Cloud run 1,
 # 2026-10-07: Envoy Gateway crashed on "no matches for kind ReferenceGrant").
 # gateway-helm's CRD subchart is off either way.
+[[- if .TunnelID ]]
+#
+# The GatewayClass, the EnvoyProxy that puts Envoy on every node behind the
+# cluster's Cloudflare Tunnel, on no node's ports, the Gateway, its routes and
+# cloudflared are the `edge` Application's (wave 13).
+[[- else ]]
 #
 # The GatewayClass, the EnvoyProxy that puts Envoy on each node's ports 80 and
 # 443, the Gateway and its routes are the `edge` Application's (wave 13).
+[[- end ]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

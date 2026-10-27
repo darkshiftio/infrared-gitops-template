@@ -209,6 +209,14 @@ spec:
               domainTokenKey: [[ .DomainTokenKey | quote ]]
 [[- end ]]
 [[- end ]]
+[[- if .TunnelID ]]
+            # The Cloudflare Tunnel the edge is reached through
+            # (INFRARED_TUNNEL, ADR 0064); its credentials stay in the
+            # install's Secret.
+            tunnel:
+              id: [[ .TunnelID | quote ]]
+              credentialsKey: [[ default "cloudflare-tunnel-credentials" .TunnelCredentialsKey | quote ]]
+[[- end ]]
 [[- end ]]
 [[- if .Stores ]]
           # The platform's stores (INFRARED_STORES), which the operator reads at
