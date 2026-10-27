@@ -1,0 +1,15 @@
+[[- if and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
+# The second source of the `external-dns-domain` Application (wave 12): the
+# platform domain's own Cloudflare token, copied from the platform's tokens,
+# and the hook that waits for them. Every object is in the namespace
+# external-dns, beside external-dns's own.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - wait.yaml
+  - cloudflare-domain-api-token.yaml
+[[- else -]]
+# external-dns-domain runs only when the platform domain has a Cloudflare token
+# of its own, so this component holds no objects and no Application points at
+# it.
+[[- end ]]
