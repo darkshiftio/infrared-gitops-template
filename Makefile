@@ -12,6 +12,12 @@ BUILD_REGISTRY ?= $(INFRARED_BUILD_REGISTRY)
 EDGE            ?=
 PLATFORM_DOMAIN ?=
 INFRARED_HOST   ?=
+# DOMAIN_TOKEN_KEY: with EDGE=gateway and a PLATFORM_DOMAIN in another
+# Cloudflare zone than INFRARED_HOST, the key of infrared-platform-tokens that
+# holds that zone's own token (infrared-docs-internal ADR 0063). E.g.
+# make render EDGE=gateway PLATFORM_DOMAIN=darkshift.cloud INFRARED_HOST=saas1.darkshift.io \
+#   DOMAIN_TOKEN_KEY=cloudflare-domain-api-token
+DOMAIN_TOKEN_KEY ?=
 # STORES: true renders CloudNativePG, one Postgres Cluster and SeaweedFS; BACKUP
 # (JSON, as INFRARED_BACKUP) copies them to a bucket outside the cluster;
 # DISABLED (a JSON array, as INFRARED_DISABLED_COMPONENTS) leaves components out.
@@ -54,7 +60,7 @@ REGISTRY_TOKEN     ?=
 render:
 	rm -rf $(OUT)
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
-		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" \
+		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" -domain-token-key "$(DOMAIN_TOKEN_KEY)" \
 		-stores=$(STORES) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \

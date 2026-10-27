@@ -1,0 +1,37 @@
+[[- if and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
+# external-dns-domain's Cloudflare token, for the platform domain's own zone:
+# the key [[ .DomainTokenKey ]] of the Secret infrared-platform-tokens
+# ([[ .InfraredNamespace ]], the Installation's spec.previews.domainTokenKey), copied
+# through the ClusterSecretStore infrared-platform (components/platform-tokens)
+# into external-dns/cloudflare-domain-api-token, key api-token. The values the
+# API server would fill in are written out, so Argo CD compares like with like.
+#
+# Wave -1, alone: External Secrets' webhook admits it, so it is applied, and
+# synced, before external-dns-domain (the chart, wave 0) that reads its Secret.
+# A refused apply then fails the sync, which Argo CD retries, instead of leaving
+# it waiting for a Deployment that cannot start.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cloudflare-domain-api-token
+  namespace: external-dns
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: cloudflare-domain-api-token
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: api-token
+      remoteRef:
+        key: infrared-platform-tokens
+        property: [[ .DomainTokenKey | quote ]]
+[[- else -]]
+# external-dns-domain runs only when the platform domain has a Cloudflare token
+# of its own: no token to copy.
+[[- end ]]

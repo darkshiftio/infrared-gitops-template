@@ -1,0 +1,106 @@
+[[- $on := true ]][[ range .Disabled ]][[ if or (eq . "external-dns") (eq . "external-dns-domain") ]][[ $on = false ]][[ end ]][[ end ]]
+[[- if not (and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey) -]]
+# external-dns-domain runs only when the platform domain has a Cloudflare token
+# of its own (the Installation's spec.previews.domainTokenKey, on a Gateway
+# edge with a previews domain). This cluster's external-dns serves every name
+# with the platform's one token, so this file holds no objects.
+[[- else if not $on -]]
+# external-dns-domain is left out: the Installation names it, or external-dns,
+# among its disabled components (INFRARED_DISABLED_COMPONENTS), so this file
+# holds no objects.
+[[- else -]]
+# external-dns-domain, on Cloudflare: the platform domain's DNS records, with
+# that domain's own token, proxied. Wave 12, beside external-dns.
+#
+# Why a second one. The platform domain, [[ .PlatformDomain ]], is in another
+# Cloudflare zone than Infrared's own name, and its token, the key
+# [[ .DomainTokenKey ]] of infrared-platform-tokens, is kept apart (a hosted
+# plane's tenants' domain, infrared-docs-internal ADR 0063). An external-dns
+# reaches only the zones its token may edit, so the work splits by zone: this
+# one publishes the wildcard *.[[ .PlatformDomain ]] with that token, and external-dns, with cloudflare-api-token, Infrared's own
+# name. Both read the same labelled routes (components/edge/routes.yaml), and
+# each skips the names in a zone its token cannot see. With policy sync each
+# deletes only records it owns (TXT owner [[ .ClusterName ]], prefix _edns.), and only
+# in its own zones, so neither touches the other's records.
+#
+# The same chart, version and values as external-dns, but for its token: no
+# domain filter, for the reason external-dns.yaml gives. Its own release name,
+# external-dns-domain, in the same namespace, external-dns, where the chart
+# names every object after the release and selects its pods by it; so the store
+# infrared-platform needs no namespace more.
+#
+# Its token: components/external-dns-domain copies it here, into the Secret
+# external-dns/cloudflare-domain-api-token, at wave -1, before the chart.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-dns-domain
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: infrared-gitops
+    infrared.darkshift.io/layer: edge
+  annotations:
+    argocd.argoproj.io/sync-wave: "12"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/external-dns/
+      chart: external-dns
+      targetRevision: 1.22.0
+      helm:
+        releaseName: external-dns-domain
+        valuesObject:
+          provider:
+            name: cloudflare
+          env:
+            - name: CF_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-domain-api-token
+                  key: api-token
+          sources:
+            - gateway-httproute
+          gatewayNamespace: envoy-gateway-system
+          labelFilter: infrared.darkshift.io/dns=edge
+          # sync deletes records, but only those it owns (txtOwnerId).
+          policy: sync
+          registry: txt
+          txtOwnerId: [[ .ClusterName ]]
+          txtPrefix: _edns.
+          interval: 1m
+          extraArgs:
+            - --gateway-name=edge
+            # Every record behind Cloudflare: the origin certificate is trusted
+            # by Cloudflare alone.
+            - --cloudflare-proxied
+            # A TXT name may not hold the wildcard's asterisk.
+            - --txt-wildcard-replacement=wildcard
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+    - repoURL: [[ .GitopsRepoURL ]]
+      targetRevision: [[ .DefaultBranch ]]
+      path: components/external-dns-domain
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-dns
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+[[- end ]]

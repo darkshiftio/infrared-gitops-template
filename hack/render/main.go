@@ -69,6 +69,17 @@ type Data struct {
 	// InfraredHost is the host of the Installation's spec.previews.signInURL,
 	// "" when unset. In gateway mode it is Infrared's own name.
 	InfraredHost string `json:"InfraredHost"`
+	// DomainTokenKey is spec.previews.domainTokenKey on a gateway edge with a
+	// platform domain: the key of the Secret infrared-platform-tokens that
+	// holds a Cloudflare token for PlatformDomain's zone, which is not
+	// InfraredHost's (a hosted plane's tenants' domain, infrared-docs-internal
+	// ADR 0063). The edge then gives *.<PlatformDomain> a copy of that token,
+	// the OriginIssuer cloudflare-origin-domain and the Certificate
+	// edge-domain, the listener https that certificate, and a second
+	// external-dns, external-dns-domain; Infrared's own name keeps
+	// cloudflare-api-token and the Certificate edge. "" renders as before, and
+	// an operator leaves it out of the data.
+	DomainTokenKey string `json:"DomainTokenKey,omitempty"`
 	// ImageRegistry is the registry of Infrared's own images (the operator's
 	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
 	ImageRegistry string `json:"ImageRegistry"`
@@ -472,6 +483,8 @@ func main() {
 	flag.StringVar(&d.Edge, "edge", "", `Edge: "", "traefik" (both as before) or "gateway" (Envoy Gateway, external-dns, origin issuer)`)
 	flag.StringVar(&d.PlatformDomain, "platform-domain", "", "PlatformDomain: zones answer at <zone>.<domain> in gateway mode (empty for none)")
 	flag.StringVar(&d.InfraredHost, "infrared-host", "", "InfraredHost: Infrared's own name in gateway mode, the sign-in URL's host (empty for none)")
+	flag.StringVar(&d.DomainTokenKey, "domain-token-key", "",
+		"DomainTokenKey: the key of infrared-platform-tokens with a Cloudflare token for the platform domain's own zone; needs -edge gateway and -platform-domain (empty: one token for both)")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
@@ -556,6 +569,7 @@ func mergeDataFile(d *Data, path string) error {
 		"edge":                  func() { d.Edge = explicit.Edge },
 		"platform-domain":       func() { d.PlatformDomain = explicit.PlatformDomain },
 		"infrared-host":         func() { d.InfraredHost = explicit.InfraredHost },
+		"domain-token-key":      func() { d.DomainTokenKey = explicit.DomainTokenKey },
 		"image-registry":        func() { d.ImageRegistry = explicit.ImageRegistry },
 		"images":                func() { d.Images = explicit.Images },
 		"cloud":                 func() { d.Cloud = explicit.Cloud },
@@ -607,6 +621,7 @@ func validate(d Data) error {
 	if !slices.Contains(Clouds, d.Cloud) {
 		errs = append(errs, fmt.Errorf("Cloud must be one of %q, got %q", Clouds, d.Cloud))
 	}
+	errs = append(errs, validateDomainTokenKey(d)...)
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
 			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
@@ -641,6 +656,23 @@ func validate(d Data) error {
 	errs = append(errs, validateRegistryToken(d.RegistryToken, d.ImagePullSecret)...)
 	errs = append(errs, validateCloudIdentity(d.CloudIdentity)...)
 	return errors.Join(errs...)
+}
+
+// validateDomainTokenKey checks DomainTokenKey: empty, or a key of a Secret,
+// and only on a gateway edge with a platform domain, the one edge that splits
+// its certificates and DNS records by Cloudflare zone.
+func validateDomainTokenKey(d Data) []error {
+	if d.DomainTokenKey == "" {
+		return nil
+	}
+	var errs []error
+	if !secretKey.MatchString(d.DomainTokenKey) || d.DomainTokenKey == "." || strings.HasPrefix(d.DomainTokenKey, "..") {
+		errs = append(errs, fmt.Errorf("DomainTokenKey must be a Secret's key: letters, digits, '-', '_' and '.', at most 253, not . or .., got %q", d.DomainTokenKey))
+	}
+	if d.Edge != "gateway" || d.PlatformDomain == "" {
+		errs = append(errs, errors.New("DomainTokenKey needs Edge gateway and a PlatformDomain: only the Gateway edge serves the platform domain on a token of its own"))
+	}
+	return errs
 }
 
 // validateCloudIdentity checks the cloud identity: none, or a Google service

@@ -23,6 +23,14 @@
 # only the zones its token may edit.
 #
 # The token is the platform's (components/external-dns copies it here).
+[[- if and .PlatformDomain .DomainTokenKey ]]
+#
+# The platform domain, [[ .PlatformDomain ]], is in a Cloudflare zone of its own, on
+# a token of its own (spec.previews.domainTokenKey, infrared-docs-internal ADR
+# 0063): external-dns-domain publishes its wildcard and edge.[[ .PlatformDomain ]]
+# with that token, and this one Infrared's own name. Each skips the names in a
+# zone its token cannot see.
+[[- end ]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

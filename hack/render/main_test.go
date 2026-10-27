@@ -791,3 +791,55 @@ func TestValidateCloudIdentity(t *testing.T) {
 		}
 	}
 }
+
+// The platform domain on a Cloudflare token of its own (infrared-docs-internal
+// ADR 0063): the operator hands DomainTokenKey by its Go name, only on a
+// gateway edge with a platform domain, and leaves it out otherwise.
+func TestDomainTokenKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "darkshift.cloud", "InfraredHost": "saas1.darkshift.io",
+		"DomainTokenKey": "cloudflare-domain-api-token"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.DomainTokenKey != "cloudflare-domain-api-token" {
+		t.Errorf("loaded DomainTokenKey %q", d.DomainTokenKey)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.DomainTokenKey != "" {
+		t.Errorf("an operator's data without it loaded DomainTokenKey %q, %v; want none", d.DomainTokenKey, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct {
+		name          string
+		edge, domain  string
+		key           string
+		wantValidated bool
+	}{
+		{"none, any edge", "", "", "", true},
+		{"a gateway edge with a platform domain", "gateway", "darkshift.cloud", "cloudflare-domain-api-token", true},
+		{"a key of dots, underscores and digits", "gateway", "darkshift.cloud", "cloudflare_domain.api-token2", true},
+		{"no gateway edge", "traefik", "darkshift.cloud", "cloudflare-domain-api-token", false},
+		{"the default edge, Traefik", "", "darkshift.cloud", "cloudflare-domain-api-token", false},
+		{"no platform domain", "gateway", "", "cloudflare-domain-api-token", false},
+		{"a key with a space", "gateway", "darkshift.cloud", "cloudflare domain token", false},
+		{"a key with a slash", "gateway", "darkshift.cloud", "tokens/cloudflare", false},
+		{"a key no Secret takes", "gateway", "darkshift.cloud", "..", false},
+		{"a key past 253 characters", "gateway", "darkshift.cloud", strings.Repeat("k", 254), false},
+	} {
+		d := base
+		d.Edge, d.PlatformDomain, d.InfraredHost, d.DomainTokenKey = c.edge, c.domain, "saas1.darkshift.io", c.key
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}

@@ -204,6 +204,10 @@ spec:
             previews:
               domain: [[ .PlatformDomain | quote ]]
               signInURL: [[ printf "https://%s" .InfraredHost | quote ]]
+[[- if .DomainTokenKey ]]
+              # The domain's own Cloudflare token (ADR 0063).
+              domainTokenKey: [[ .DomainTokenKey | quote ]]
+[[- end ]]
 [[- end ]]
 [[- end ]]
 [[- if .Stores ]]

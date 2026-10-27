@@ -4,6 +4,7 @@
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
+[[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -31,8 +32,11 @@ components/
   code-index/              Infrared's code index: Zoekt and the code service, the cache on the pod's own disk
 [[- end ]]
 [[- if eq .Edge "gateway" ]]
-  edge/                    the Gateway, its origin certificate and the edge's routes
+  edge/                    the Gateway, its origin certificate[[ if $split ]]s, one for each Cloudflare zone,[[ end ]] and the edge's routes
   external-dns/            external-dns's Cloudflare token, copied from the platform's tokens
+[[- if $split ]]
+  external-dns-domain/     external-dns-domain's token for the platform domain's own zone, copied the same way
+[[- end ]]
 [[- end ]]
   infisical/               creates the Secret infisical/infisical-secrets on first sync
   kpack/                   kpack, vendored and pinned
@@ -94,10 +98,13 @@ products/                  yours: one directory per product (see "Products")
 | 11 | `origin-ca-issuer` | Cloudflare's origin issuer, for the edge's certificate |
 [[- end ]]
 [[- if not (contains " external-dns " $disabled) ]]
-| 12 | `external-dns` | the edge's DNS records in Cloudflare, proxied, owned by `[[ .ClusterName ]]` |
+| 12 | `external-dns` | the edge's DNS records in Cloudflare[[ if $split ]] outside the platform domain's own zone, Infrared's name among them[[ end ]], proxied, owned by `[[ .ClusterName ]]` |
+[[- if and $split (not (contains " external-dns-domain " $disabled)) ]]
+| 12 | `external-dns-domain` | the platform domain's records, `*.[[ .PlatformDomain ]]`, in its own Cloudflare zone with that zone's own token, proxied, owned by `[[ .ClusterName ]]` |
+[[- end ]]
 [[- end ]]
 [[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
-| 13 | `edge` | Gateway `edge`, its origin certificate, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+| 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
 [[- end ]]
 [[- end ]]
 [[- if not (contains " infisical " $disabled) ]]

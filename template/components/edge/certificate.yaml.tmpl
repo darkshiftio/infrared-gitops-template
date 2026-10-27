@@ -1,7 +1,9 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
-[[- /* Infrared's name needs a name of its own on the certificate only when the wildcard does not cover it: one label under the platform domain. */ -]]
+[[- /* The platform domain in a Cloudflare zone of its own, on a token of its own (spec.previews.domainTokenKey, infrared-docs-internal ADR 0063): its wildcard takes a copy of that token, an issuer and a certificate of their own, and the certificate edge keeps Infrared's name alone. */ -]]
+[[- $split := and .PlatformDomain .DomainTokenKey ]]
+[[- /* Infrared's name needs a name of its own on the certificate only when the wildcard does not cover it: one label under the platform domain. A wildcard on a certificate of its own covers it nowhere. */ -]]
 [[- $covered := false ]]
-[[- if and .PlatformDomain .InfraredHost ]]
+[[- if and .PlatformDomain .InfraredHost (not $split) ]]
 [[- $label := trimSuffix (printf ".%s" .PlatformDomain) .InfraredHost ]]
 [[- if and (hasSuffix (printf ".%s" .PlatformDomain) .InfraredHost) (not (contains "." $label)) ]][[ $covered = true ]][[ end ]]
 [[- end -]]
@@ -18,8 +20,20 @@
 # token is the platform's cloudflare-api-token, which needs the permission
 # Zone / SSL and Certificates / Edit; reading /certificates succeeds without it,
 # and issuing does not.
+[[- if $split ]]
 #
-# cert-manager renews it, at two thirds of its 90 days. Cloudflare sends no
+# Two Cloudflare zones, two tokens (infrared-docs-internal ADR 0063). The
+# platform domain, [[ .PlatformDomain ]], is in a zone of its own, and its token, the key
+# [[ .DomainTokenKey ]] of infrared-platform-tokens, is kept apart from the zone of
+# Infrared's own name. Origin CA checks a token against each name's zone, so
+# the wildcard *.[[ .PlatformDomain ]] has a copy of that token, the OriginIssuer
+# cloudflare-origin-domain and the Certificate edge-domain (Secret
+# edge-domain-tls) of its own, in the same waves. cloudflare-origin, on
+# cloudflare-api-token, signs [[ if .InfraredHost ]]the Certificate edge, Infrared's name alone, and [[ end ]]the
+# certificates Infrared asks for a zone's own addresses.
+[[- end ]]
+#
+# cert-manager renews [[ if $split ]]each[[ else ]]it[[ end ]], at two thirds of its 90 days. Cloudflare sends no
 # expiry notice.
 #
 # Waves: the token's copy (-5), the issuer (-4), the certificate (-3), then the
@@ -65,6 +79,7 @@ spec:
     tokenRef:
       name: cloudflare-api-token
       key: api-token
+[[- if or (not $split) .InfraredHost ]]
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -77,7 +92,7 @@ metadata:
 spec:
   secretName: edge-tls
   dnsNames:
-[[- if .PlatformDomain ]]
+[[- if and .PlatformDomain (not $split) ]]
     - [[ printf "*.%s" .PlatformDomain | quote ]]
 [[- end ]]
 [[- if and .InfraredHost (not $covered) ]]
@@ -90,6 +105,68 @@ spec:
     group: cert-manager.k8s.cloudflare.com
     kind: OriginIssuer
     name: cloudflare-origin
+[[- end ]]
+[[- if $split ]]
+---
+# The platform domain's own (ADR 0063): its token's copy, its issuer and its
+# wildcard's certificate, for the Gateway's listener https.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cloudflare-domain-api-token
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: cloudflare-domain-api-token
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: api-token
+      remoteRef:
+        key: infrared-platform-tokens
+        property: [[ .DomainTokenKey | quote ]]
+---
+apiVersion: cert-manager.k8s.cloudflare.com/v1
+kind: OriginIssuer
+metadata:
+  name: cloudflare-origin-domain
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+spec:
+  # RSA, the key cert-manager makes by default; the private key never leaves the cluster.
+  requestType: OriginRSA
+  auth:
+    tokenRef:
+      name: cloudflare-domain-api-token
+      key: api-token
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-domain
+  namespace: envoy-gateway-system
+  annotations:
+    # Healthy once issued: the zones' listener needs its Secret.
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  secretName: edge-domain-tls
+  dnsNames:
+    - [[ printf "*.%s" .PlatformDomain | quote ]]
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    group: cert-manager.k8s.cloudflare.com
+    kind: OriginIssuer
+    name: cloudflare-origin-domain
+[[- end ]]
 [[- else -]]
 # The edge is not a Gateway with a name to serve: no certificate.
 [[- end ]]
