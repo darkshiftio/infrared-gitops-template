@@ -63,6 +63,9 @@ REGISTRY_TOKEN     ?=
 # make render OIDC=true GRAFANA_URL=https://grafana.example.com INFRARED_HOST=infrared.example.com
 OIDC        ?= false
 GRAFANA_URL ?=
+# NETWORK_POLICIES: true renders the network fence (as INFRARED_NETWORK_POLICIES;
+# infrared-docs-internal ADR 0066 D1), every platform namespace's ingress policy.
+NETWORK_POLICIES ?= false
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -75,7 +78,7 @@ render:
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
 		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)' \
-		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)"
+		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)" -network-policies=$(NETWORK_POLICIES)
 
 ## verify: the gate CI runs
 verify:

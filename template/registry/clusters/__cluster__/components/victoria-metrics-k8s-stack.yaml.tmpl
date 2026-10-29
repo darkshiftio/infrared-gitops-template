@@ -237,6 +237,30 @@ spec:
 [[- end ]]
         # extraObjects go through tpl, so the dashboards' {{ }} legends are quoted.
         extraObjects:
+[[- if .NetworkPolicies ]]
+          # The network fence (INFRARED_NETWORK_POLICIES, README "The network
+          # fence"): the platform reaches the metrics stack (Infrared's API and
+          # operator read and write VMSingle, the tailnet reaches Grafana); no
+          # org's namespace or zone does.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: infrared-fence
+              namespace: monitoring
+            spec:
+              podSelector: {}
+              policyTypes:
+                - Ingress
+              ingress:
+                # The platform: every namespace that is neither an org's nor a zone.
+                - from:
+                    - namespaceSelector:
+                        matchExpressions:
+                          - key: infrared.darkshift.io/org
+                            operator: DoesNotExist
+                          - key: infrared.darkshift.io/zone
+                            operator: DoesNotExist
+[[- end ]]
           # Infrared's own metrics (ADR 0044): the operator's step counters and
           # the API's request counters, on every Service port named metrics in
           # the Infrared namespace, which the chart names so. An empty selector

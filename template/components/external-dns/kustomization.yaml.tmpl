@@ -6,6 +6,9 @@ kind: Kustomization
 resources:
   - wait.yaml
   - cloudflare-api-token.yaml
+[[- if .NetworkPolicies ]]
+  - fence.yaml
+[[- end ]]
 [[- else -]]
 # external-dns runs only when the edge is a Gateway, so this component holds no
 # objects and no Application points at it.

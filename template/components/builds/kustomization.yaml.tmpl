@@ -24,6 +24,9 @@ resources:
 [[- if and (contains ".dkr.ecr." .BuildRegistry) (not .Registry) ]]
   - ecr-login.yaml
 [[- end ]]
+[[- if .NetworkPolicies ]]
+  - fence.yaml
+[[- end ]]
 [[- if or (ne .Forge "gitea") (and (contains ".dkr.ecr." .BuildRegistry) (not .Registry)) ]]
 configMapGenerator:
 [[- end ]]

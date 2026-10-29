@@ -1,0 +1,82 @@
+[[- $kpack := true ]][[ range .Disabled ]][[ if eq . "kpack" ]][[ $kpack = false ]][[ end ]][[ end ]]
+[[- if and .NetworkPolicies .BuildRegistry -]]
+# =============================================================================
+# The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
+# D1; README "The network fence"): the platform's builds namespace, whose
+# build pods serve nothing, and kpack's, whose webhook the control plane calls.
+# An org's own builds namespace, builds-<org>, is the operator's to fence.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: builds
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+[[- if $kpack ]]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: kpack
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+    # kpack's webhook: from the control plane, whatever path it takes.
+    - ports:
+        - protocol: TCP
+          port: 8443
+[[- end ]]
+[[- if and (contains ".dkr.ecr." .BuildRegistry) (not .Registry) ]]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: build-credentials
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+[[- end ]]
+[[- else -]]
+# The network fence is off (INFRARED_NETWORK_POLICIES), or builds is not
+# rendered here: this file holds no objects.
+[[- end ]]

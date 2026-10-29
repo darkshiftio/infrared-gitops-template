@@ -15,6 +15,122 @@ spec:
     repoURL: [[ .GitopsRepoURL ]]
     targetRevision: [[ .DefaultBranch ]]
     path: components/argocd
+[[- if .NetworkPolicies ]]
+    # The network fence (INFRARED_NETWORK_POLICIES, README "The network
+    # fence"). Argo CD's own policies admit every namespace to its server, and
+    # to the metrics of its controller (whose argocd_app_info names every
+    # org's Applications), repo server, ApplicationSet controller, Dex and
+    # notifications. Here each admits the platform alone: no org's namespace
+    # or zone. A port-forward comes from the node and still works. Each patch
+    # tests the upstream value first, so an Argo CD bump that moves it fails
+    # the sync rather than patching the wrong rule.
+    kustomize:
+      patches:
+        - target:
+            group: networking.k8s.io
+            version: v1
+            kind: NetworkPolicy
+            name: argocd-server-network-policy
+          patch: |-
+            - op: test
+              path: /spec/ingress
+              value: [{}]
+            - op: replace
+              path: /spec/ingress
+              value:
+                - from:
+                    - namespaceSelector:
+                        matchExpressions:
+                          - key: infrared.darkshift.io/org
+                            operator: DoesNotExist
+                          - key: infrared.darkshift.io/zone
+                            operator: DoesNotExist
+        - target:
+            group: networking.k8s.io
+            version: v1
+            kind: NetworkPolicy
+            name: argocd-application-controller-network-policy
+          patch: |-
+            - op: test
+              path: /spec/ingress/0/from/0/namespaceSelector
+              value: {}
+            - op: replace
+              path: /spec/ingress/0/from/0/namespaceSelector
+              value:
+                matchExpressions:
+                  - key: infrared.darkshift.io/org
+                    operator: DoesNotExist
+                  - key: infrared.darkshift.io/zone
+                    operator: DoesNotExist
+        - target:
+            group: networking.k8s.io
+            version: v1
+            kind: NetworkPolicy
+            name: argocd-applicationset-controller-network-policy
+          patch: |-
+            - op: test
+              path: /spec/ingress/0/from/0/namespaceSelector
+              value: {}
+            - op: replace
+              path: /spec/ingress/0/from/0/namespaceSelector
+              value:
+                matchExpressions:
+                  - key: infrared.darkshift.io/org
+                    operator: DoesNotExist
+                  - key: infrared.darkshift.io/zone
+                    operator: DoesNotExist
+        - target:
+            group: networking.k8s.io
+            version: v1
+            kind: NetworkPolicy
+            name: argocd-dex-server-network-policy
+          patch: |-
+            - op: test
+              path: /spec/ingress/1/from/0/namespaceSelector
+              value: {}
+            - op: replace
+              path: /spec/ingress/1/from/0/namespaceSelector
+              value:
+                matchExpressions:
+                  - key: infrared.darkshift.io/org
+                    operator: DoesNotExist
+                  - key: infrared.darkshift.io/zone
+                    operator: DoesNotExist
+        - target:
+            group: networking.k8s.io
+            version: v1
+            kind: NetworkPolicy
+            name: argocd-notifications-controller-network-policy
+          patch: |-
+            - op: test
+              path: /spec/ingress/0/from/0/namespaceSelector
+              value: {}
+            - op: replace
+              path: /spec/ingress/0/from/0/namespaceSelector
+              value:
+                matchExpressions:
+                  - key: infrared.darkshift.io/org
+                    operator: DoesNotExist
+                  - key: infrared.darkshift.io/zone
+                    operator: DoesNotExist
+        - target:
+            group: networking.k8s.io
+            version: v1
+            kind: NetworkPolicy
+            name: argocd-repo-server-network-policy
+          patch: |-
+            - op: test
+              path: /spec/ingress/1/from/0/namespaceSelector
+              value: {}
+            - op: replace
+              path: /spec/ingress/1/from/0/namespaceSelector
+              value:
+                matchExpressions:
+                  - key: infrared.darkshift.io/org
+                    operator: DoesNotExist
+                  - key: infrared.darkshift.io/zone
+                    operator: DoesNotExist
+[[- end ]]
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd

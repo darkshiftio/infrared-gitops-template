@@ -1,0 +1,112 @@
+[[- $cnpg := true ]][[ range .Disabled ]][[ if eq . "cloudnative-pg" ]][[ $cnpg = false ]][[ end ]][[ end ]]
+[[- if and .NetworkPolicies .Stores -]]
+# =============================================================================
+# The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
+# D1; README "The network fence"): the stores admit their callers alone (ADR 0066
+# D3): no org's namespace, no zone, and no other platform component reaches
+# SeaweedFS (whose filer and master take any caller) or Postgres. An install
+# that wires a zone of its own to the platform's Postgres adds its own allow
+# beside this one. CloudNativePG's namespace admits the platform, and the
+# control plane on its webhook.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The stores themselves: SeaweedFS among its servers, the filers to
+    # Postgres, the mirror's CronJob, the copy back, the hooks.
+    - from:
+        - podSelector: {}
+    # The registry's pods, to SeaweedFS's S3 gateway (its bucket registry).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: registry
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zot
+      ports:
+        - protocol: TCP
+          port: 8333
+    # Agent Substrate: its snapshots in S3 and its records in Postgres.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ate-system
+      ports:
+        - protocol: TCP
+          port: 8333
+        - protocol: TCP
+          port: 5432
+    # The backup (the operator's CronJob infrared-backup) dumps each consumer
+    # database; a restore at install (the chart's Job infrared-restore) loads
+    # them back.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: infrared-backup
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: infrared
+              app.kubernetes.io/component: restore
+      ports:
+        - protocol: TCP
+          port: 5432
+    # CloudNativePG's operator, to the instance manager.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+    # vmagent: Postgres's and SeaweedFS's metrics.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vmagent
+[[- if $cnpg ]]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: cnpg-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+    # CloudNativePG's webhook: from the control plane, whatever path it takes.
+    - ports:
+        - protocol: TCP
+          port: 9443
+[[- end ]]
+[[- else -]]
+# The network fence is off (INFRARED_NETWORK_POLICIES), or the stores is not
+# rendered here: this file holds no objects.
+[[- end ]]
