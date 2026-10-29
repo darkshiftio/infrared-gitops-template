@@ -3,6 +3,9 @@
 [[- $prefix := default .ClusterName .Backup.Prefix ]]
 [[- /* One node (StoresSingleNode, the chart's stores.singleNode): one of each server, and every file once. */ -]]
 [[- $single := .StoresSingleNode ]]
+[[- /* SeaweedFS's own security (StoresSecurity): mutual TLS needs cert-manager's certificates. */ -]]
+[[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end ]]
+[[- $mtls := and .StoresSecurity $certManager ]]
 [[- if not $on -]]
 # seaweedfs is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
@@ -41,6 +44,26 @@
 # until the Infrared chart's restore has brought Postgres's records back
 # (components/seaweedfs/restore-wait.yaml), and the identity restore may write
 # every bucket while the stores-restore Application copies them back.
+[[- end ]]
+[[- if .StoresSecurity ]]
+#
+# SeaweedFS takes no caller it cannot identify (the Infrared chart's
+# tenancy.storesSecurity, infrared-docs-internal ADR 0066 D3): the filers'
+# HTTP answers only a token signed with the keys in stores/seaweedfs-jwt, which
+# the PreSync hook makes once (components/seaweedfs/prepare.yaml), and a volume
+# server takes a write only with a token from the master or a filer; the
+# master's HTTP API is off but its status. Each server reads its keys from its
+# environment (WEED_JWT_*), never from a file in this repo; the chart's own
+# key generation is off, because it would make new keys at every render.
+[[- if $mtls ]] Every
+# gRPC call between them is mutual TLS, with certificates from the chart's own
+# CA, which cert-manager issues and renews in stores.
+[[- else ]] cert-manager is
+# left out of this install, so gRPC stays without TLS: only the tokens hold.
+[[- end ]]
+# Zot, Substrate, the copies and the restore speak S3 with their identities,
+# as before. A volume server still serves a file to whoever names its id (a
+# random cookie in it): SeaweedFS signs reads only without a filer.
 [[- end ]]
 #
 # No resources finalizer: removing this Application leaves SeaweedFS running,
@@ -84,6 +107,21 @@ spec:
               enableReplication: true
               replicationPlacement: "001"
 [[- end ]]
+[[- if $mtls ]]
+              # Mutual TLS on every gRPC call: the chart's CA and certificates,
+              # issued by cert-manager in stores.
+              enableSecurity: true
+[[- end ]]
+[[- if .StoresSecurity ]]
+              # The tokens' keys come from stores/seaweedfs-jwt by environment
+              # (below): the chart's would be new at every render.
+              securityConfig:
+                jwtSigning:
+                  volumeWrite: false
+                  volumeRead: false
+                  filerWrite: false
+                  filerRead: false
+[[- end ]]
           image:
             registry: docker.io
             tag: "4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d"
@@ -125,6 +163,16 @@ spec:
                 unlock
               """
               sleep_minutes = 17
+[[- if .StoresSecurity ]]
+            # No HTTP API (assign, lookup, collection delete, grow, vacuum):
+            # gRPC only. /cluster/status, which the probes ask, stays.
+            disableHttp: true
+            extraEnvironmentVars:
+              WEED_JWT_SIGNING_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: volume-write
+[[- end ]]
             resources:
               requests:
                 cpu: 20m
@@ -157,6 +205,14 @@ spec:
 [[- end ]]
             # Read-only below 10% free, well before the kubelet evicts pods.
             minFreeSpacePercent: 10
+[[- if .StoresSecurity ]]
+            # A write or a delete needs a token the master or a filer signed.
+            extraEnvironmentVars:
+              WEED_JWT_SIGNING_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: volume-write
+[[- end ]]
             resources:
               requests:
                 cpu: 50m
@@ -178,6 +234,10 @@ spec:
               WEED_POSTGRES2_DATABASE: seaweedfs
               WEED_POSTGRES2_SSLMODE: require
               WEED_POSTGRES2_CONNECTION_MAX_IDLE: "20"
+[[- if .StoresSecurity ]]
+              # No directory listing over HTTP.
+              WEED_FILER_EXPOSE_DIRECTORY_METADATA_ENABLED: "false"
+[[- end ]]
             secretExtraEnvironmentVars:
               WEED_POSTGRES2_USERNAME:
                 secretKeyRef:
@@ -187,6 +247,29 @@ spec:
                 secretKeyRef:
                   name: postgres-seaweedfs
                   key: password
+[[- if .StoresSecurity ]]
+              # Its HTTP takes a write or a read only with a token signed with
+              # these, as the S3 gateways sign theirs; it signs volume writes.
+              WEED_JWT_FILER_SIGNING_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: filer-write
+              WEED_JWT_FILER_SIGNING_READ_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: filer-read
+              WEED_JWT_SIGNING_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: volume-write
+            # The chart probes GET /, a listing the read key refuses.
+            livenessProbe:
+              httpGet:
+                path: /healthz
+            readinessProbe:
+              httpGet:
+                path: /readyz
+[[- end ]]
             resources:
               requests:
                 cpu: 50m
@@ -251,6 +334,17 @@ spec:
                 secretKeyRef:
                   name: seaweedfs-s3-restore
                   key: AWS_SECRET_ACCESS_KEY
+[[- end ]]
+[[- if .StoresSecurity ]]
+              # The tokens the gateway signs its filer calls with.
+              WEED_JWT_FILER_SIGNING_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: filer-write
+              WEED_JWT_FILER_SIGNING_READ_KEY:
+                secretKeyRef:
+                  name: seaweedfs-jwt
+                  key: filer-read
 [[- end ]]
             createBuckets:
               - name: ate-snapshots

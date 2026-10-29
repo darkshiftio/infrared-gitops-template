@@ -175,6 +175,15 @@ login() {
   printf '"\n'
 }
 
+# admin: curl's config, for stdin, that signs in as the registry's admin user
+# infrared, which reads anywhere whether or not the registry reads for anyone
+# (tenancy.registryPulls).
+admin() {
+  printf 'user = "infrared:'
+  k -n infrared get secret registry-identities -o jsonpath='{.data.infrared}' | base64 -d | quoted
+  printf '"\n'
+}
+
 # probe <user:password file> <repository>: whether that login may push a tag
 # to the repository, without pushing anything. Prints the registry's answer:
 # 415 when it may, 403 when it may not, 401 when the login is refused.
@@ -270,26 +279,22 @@ remove() {
     warn "no port-forward to registry/zot: the images under $ORG/$name are left"
     return 1
   fi
-  repos="$(curl -sS "http://127.0.0.1:$port/v2/_catalog?n=10000" |
+  repos="$(admin | curl -sS -K - "http://127.0.0.1:$port/v2/_catalog?n=10000" |
     jq -r --arg p "$ORG/$name" '.repositories // [] | .[] | select(. == $p or startswith($p + "/"))' 2>/dev/null || true)"
   for o in $repos; do
-    tags="$(curl -sS "http://127.0.0.1:$port/v2/$o/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
+    tags="$(admin | curl -sS -K - "http://127.0.0.1:$port/v2/$o/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
     digests="$(for tag in $tags; do
-      curl -sS -I -H "Accept: $ACCEPT,application/vnd.cncf.helm.config.v1+json" "http://127.0.0.1:$port/v2/$o/manifests/$tag" |
+      admin | curl -sS -K - -I -H "Accept: $ACCEPT,application/vnd.cncf.helm.config.v1+json" "http://127.0.0.1:$port/v2/$o/manifests/$tag" |
         awk 'tolower($1) == "docker-content-digest:" { print $2 }' | tr -d '\r'
     done | sort -u)"
     for d in $digests; do
-      r="$({
-        printf 'user = "infrared:'
-        k -n infrared get secret registry-identities -o jsonpath='{.data.infrared}' | base64 -d | quoted
-        printf '"\n'
-      } | curl -sS -K - -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$port/v2/$o/manifests/$d")" || r=none
+      r="$(admin | curl -sS -K - -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$port/v2/$o/manifests/$d")" || r=none
       if [ "$r" = 202 ]; then n=$((n + 1)); else
         warn "the registry did not delete $o@$d: HTTP $r"
         left=1
       fi
     done
-    tags="$(curl -sS "http://127.0.0.1:$port/v2/$o/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
+    tags="$(admin | curl -sS -K - "http://127.0.0.1:$port/v2/$o/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
     if [ -n "$tags" ]; then
       warn "tags left under $o: $(tr '\n' ' ' <<<"$tags")"
       left=1
@@ -531,10 +536,10 @@ chart="$(jq -r --arg p "$REG/$ORG/$NAME/publish-check@sha256:" '[.[] | select(.k
 [ -n "$img" ] && [ -n "$chart" ] && [ "$(jq length <<<"$pub")" = 2 ] ||
   die "step 5: the step published $pub, not one image site and one chart publish-check 0.1.0 under $REG/$ORG/$NAME/"
 digest="${img##*@}"
-m="$(curl -sS -D "$work/image.headers" -H "Accept: $ACCEPT" "http://127.0.0.1:$zport/v2/$ORG/$NAME/site/manifests/$digest")"
+m="$(admin | curl -sS -K - -D "$work/image.headers" -H "Accept: $ACCEPT" "http://127.0.0.1:$zport/v2/$ORG/$NAME/site/manifests/$digest")"
 grep -qi "^docker-content-digest: $digest" "$work/image.headers" || die "step 5: the registry does not serve $img by its digest"
 [ "$(jq -r '.layers | length' <<<"$m")" -ge 2 ] || die "step 5: $img has no layer of its own on the zone's image"
-m="$(curl -sS -D "$work/chart.headers" -H "Accept: $ACCEPT" "http://127.0.0.1:$zport/v2/$ORG/$NAME/publish-check/manifests/${chart##*@}")"
+m="$(admin | curl -sS -K - -D "$work/chart.headers" -H "Accept: $ACCEPT" "http://127.0.0.1:$zport/v2/$ORG/$NAME/publish-check/manifests/${chart##*@}")"
 grep -qi "^docker-content-digest: ${chart##*@}" "$work/chart.headers" || die "step 5: the registry does not serve $chart by its digest"
 [ "$(jq -r '.config.mediaType' <<<"$m")" = application/vnd.cncf.helm.config.v1+json ] || die "step 5: $chart is not a Helm chart"
 echo "  ok    $img (tag publish-check) and the chart $chart (0.1.0), each served by its digest ($((SECONDS - t)) s)"

@@ -17,7 +17,9 @@
 #      organization's images with, the copy is deleted, and the source image,
 #      which has the same digest and blobs, still answers with every blob. The
 #      admin password goes from infrared/registry-identities to curl on stdin,
-#      through a port-forward, and is never printed.
+#      through a port-forward, and is never printed; every read goes as
+#      infrared too, so the check holds whether or not the registry reads for
+#      anyone (tenancy.registryPulls).
 #
 # The source image defaults to Substrate's counter demo in the registry, by the
 # digest in scripts/substrate-images.json. Step 3 removes the copy; the crane
@@ -168,22 +170,24 @@ for _ in $(seq 1 30); do
 done
 [ -n "$port" ] || die "step 3: the port-forward to registry/zot did not start"
 zot="http://127.0.0.1:$port"
-code() { curl -sS -o /dev/null -w '%{http_code}' -H "Accept: $ACCEPT" "$@"; }
-admin_delete() {
-  {
-    printf 'user = "infrared:'
-    k -n infrared get secret registry-identities -o jsonpath='{.data.infrared}' | base64 -d |
-      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n'
-    printf '"\n'
-  } | curl -sS -K - -o /dev/null -w '%{http_code}' -X DELETE "$1"
+# admin: curl's config for the admin user infrared, on stdin: every read and
+# the delete go as infrared, which reads anywhere whether or not the registry
+# reads for anyone (tenancy.registryPulls).
+admin() {
+  printf 'user = "infrared:'
+  k -n infrared get secret registry-identities -o jsonpath='{.data.infrared}' | base64 -d |
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n'
+  printf '"\n'
 }
+code() { admin | curl -sS -K - -o /dev/null -w '%{http_code}' -H "Accept: $ACCEPT" "$@"; }
+admin_delete() { admin | curl -sS -K - -o /dev/null -w '%{http_code}' -X DELETE "$1"; }
 del="$(admin_delete "$zot/v2/$copy/manifests/$digest")"
 gone="$(code -I "$zot/v2/$copy/manifests/$digest")"
 kept="$(code -I "$zot/v2/$repo/manifests/$digest")"
 echo "  delete $copy@$digest as infrared: HTTP $del; then $copy $gone, $repo $kept"
 [ "$del" = 202 ] && [ "$gone" = 404 ] && [ "$kept" = 200 ] || die "step 3: want 202, then 404 and 200"
 n=0 bad=0
-for b in $(curl -sS -H "Accept: $ACCEPT" "$zot/v2/$repo/manifests/$digest" | jq -r '.config.digest, .layers[].digest'); do
+for b in $(admin | curl -sS -K - -H "Accept: $ACCEPT" "$zot/v2/$repo/manifests/$digest" | jq -r '.config.digest, .layers[].digest'); do
   n=$((n + 1))
   [ "$(code -I "$zot/v2/$repo/blobs/$b")" = 200 ] || bad=$((bad + 1))
 done

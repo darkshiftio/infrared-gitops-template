@@ -237,24 +237,27 @@ remove() {
     warn "no port-forward to registry/zot: the images under $ORG/$name are left"
     return 1
   fi
-  tags="$(curl -sS "http://127.0.0.1:$port/v2/$ORG/$name/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
+  # Every read goes as infrared too: it reads anywhere, whether or not the
+  # registry reads for anyone (tenancy.registryPulls).
+  admin() {
+    printf 'user = "infrared:'
+    k -n infrared get secret registry-identities -o jsonpath='{.data.infrared}' | base64 -d |
+      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n'
+    printf '"\n'
+  }
+  tags="$(admin | curl -sS -K - "http://127.0.0.1:$port/v2/$ORG/$name/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
   digests="$(for tag in $tags; do
-    curl -sS -I -H "Accept: $ACCEPT" "http://127.0.0.1:$port/v2/$ORG/$name/manifests/$tag" |
+    admin | curl -sS -K - -I -H "Accept: $ACCEPT" "http://127.0.0.1:$port/v2/$ORG/$name/manifests/$tag" |
       awk 'tolower($1) == "docker-content-digest:" { print $2 }' | tr -d '\r'
   done | sort -u)"
   for d in $digests; do
-    r="$({
-      printf 'user = "infrared:'
-      k -n infrared get secret registry-identities -o jsonpath='{.data.infrared}' | base64 -d |
-        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n'
-      printf '"\n'
-    } | curl -sS -K - -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$port/v2/$ORG/$name/manifests/$d")" || r=none
+    r="$(admin | curl -sS -K - -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$port/v2/$ORG/$name/manifests/$d")" || r=none
     [ "$r" = 202 ] || {
       warn "the registry did not delete $ORG/$name@$d: HTTP $r"
       left=1
     }
   done
-  tags="$(curl -sS "http://127.0.0.1:$port/v2/$ORG/$name/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
+  tags="$(admin | curl -sS -K - "http://127.0.0.1:$port/v2/$ORG/$name/tags/list" | jq -r '.tags // [] | .[]' 2>/dev/null || true)"
   if [ -z "$tags" ]; then
     echo "  ok    the images under $ORG/$name are deleted ($(wc -w <<<"$digests" | tr -d ' ') manifests)"
   else

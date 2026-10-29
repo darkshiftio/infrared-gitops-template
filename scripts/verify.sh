@@ -2070,6 +2070,140 @@ for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr"; do
   fi
 done
 
+# --- The registry by identity and the stores' own security (ADR 0066 D3) ------------
+# With RegistryPulls (the operator's INFRARED_REGISTRY_PULLS), zot-base reads for
+# no one without a login: "**" grants neither anonymous nor default read, every
+# signed-in user reads platform/ (kpack's builder, which each org's builds run as
+# its own user), and with Agent Substrate's test actors, which atelet pulls with
+# no login, anyone reads platform/substrate/. With StoresSecurity
+# (INFRARED_STORES_SECURITY), SeaweedFS runs under its own security. Each, without
+# the stores and the registry, changes only the infrared Application, which
+# carries it; with them, only what it is for.
+d3_diff() { { diff -rq "$1" "$2" || true; } | sed -E "s#^Files $1/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//'; }
+"$work/render" -out "$work/d3-alone" -cluster demo -flavor k3s -build-registry "" -registry-pulls -stores-security >/dev/null
+[ "$(d3_diff "$work/k3s" "$work/d3-alone")" = "$infrared_app" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/d3-alone/$infrared_app")" \
+    = '{"registryPulls":{"enabled":true},"storesSecurity":{"enabled":true}}' ] \
+  && ok "d3-alone: without the stores and the registry, both switches change only the infrared Application, which carries them" \
+  || bad "d3-alone: differs from the plain k3s render in '$(d3_diff "$work/k3s" "$work/d3-alone")', or the infrared Application does not carry both"
+
+# The registry: the one install's shape (Substrate with its test actors), and
+# without the test actors. Against the same render with the switch off, only
+# zot-base, three comments and the infrared Application change.
+yq -p json -o json '. + {"RegistryPulls": true}' "$work/substrate.json" >"$work/pulls.json"
+yq -p json -o json '.Disabled += ["substrate-test-actors"]' "$work/pulls.json" >"$work/pulls-no-actors.json"
+"$work/render" -out "$work/pulls-open" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/substrate.json" >/dev/null
+"$work/render" -out "$work/pulls" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/pulls.json" >/dev/null
+"$work/render" -out "$work/pulls-no-actors" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/pulls-no-actors.json" >/dev/null
+want_pulls="components/builds/README.md components/builds/builder.yaml components/zot/base.yaml"
+want_pulls="$want_pulls registry/clusters/demo-pl/components/infrared.yaml registry/clusters/demo-pl/components/zot.yaml"
+[ "$(d3_diff "$work/pulls-open" "$work/pulls")" = "$(words "$want_pulls")" ] \
+  && ok "pulls: renders what the switch off does, but $want_pulls" \
+  || bad "pulls: differs from the switch off in '$(d3_diff "$work/pulls-open" "$work/pulls")', want '$want_pulls'"
+zb_rules() { sel "$1/components/zot/base.yaml" 'select(.kind == "ConfigMap" and .metadata.name == "zot-base") | .data["config.json"]' | jq -c -S "$2"; }
+pulls_platform='{"actions":["read","create","update","delete"],"users":["platform"]}'
+pulls_closed="{\"**\":{\"anonymousPolicy\":[],\"defaultPolicy\":[]},\"platform/**\":{\"anonymousPolicy\":[],\"defaultPolicy\":[\"read\"],\"policies\":[$pulls_platform]}}"
+pulls_actors="$(jq -c -S --argjson p "$pulls_platform" '. + {"platform/substrate/**": {anonymousPolicy: ["read"], defaultPolicy: ["read"], policies: [$p]}}' <<<"$pulls_closed")"
+[ "$(zb_rules "$work/pulls-no-actors" '.http.accessControl.repositories')" = "$pulls_closed" ] \
+  && ok "pulls-no-actors: zot-base reads for no one without a login, and every signed-in user reads platform/" \
+  || bad "pulls-no-actors: zot-base's rules are $(zb_rules "$work/pulls-no-actors" '.http.accessControl.repositories')"
+[ "$(zb_rules "$work/pulls" '.http.accessControl.repositories')" = "$pulls_actors" ] \
+  && [ "$(zb_rules "$work/pulls" '.http.accessControl.adminPolicy')" = '{"actions":["read","delete"],"users":["infrared"]}' ] \
+  && [ "$(zb_rules "$work/pulls" '.http.auth')" = '{"apikey":true,"htpasswd":{"path":"/etc/zot-auth/htpasswd"}}' ] \
+  && ok "pulls: and anyone reads platform/substrate/ alone, the test actors atelet pulls with no login; infrared reads and deletes anywhere" \
+  || bad "pulls: zot-base's rules are $(zb_rules "$work/pulls" '.http.accessControl')"
+[ "$(yq -r '.spec.sources[0].helm.valuesObject.tenancy.registryPulls.enabled' "$work/pulls/registry/clusters/demo-pl/components/infrared.yaml")" = true ] \
+  && ok "pulls: the infrared Application carries tenancy.registryPulls.enabled" \
+  || bad "pulls: the infrared Application does not carry tenancy.registryPulls.enabled"
+if kubectl kustomize "$work/pulls/components/zot" >"$work/pulls-zot.yaml" \
+  && kubeconform -strict -ignore-missing-schemas -summary "$work/pulls-zot.yaml" >/dev/null; then
+  ok "pulls: components/zot builds and passes kubeconform"
+else
+  bad "pulls: components/zot does not build or pass kubeconform"
+fi
+
+# The stores' own security: the one install's shape, and without cert-manager,
+# where only the tokens hold. Against the same render with the switch off, only
+# SeaweedFS's Application, its PreSync hook and the infrared Application change.
+yq -p json -o json '. + {"StoresSecurity": true}' "$work/substrate.json" >"$work/stores-sec.json"
+yq -p json -o json '.Disabled += ["cert-manager"]' "$work/stores-sec.json" >"$work/stores-sec-no-cm.json"
+"$work/render" -out "$work/stores-sec" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/stores-sec.json" >/dev/null
+"$work/render" -out "$work/stores-sec-no-cm" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/stores-sec-no-cm.json" >/dev/null
+want_sec="components/seaweedfs/prepare.yaml registry/clusters/demo-pl/components/infrared.yaml registry/clusters/demo-pl/components/seaweedfs.yaml"
+[ "$(d3_diff "$work/pulls-open" "$work/stores-sec")" = "$(words "$want_sec")" ] \
+  && ok "stores-sec: renders what the switch off does, but $want_sec" \
+  || bad "stores-sec: differs from the switch off in '$(d3_diff "$work/pulls-open" "$work/stores-sec")', want '$want_sec'"
+sw_app="$work/stores-sec/registry/clusters/demo-pl/components/seaweedfs.yaml"
+sw_v='.spec.sources[] | select(.chart == "seaweedfs") | .helm.valuesObject'
+sw_keys() { yq -o json -I0 "$sw_v | $2" "$1" | jq -c -S '[to_entries[] | select(.key | startswith("WEED_JWT")) | .key + "<-" + .value.secretKeyRef.name + "/" + .value.secretKeyRef.key]'; }
+[ "$(yq -o json -I0 "$sw_v | .global.seaweedfs | [.enableSecurity, .securityConfig.jwtSigning]" "$sw_app")" \
+    = '[true,{"volumeWrite":false,"volumeRead":false,"filerWrite":false,"filerRead":false}]' ] \
+  && [ "$(sel "$sw_app" "$sw_v | .master.disableHttp")" = true ] \
+  && [ "$(sw_keys "$sw_app" .master.extraEnvironmentVars)" = '["WEED_JWT_SIGNING_KEY<-seaweedfs-jwt/volume-write"]' ] \
+  && [ "$(sw_keys "$sw_app" .volume.extraEnvironmentVars)" = '["WEED_JWT_SIGNING_KEY<-seaweedfs-jwt/volume-write"]' ] \
+  && [ "$(sw_keys "$sw_app" .filer.secretExtraEnvironmentVars)" \
+    = '["WEED_JWT_FILER_SIGNING_KEY<-seaweedfs-jwt/filer-write","WEED_JWT_FILER_SIGNING_READ_KEY<-seaweedfs-jwt/filer-read","WEED_JWT_SIGNING_KEY<-seaweedfs-jwt/volume-write"]' ] \
+  && [ "$(sw_keys "$sw_app" .s3.extraEnvironmentVars)" \
+    = '["WEED_JWT_FILER_SIGNING_KEY<-seaweedfs-jwt/filer-write","WEED_JWT_FILER_SIGNING_READ_KEY<-seaweedfs-jwt/filer-read"]' ] \
+  && [ "$(sel "$sw_app" "$sw_v | .filer.extraEnvironmentVars.WEED_FILER_EXPOSE_DIRECTORY_METADATA_ENABLED")" = false ] \
+  && [ "$(line "$sw_app" "$sw_v | .filer | [.livenessProbe.httpGet.path, .readinessProbe.httpGet.path] | .[]")" = "/healthz /readyz" ] \
+  && ok "stores-sec: gRPC under mutual TLS, the chart's own keys off, each server its keys from seaweedfs-jwt, the master's HTTP off, the filer probed on /healthz and /readyz" \
+  || bad "stores-sec: SeaweedFS's security values are wrong: $(yq -o json -I0 "$sw_v | [.global, .master, .volume.extraEnvironmentVars, .s3.extraEnvironmentVars]" "$sw_app")"
+sw_prep="$work/stores-sec/components/seaweedfs/prepare.yaml"
+prep_env() { sel "$1" "select(.kind == \"Job\" and .metadata.name == \"seaweedfs-prepare\") | .spec.template.spec.containers[0].env[] | select(.name == \"$2\") | .value"; }
+[ "$(prep_env "$sw_prep" JWT_SECRET)" = seaweedfs-jwt ] \
+  && [ "$(prep_env "$sw_prep" WAIT_CRDS)" = "externalsecrets.external-secrets.io certificates.cert-manager.io issuers.cert-manager.io" ] \
+  && [ "$(prep_env "$sw_prep" WAIT_SERVICES)" = "stores/postgres-rw cert-manager/cert-manager-webhook" ] \
+  && sel "$sw_prep" 'select(.kind == "Role" and .metadata.name == "seaweedfs-prepare") | .rules[0].resourceNames[]' | grep -qx seaweedfs-jwt \
+  && [ "$(sel "$sw_prep" 'select(.kind == "Job" and .metadata.name == "seaweedfs-prepare") | .spec.template.spec.containers[0].command[2]' \
+      | grep -cE '^if ! kubectl get secret "\$JWT_SECRET"|^  (volume-write|filer-write|filer-read): \$')" = 4 ] \
+  && ok "stores-sec: the PreSync hook makes seaweedfs-jwt once, and waits for cert-manager's CRDs and webhook" \
+  || bad "stores-sec: the PreSync hook does not make seaweedfs-jwt once, or does not wait for cert-manager"
+sw_app_nocm="$work/stores-sec-no-cm/registry/clusters/demo-pl/components/seaweedfs.yaml"
+[ "$(sel "$sw_app_nocm" "$sw_v | .global.seaweedfs.enableSecurity")" = null ] \
+  && [ "$(sw_keys "$sw_app_nocm" .s3.extraEnvironmentVars)" = "$(sw_keys "$sw_app" .s3.extraEnvironmentVars)" ] \
+  && [ "$(prep_env "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" WAIT_SERVICES)" = stores/postgres-rw ] \
+  && [ "$(prep_env "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" WAIT_CRDS)" = externalsecrets.external-secrets.io ] \
+  && ok "stores-sec-no-cm: without cert-manager, the tokens alone, and no wait for it" \
+  || bad "stores-sec-no-cm: without cert-manager, SeaweedFS still asks for mutual TLS, or the hook waits for cert-manager"
+if kubectl kustomize "$work/stores-sec/components/seaweedfs" >"$work/stores-sec-seaweedfs.yaml" \
+  && kubeconform -strict -ignore-missing-schemas -summary "$work/stores-sec-seaweedfs.yaml" >/dev/null; then
+  ok "stores-sec: components/seaweedfs builds and passes kubeconform"
+else
+  bad "stores-sec: components/seaweedfs does not build or pass kubeconform"
+fi
+# SeaweedFS's chart itself, with these values: the chart makes its keys with
+# lookup and randAlphaNum, new at every render under Argo CD, so two renders
+# must be the same and its security config must hold no key, only the gRPC
+# certificates' paths. Skipped (and said) when the chart can't be fetched.
+sw_version="$(yq -r '.spec.sources[] | select(.chart == "seaweedfs") | .targetRevision' "$sw_app")"
+yq "$sw_v" "$sw_app" >"$work/sw-values.yaml"
+if helm pull seaweedfs --repo https://seaweedfs.github.io/seaweedfs/helm --version "$sw_version" --untar -d "$work/sw-chart" >/dev/null 2>&1; then
+  if helm template seaweedfs "$work/sw-chart/seaweedfs" -n stores -f "$work/sw-values.yaml" >"$work/sw1.yaml" 2>"$work/sw.err" \
+    && helm template seaweedfs "$work/sw-chart/seaweedfs" -n stores -f "$work/sw-values.yaml" >"$work/sw2.yaml" 2>>"$work/sw.err"; then
+    sw_toml="$(sel "$work/sw1.yaml" 'select(.kind == "ConfigMap" and .metadata.name == "seaweedfs-security-config") | .data["security.toml"]')"
+    sw_env() { line "$work/sw1.yaml" "select(.metadata.name == \"seaweedfs-$1\" and (.kind == \"StatefulSet\" or .kind == \"Deployment\"))
+      | .spec.template.spec.containers[0].env[] | select(.name | test(\"^WEED_JWT\")) | .name + \"<-\" + .valueFrom.secretKeyRef.key"; }
+    cmp -s "$work/sw1.yaml" "$work/sw2.yaml" \
+      && grep -qx '\[grpc\]' <<<"$sw_toml" && ! grep -q '^\[jwt' <<<"$sw_toml" && ! grep -qi 'key = "[^/]' <<<"$sw_toml" \
+      && [ "$(line "$work/sw1.yaml" 'select(.kind == "Certificate") | .metadata.name' | tr ' ' '\n' | grep -cE '^seaweedfs-(ca|master|volume|filer|client)-cert$')" = 5 ] \
+      && [ "$(sw_env master)" = "WEED_JWT_SIGNING_KEY<-volume-write" ] && [ "$(sw_env volume)" = "WEED_JWT_SIGNING_KEY<-volume-write" ] \
+      && [ "$(sw_env filer | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" \
+        = "WEED_JWT_FILER_SIGNING_KEY<-filer-write WEED_JWT_FILER_SIGNING_READ_KEY<-filer-read WEED_JWT_SIGNING_KEY<-volume-write" ] \
+      && [ "$(sw_env s3 | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" = "WEED_JWT_FILER_SIGNING_KEY<-filer-write WEED_JWT_FILER_SIGNING_READ_KEY<-filer-read" ] \
+      && sel "$work/sw1.yaml" 'select(.kind == "StatefulSet" and .metadata.name == "seaweedfs-master") | .spec.template.spec.containers[0].command[2]' | grep -q -- '-disableHttp' \
+      && [ "$(line "$work/sw1.yaml" 'select(.kind == "StatefulSet" and .metadata.name == "seaweedfs-filer") | .spec.template.spec.containers[0] | [.livenessProbe.httpGet.path, .readinessProbe.httpGet.path] | .[]')" = "/healthz /readyz" ] \
+      && ok "stores-sec: SeaweedFS $sw_version renders the same twice, its security config the gRPC certificates' paths and no key, each server's keys by environment, the master without HTTP" \
+      || bad "stores-sec: SeaweedFS $sw_version's render is wrong (two renders differ, a key in its security config, or a server without its keys)"
+    if kubeconform -strict -ignore-missing-schemas -summary "$work/sw1.yaml" >/dev/null; then ok "stores-sec: SeaweedFS's render passes kubeconform"
+    else bad "stores-sec: SeaweedFS's render fails kubeconform"; fi
+  else
+    bad "stores-sec: helm template seaweedfs $sw_version: $(head -c 300 "$work/sw.err")"
+  fi
+else
+  echo "skip: seaweedfs $sw_version could not be fetched; its render is not checked"
+fi
+
 # --- Grafana's sign-in through Infrared (ADR 0053) ---------------------------------
 # With OIDC, GrafanaURL and InfraredHost (variant oidc, from a -data file as the
 # operator passes them), Grafana signs people in through Infrared: the browser

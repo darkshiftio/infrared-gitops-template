@@ -7,14 +7,16 @@
 # on, never from CI. A kpack Image in kpack builds Paketo's go/mod sample at a
 # pinned commit with the ClusterBuilder infrared-builder, as kpack's
 # ServiceAccount infrared-builder (the user platform), and pushes the image and
-# its build cache to the registry by its address, under platform/. A pod then
-# runs the image by digest: the kubelet pulls it through the node's mirror for
-# that address, without a login, and the sample answers through the API
-# server's proxy.
+# its build cache to the registry by its address, under platform/. A pod in
+# kpack then runs the image by digest: the kubelet pulls it through the node's
+# mirror for that address, with the platform's credential kpack/registry-push
+# (the registry asks for a login when it pulls by identity,
+# tenancy.registryPulls), and the sample answers through the API server's
+# proxy.
 #
 # The Image, its Builds and the pod are removed unless KEEP=1. The images stay
 # in the registry, under platform/registry-build-check, for its retention rules.
-# Needs: kubectl, jq. Writes to the namespaces kpack and builds only.
+# Needs: kubectl, jq. Writes to the namespace kpack only.
 # =============================================================================
 set -euo pipefail
 CTX="${1:?usage: scripts/registry-build-check.sh <kube context>}"
@@ -39,7 +41,7 @@ name="registry-build-check-$(date -u +%Y%m%d-%H%M%S)"
 cleanup() {
   if [ "${KEEP:-}" != 1 ]; then
     k -n kpack delete image "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    k -n builds delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    k -n kpack delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -91,12 +93,14 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: $name
-  namespace: builds
+  namespace: kpack
   labels:
     app.kubernetes.io/part-of: registry-build-check
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  imagePullSecrets:
+    - name: registry-push
   securityContext:
     runAsNonRoot: true
     seccompProfile:
@@ -115,12 +119,12 @@ spec:
         capabilities:
           drop: [ALL]
 EOF
-k -n builds wait pod "$name" --for=condition=Ready --timeout=180s >/dev/null || die "step 2: the pod is not Ready"
-node="$(k -n builds get pod "$name" -o jsonpath='{.spec.nodeName}')"
-pulled="$(k -n builds get events --field-selector "involvedObject.name=$name,reason=Pulled" \
+k -n kpack wait pod "$name" --for=condition=Ready --timeout=180s >/dev/null || die "step 2: the pod is not Ready"
+node="$(k -n kpack get pod "$name" -o jsonpath='{.spec.nodeName}')"
+pulled="$(k -n kpack get events --field-selector "involvedObject.name=$name,reason=Pulled" \
   -o jsonpath='{.items[-1:].message}')"
 echo "  $node: $pulled"
-answer="$(k get --raw "/api/v1/namespaces/builds/pods/$name:8080/proxy/" 2>&1)"
+answer="$(k get --raw "/api/v1/namespaces/kpack/pods/$name:8080/proxy/" 2>&1)"
 case "$answer" in *"Paketo Buildpacks"*) ;; *) die "step 2: the sample did not answer as expected" ;; esac
 echo "  ok    the sample answers on $node"
 
