@@ -15,7 +15,12 @@
 #   - each organization's builds push under its own path, <org>/, as its own
 #     user: the operator makes builds/registry-push-<org> and the
 #     ServiceAccount builds/builder-<org>, which its kpack Images name.
+[[- if .RegistryPulls ]]
+# No one pulls without a login (the Infrared chart's tenancy.registryPulls): a
+# build pulls the builder as its organization's user, which reads platform/.
+[[- else ]]
 # Anything in the cluster pulls without a login, the kubelet included.
+[[- end ]]
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount

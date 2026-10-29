@@ -9,8 +9,15 @@ splits a string, so a range over its length finds the colon. */ -]]
 [[- range $i := len .Registry ]][[ if hasPrefix ":" (slice $.Registry $i) ]][[ $ip = slice $.Registry 0 $i ]][[ $port = trimPrefix ":" (slice $.Registry $i) ]][[ end ]][[ end -]]
 # Zot v2.1.21 (chart 0.1.125), the registry inside the cluster, in the
 # namespace registry at [[ .Registry ]]: the Service zot, its ClusterIP pinned,
+[[- if .RegistryPulls ]]
+# plain HTTP. Every node mirrors that address to it, and the kubelet pulls with
+# each pod's pull Secret: a zone's zot-pull, its organization's user, which the
+# operator writes (tenancy.registryPulls). Builds name the registry by that
+# address. Wave 20, after
+[[- else ]]
 # plain HTTP. Every node mirrors that address to it, so the kubelet pulls
 # without a login, and builds name the registry by that address. Wave 20, after
+[[- end ]]
 # SeaweedFS (18), which holds every layer, and the stores' credentials (19),
 # which hand Zot its S3 keys.
 #

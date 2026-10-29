@@ -220,13 +220,34 @@ spec:
             singleNode: true
 [[- end ]]
 [[- end ]]
+[[- if or .NetworkPolicies .RegistryPulls .StoresSecurity ]]
 [[- if .NetworkPolicies ]]
           # The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal
           # ADR 0066 D1): the operator fences every org's namespaces, and this
           # repo gives every platform namespace its ingress policy.
+[[- end ]]
+[[- if .RegistryPulls ]]
+          # The registry by identity (INFRARED_REGISTRY_PULLS, ADR 0066 D3):
+          # zot-base reads for no one without a login, and each zone pulls as
+          # its org's own registry user.
+[[- end ]]
+[[- if .StoresSecurity ]]
+          # The stores' own security (INFRARED_STORES_SECURITY, ADR 0066 D3):
+          # SeaweedFS under mutual TLS and signed tokens.
+[[- end ]]
           tenancy:
+[[- if .NetworkPolicies ]]
             networkPolicies:
               enabled: true
+[[- end ]]
+[[- if .RegistryPulls ]]
+            registryPulls:
+              enabled: true
+[[- end ]]
+[[- if .StoresSecurity ]]
+            storesSecurity:
+              enabled: true
+[[- end ]]
 [[- end ]]
 [[- $c := .Copies ]]
 [[- $settings := or $c.Recipients $c.Mirror.Schedule $c.Mirror.Retention .PostgresArchive.Enabled ]]

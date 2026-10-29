@@ -80,6 +80,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.OIDC` | absent or `false`, `true` | the operator's `INFRARED_OIDC`, the Infrared chart's `oidc.enabled`: Infrared is the OpenID Connect provider of the install's own tools (infrared-docs-internal ADR 0053). With `.GrafanaURL` and `.InfraredHost`, Grafana signs people in through Infrared (see "Grafana's sign-in through Infrared"); without either, it changes nothing |
 | `.GrafanaURL` | absent or ``, `https://grafana.infrared-cp-google.private.darkshift.io` | the operator's `INFRARED_OIDC_GRAFANA_URL`, the chart's `oidc.grafanaURL`: Grafana's address in a browser, http(s) with no trailing slash. Grafana's `root_url` is it with a slash, and its redirect URI `<GrafanaURL>/login/generic_oauth`, which infrared-api matches exactly |
 | `.NetworkPolicies` | absent or `false`, `true` | the operator's `INFRARED_NETWORK_POLICIES`, the Infrared chart's `tenancy.networkPolicies.enabled`: the network fence (infrared-docs-internal ADR 0066 D1). Every platform namespace a component makes gets its ingress NetworkPolicy, Argo CD's own policies admit no org's namespace, and the `infrared` Application carries the setting (see "The network fence"); the operator fences each org's namespaces itself |
+| `.RegistryPulls` | absent or `false`, `true` | the operator's `INFRARED_REGISTRY_PULLS`, the Infrared chart's `tenancy.registryPulls.enabled`: the registry by identity (ADR 0066 D3). `zot-base` reads for no one without a login, every signed-in user reads `platform/`, and with Agent Substrate's test actors anyone reads `platform/substrate/`; the operator gives each zone its org's own pull credential, and the `infrared` Application carries the setting (see "The registry") |
+| `.StoresSecurity` | absent or `false`, `true` | the operator's `INFRARED_STORES_SECURITY`, the Infrared chart's `tenancy.storesSecurity.enabled`: SeaweedFS under its own security (ADR 0066 D3), mutual TLS on gRPC from cert-manager and signed tokens on the filer's HTTP and on volume writes, the master's HTTP off; the `infrared` Application carries the setting (see "The stores' own security") |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -91,7 +93,8 @@ array, exactly as the operator's environment carries them, `-forge` with
 `INFRARED_REGISTRY_RETENTION` carries it (camelCase keys); `-copies`,
 `-postgres-archive` and `-restore` as their Data in JSON (camelCase keys too);
 `-postgres-server-name`; `-oidc` with `-grafana-url`; `-domain-token-key`
-(with `-edge gateway` and `-platform-domain`); and `-network-policies`.
+(with `-edge gateway` and `-platform-domain`); `-network-policies`; and
+`-registry-pulls` and `-stores-security`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -139,7 +142,12 @@ which holds no objects without it, and changes the Applications that carry a
 policy in their chart's values (`cert-manager`, `external-secrets`,
 `victoria-metrics-k8s-stack`), the `argocd` Application (its patches) and the
 `infrared` Application; the operator leaves it out of its data while it is
-unset (`make verify` checks it).
+unset (`make verify` checks it). `.RegistryPulls` changes `zot-base`, the
+comments of `zot`'s Application, of the builder and of the builds README, and
+the `infrared` Application; `.StoresSecurity` changes SeaweedFS's Application,
+its PreSync hook and the `infrared` Application; without `.Stores` and
+`.Registry` each changes the `infrared` Application alone. The operator leaves
+both out of its data while they are unset (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -209,6 +217,8 @@ set, so a cluster without it renders the same file as before:
 | `.CloudIdentity` | `cloudIdentity: {gcpServiceAccount, aws: {roleARN}}`, or `aws: {hostNetwork: true}` or `aws: {webIdentity: true}` instead of `roleARN`; each part only when set, and nothing without `.CloudIdentity` |
 | `.Images` (operator, api, ui, runner, mcp, and the code index's `image`) | each component's `image: {tag, digest}`, only while `.InfraredChartVersion` is `.RunningChartVersion` (or that is absent) |
 | `.NetworkPolicies` | `tenancy.networkPolicies.enabled: true` |
+| `.RegistryPulls` | `tenancy.registryPulls.enabled: true` |
+| `.StoresSecurity` | `tenancy.storesSecurity.enabled: true` |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -658,9 +668,10 @@ every layer and manifest in SeaweedFS's bucket `registry`. Its Service
 `registry/zot` is a ClusterIP pinned to `.Registry`'s address, on its port, plain
 HTTP: each node mirrors that address to it (k3s's `registries.yaml`, written when
 the node is made, so the template never sets it), and anything in the cluster
-pulls without a login. Builds name the registry by that address, never by a
-name: go-containerregistry, which kpack and the buildpack lifecycle push with,
-falls back to plain HTTP only for a private address.
+pulls without a login, unless the install pulls by identity (below). Builds name
+the registry by that address, never by a name: go-containerregistry, which kpack
+and the buildpack lifecycle push with, falls back to plain HTTP only for a
+private address.
 
 | Application | What |
 |---|---|
@@ -691,12 +702,43 @@ pod and an API key does not. The pods carry `app.kubernetes.io/name: zot`, which
 the operator's network rule for publishing steps selects. Removing the `zot`
 Application removes Zot and nothing in the bucket.
 
-Two checks run against a cluster, never from CI:
+**Pulls by identity.** With `.RegistryPulls` (the Infrared chart's
+`tenancy.registryPulls.enabled`; infrared-docs-internal ADR 0066 D3, workspace
+TODO 473) no one reads the registry without a login, so no pod pulls another
+org's images. In `zot-base`, `"**"` grants neither anonymous nor default read,
+and `platform/**` gives read to every signed-in user: kpack's builder, which
+each org's builds run as the org's own user. The operator's rule for each org
+reads for others as `"**"` does, so for no one, and only the org's user reads
+`<org>/`. With Agent Substrate's test actors, anyone still reads
+`platform/substrate/`: atelet pulls an actor's image with no login (Substrate
+`ce05e5d` authenticates to `gcr.io` and `*.pkg.dev` alone), and the copies there
+are Substrate's two demo actors. Leave the test actors out of an install that
+pulls by identity (the chart's `substrate.testActors: false`) to keep even
+that closed.
+
+| Who pulls | With what |
+|---|---|
+| A zone's pods | The Secret `zot-pull`, the org's own user, which the operator writes into each of the org's zone namespaces on this cluster and lists on the namespace's `default` ServiceAccount: every pod made there without image pull secrets of its own pulls with it, a scaffolded zone's included. A pod that runs as another ServiceAccount, or names its own image pull secrets, lists `zot-pull` itself. |
+| A build's pods (`builds-<org>`, `builds`) | The org's push credential, as before: its builder ServiceAccount lists it among its image pull secrets, and it reads `platform/`. |
+| A publishing step | Its API key, the org's user, as before. Its agent holds no credential, so it reads nothing from the registry. |
+| atelet | No login: `platform/substrate/` only, with the test actors. |
+| The operator | `infrared`, which reads and deletes anywhere. |
+
+The nodes' mirror stays as it is: the kubelet hands each pull its pod's
+credential, and the registry answers an anonymous request with a challenge.
+Turning it on, the operator writes the zones' credentials at once, while
+`zot-base` still reads for anyone; turning it off, it keeps them until
+`zot-base` reads for anyone again.
+
+Three checks run against a cluster, never from CI:
 
 ```bash
 scripts/registry-check.sh <context> <org>    # D1, D2: <org> pushes only under <org>/, a copy outlives Zot's pod, and the admin's delete of it leaves the source's blobs
 scripts/registry-build-check.sh <context>    # D3: kpack pushes a whole build to the registry's address over plain HTTP, and a node runs it by digest
+scripts/registry-pulls-check.sh <context> <org> <another org>    # ADR 0066 D3: no anonymous read, each org reads only its own, and each zone pulls only its org's images
 ```
+
+Each reads the registry as `infrared` when it refuses anonymous reads.
 
 ### Agent Substrate
 
@@ -1008,6 +1050,46 @@ policies add up, so nothing here changes for it.
 from one of the org's zones: DNS and the internet answer, every platform
 service is refused, and two orgs' zones refuse each other both ways. It runs
 against a cluster, never from CI.
+
+### The stores' own security
+
+With `.StoresSecurity` (the Infrared chart's `tenancy.storesSecurity.enabled`;
+infrared-docs-internal ADR 0066 D3) SeaweedFS takes no caller it cannot
+identify, behind the network fence or not (which admits CloudNativePG and
+vmagent to the stores on every port):
+
+| Port | With `.StoresSecurity` |
+|---|---|
+| Filer HTTP 8888 | A token signed with `filer-read` or `filer-write` from `stores/seaweedfs-jwt`, as the S3 gateways sign theirs; no directory listing. `/healthz` and `/readyz` answer, and the filers are probed there. |
+| Filer, master, volume and S3 gRPC | Mutual TLS: the SeaweedFS chart's own CA and certificates (`global.seaweedfs.enableSecurity`), which cert-manager issues and renews in `stores`, and SeaweedFS reloads. |
+| Master HTTP 9333 | Off (`-disableHttp`): no assign, lookup, collection delete, grow or vacuum. `/cluster/status`, which the probes ask, stays. |
+| Volume HTTP 8080 | A write or a delete needs a token the master or a filer signed with `volume-write`. A read by file id stays open: SeaweedFS signs reads only without a filer. A file id holds a random 32-bit cookie, and no listing exists. |
+| S3 8333 | The S3 identities, as before. |
+
+The keys are generated in the cluster: the `seaweedfs` Application's PreSync
+hook makes `stores/seaweedfs-jwt` (`volume-write`, `filer-write`, `filer-read`)
+once, never replaces it and never prints it, and each server reads its own
+from its environment (`WEED_JWT_SIGNING_KEY`, `WEED_JWT_FILER_SIGNING_KEY`,
+`WEED_JWT_FILER_SIGNING_READ_KEY`). The chart's own key generation is off
+(`global.seaweedfs.securityConfig.jwtSigning`): it makes keys with `lookup`
+and `randAlphaNum`, new at every render under Argo CD, so its security config
+holds only the certificates' paths (`make verify` renders the chart twice and
+compares). The hook also waits for cert-manager's CRDs and webhook. Without
+cert-manager (`.Disabled`) only the tokens hold, and gRPC stays plain.
+
+Zot, Agent Substrate, the copies and the restore speak S3 with their
+identities, and change nothing. To rotate the keys, delete
+`stores/seaweedfs-jwt`, sync `seaweedfs`, and restart the master, volume, filer
+and S3 pods together. Turning it on over stores that already run rolls every
+server from plain to mutual TLS: expect the object store to refuse for a few
+minutes, so the registry's pulls of uncached images and pushes, Substrate's
+snapshots and a copy that falls then fail and are retried. An install that
+starts with it on has no such window.
+
+`scripts/stores-security-check.sh <context>` checks a running install from a
+pod in `stores`: the filer, master and volume servers refuse a caller without a
+token or a certificate, and the S3 gateway still serves the registry's bucket.
+It runs against a cluster, never from CI.
 
 ### Order on a fresh cluster
 

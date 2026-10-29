@@ -1,4 +1,6 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
+[[- $mtls := and .StoresSecurity $certManager -]]
 [[- if .Stores -]]
 # =============================================================================
 # Before SeaweedFS: its S3 keys, and the Postgres that holds its filer metadata.
@@ -9,6 +11,17 @@
 # answers, so the filers start against their store; with backups, also until
 # the store infrared-platform, which copies the backup keys, is Ready. On a fresh cluster every
 # Application syncs at once (README, "Order on a fresh cluster").
+[[- if .StoresSecurity ]]
+#
+# SeaweedFS runs under its own security (the Infrared chart's
+# tenancy.storesSecurity, infrared-docs-internal ADR 0066 D3), so the hook also
+# makes the Secret seaweedfs-jwt once, the same way: volume-write, filer-write
+# and filer-read, the keys its servers sign and check tokens with (seaweedfs.yaml
+# hands each to the servers that need it).
+[[- if $mtls ]] It waits for cert-manager too, whose
+# certificates carry SeaweedFS's mutual TLS: its CRDs and its webhook.
+[[- end ]]
+[[- end ]]
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
@@ -70,7 +83,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]][[ if .StoresSecurity ]], "seaweedfs-jwt"[[ end ]]]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -128,9 +141,13 @@ spec:
             - name: IDENTITIES
               value: "ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]"
             - name: WAIT_CRDS
-              value: "[[ if .Backup.Bucket ]]externalsecrets.external-secrets.io[[ end ]]"
+              value: "[[ if .Backup.Bucket ]]externalsecrets.external-secrets.io[[ end ]][[ if $mtls ]][[ if .Backup.Bucket ]] [[ end ]]certificates.cert-manager.io issuers.cert-manager.io[[ end ]]"
             - name: WAIT_SERVICES
-              value: "stores/postgres-rw"
+              value: "stores/postgres-rw[[ if $mtls ]] cert-manager/cert-manager-webhook[[ end ]]"
+[[- if .StoresSecurity ]]
+            - name: JWT_SECRET
+              value: seaweedfs-jwt
+[[- end ]]
             - name: WAIT_STORES
               value: "[[ if .Backup.Bucket ]]infrared-platform[[ end ]]"
           command:
@@ -164,6 +181,35 @@ spec:
               EOF
                 echo "created $secret"
               done
+[[- if .StoresSecurity ]]
+              # SeaweedFS's token keys, made once and never replaced: each server
+              # reads its own from the environment (WEED_JWT_*). Nothing prints a key.
+              if ! kubectl get secret "$JWT_SECRET" >/dev/null 2>&1; then
+                volume_write="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48)"
+                filer_write="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48)"
+                filer_read="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48)"
+                for key in "$volume_write" "$filer_write" "$filer_read"; do
+                  if [ "${#key}" -ne 48 ]; then
+                    echo "a generated key has the wrong length; not writing $JWT_SECRET" >&2
+                    exit 1
+                  fi
+                done
+                kubectl create -f - >/dev/null <<EOF
+              apiVersion: v1
+              kind: Secret
+              type: Opaque
+              metadata:
+                name: $JWT_SECRET
+              stringData:
+                volume-write: $volume_write
+                filer-write: $filer_write
+                filer-read: $filer_read
+              EOF
+                echo "created $JWT_SECRET"
+              else
+                echo "$JWT_SECRET exists; leaving it alone"
+              fi
+[[- end ]]
               # Each list is space-separated; an empty one waits for nothing.
               established() {
                 [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]

@@ -66,6 +66,11 @@ GRAFANA_URL ?=
 # NETWORK_POLICIES: true renders the network fence (as INFRARED_NETWORK_POLICIES;
 # infrared-docs-internal ADR 0066 D1), every platform namespace's ingress policy.
 NETWORK_POLICIES ?= false
+# REGISTRY_PULLS: true renders the registry reading for no one without a login
+# (as INFRARED_REGISTRY_PULLS); STORES_SECURITY: true renders SeaweedFS under its
+# own security (as INFRARED_STORES_SECURITY). infrared-docs-internal ADR 0066 D3.
+REGISTRY_PULLS  ?= false
+STORES_SECURITY ?= false
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -78,7 +83,8 @@ render:
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
 		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)' \
-		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)" -network-policies=$(NETWORK_POLICIES)
+		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)" -network-policies=$(NETWORK_POLICIES) \
+		-registry-pulls=$(REGISTRY_PULLS) -stores-security=$(STORES_SECURITY)
 
 ## verify: the gate CI runs
 verify:
