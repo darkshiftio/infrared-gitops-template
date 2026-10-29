@@ -2204,6 +2204,44 @@ else
   echo "skip: seaweedfs $sw_version could not be fetched; its render is not checked"
 fi
 
+# --- The rest of the tenancy (ADR 0066 D4, D5, D6, D10) ---------------------------
+# TenantPods and TenantQuotas (the operator's INFRARED_TENANT_PODS and
+# INFRARED_TENANT_QUOTAS, each one line of JSON as the chart's block takes it),
+# AdmissionPolicies, DenyLogging and ArgoCDRestrictDefaultProject: the operator
+# does all of it, so each changes only the infrared Application, which carries
+# it under tenancy for Argo CD's adoption to keep. With the stores and the
+# registry, the same.
+tenancy_pods='{"enabled":true,"placement":{"nodeSelector":{"infrared.darkshift.io/pool":"tenants"},"tolerations":[{"key":"infrared.darkshift.io/tenants","operator":"Equal","value":"true","effect":"NoSchedule"}],"runtimeClassName":"gvisor"}}'
+tenancy_quotas='{"enabled":true,"zones":{"cpu":"2","memory":"4Gi","storage":"10Gi","pods":20,"volumes":4},"builds":{"concurrency":2,"memory":"4Gi"}}'
+tenancy_want="$(jq -c -S -n --argjson p "$tenancy_pods" --argjson q "$tenancy_quotas" \
+  '{tenantPods: $p, quotas: $q, admissionPolicies: {enabled: true}, denyLogging: {enabled: true}, argoCD: {restrictDefaultProject: true}}')"
+"$work/render" -out "$work/tenancy" -cluster demo -flavor k3s -build-registry "" -tenant-pods "$tenancy_pods" -tenant-quotas "$tenancy_quotas" \
+  -admission-policies -deny-logging -argocd-restrict-default-project >/dev/null
+[ "$(d3_diff "$work/k3s" "$work/tenancy")" = "$infrared_app" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/tenancy/$infrared_app" | jq -c -S .)" = "$tenancy_want" ] \
+  && ok "tenancy: the five change only the infrared Application, which carries them under tenancy as the chart takes them" \
+  || bad "tenancy: differs from the plain k3s render in '$(d3_diff "$work/k3s" "$work/tenancy")', or the infrared Application carries $(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/tenancy/$infrared_app")"
+# From the operator's data, by its Go names, beside the fence and the stores:
+# one tenancy block, and nothing but the infrared Application changes.
+jq --arg p "$tenancy_pods" --arg q "$tenancy_quotas" \
+  '. + {NetworkPolicies: true, TenantPods: $p, TenantQuotas: $q, AdmissionPolicies: true, DenyLogging: true, ArgoCDRestrictDefaultProject: true}' \
+  "$work/substrate.json" >"$work/tenancy-data.json"
+jq '. + {NetworkPolicies: true}' "$work/substrate.json" >"$work/tenancy-fence.json"
+"$work/render" -out "$work/tenancy-fence" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/tenancy-fence.json" >/dev/null
+"$work/render" -out "$work/tenancy-data" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/tenancy-data.json" >/dev/null
+[ "$(d3_diff "$work/tenancy-fence" "$work/tenancy-data")" = "registry/clusters/demo-pl/components/infrared.yaml" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/tenancy-data/registry/clusters/demo-pl/components/infrared.yaml" | jq -c -S .)" \
+    = "$(jq -c -S '. + {networkPolicies: {enabled: true}}' <<<"$tenancy_want")" ] \
+  && ok "tenancy-data: from the operator's data, beside the fence and the stores, one tenancy block in the infrared Application alone" \
+  || bad "tenancy-data: differs from the fence alone in '$(d3_diff "$work/tenancy-fence" "$work/tenancy-data")', or the tenancy block is $(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/tenancy-data/registry/clusters/demo-pl/components/infrared.yaml")"
+for bad_carry in '{"placement":{}}' '{"enabled":true,"resources":{}}' 'not json'; do
+  if "$work/render" -out "$work/tenancy-bad" -cluster demo -flavor k3s -build-registry "" -tenant-pods "$bad_carry" >/dev/null 2>&1; then
+    bad "tenancy: hack/render took TenantPods $bad_carry"
+  else ok "tenancy: hack/render refuses TenantPods $bad_carry"; fi
+done
+if kubeconform -strict -ignore-missing-schemas -summary "$work/tenancy/$infrared_app" >/dev/null; then ok "tenancy: the infrared Application passes kubeconform"
+else bad "tenancy: the infrared Application fails kubeconform"; fi
+
 # --- Grafana's sign-in through Infrared (ADR 0053) ---------------------------------
 # With OIDC, GrafanaURL and InfraredHost (variant oidc, from a -data file as the
 # operator passes them), Grafana signs people in through Infrared: the browser

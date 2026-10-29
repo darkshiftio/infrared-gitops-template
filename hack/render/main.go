@@ -242,6 +242,35 @@ type Data struct {
 	// "The stores' own security"). False renders as before the field existed,
 	// and an operator leaves it out of the data.
 	StoresSecurity bool `json:"StoresSecurity,omitempty"`
+	// TenantPods is the operator's INFRARED_TENANT_PODS, the Infrared chart's
+	// tenancy.tenantPods, as one line of JSON ({"enabled": true, "placement":
+	// {...}}): a tenant's zone and build pods carry no Kubernetes token, and a
+	// zone's pods the install's placement (infrared-docs-internal ADR 0066 D4,
+	// D5). The operator does it all; the infrared Application carries the
+	// setting. Empty renders as before the field existed, and an operator
+	// leaves it out of the data.
+	TenantPods string `json:"TenantPods,omitempty"`
+	// TenantQuotas is the operator's INFRARED_TENANT_QUOTAS, the Infrared
+	// chart's tenancy.quotas, as one line of JSON ({"enabled": true, "zones":
+	// {...}, "builds": {...}}): a tenant org's quotas (ADR 0066 D4), which the
+	// infrared Application carries. Empty renders as before.
+	TenantQuotas string `json:"TenantQuotas,omitempty"`
+	// AdmissionPolicies is the operator's INFRARED_ADMISSION_POLICIES, the
+	// Infrared chart's tenancy.admissionPolicies.enabled: the operator applies
+	// ValidatingAdmissionPolicies on tenants' namespaces (ADR 0066 D6), and the
+	// infrared Application carries the setting. False renders as before.
+	AdmissionPolicies bool `json:"AdmissionPolicies,omitempty"`
+	// DenyLogging is the operator's INFRARED_DENY_LOGGING, the Infrared chart's
+	// tenancy.denyLogging.enabled: GKE logs the denies of tenants' namespaces
+	// (ADR 0066 D10), and the infrared Application carries the setting. False
+	// renders as before.
+	DenyLogging bool `json:"DenyLogging,omitempty"`
+	// ArgoCDRestrictDefaultProject is the operator's
+	// INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT, the Infrared chart's
+	// tenancy.argoCD.restrictDefaultProject: Argo CD's default project takes
+	// the platform org's gitops repo alone (ADR 0066 D10), and the infrared
+	// Application carries the setting. False renders as before.
+	ArgoCDRestrictDefaultProject bool `json:"ArgoCDRestrictDefaultProject,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -583,6 +612,11 @@ func main() {
 	flag.BoolVar(&d.NetworkPolicies, "network-policies", false, "NetworkPolicies: every platform namespace's ingress NetworkPolicy, the network fence (INFRARED_NETWORK_POLICIES)")
 	flag.BoolVar(&d.RegistryPulls, "registry-pulls", false, "RegistryPulls: the registry reads for no one without a login, and each zone pulls as its org (INFRARED_REGISTRY_PULLS)")
 	flag.BoolVar(&d.StoresSecurity, "stores-security", false, "StoresSecurity: SeaweedFS under its own security, mutual TLS and signed tokens (INFRARED_STORES_SECURITY)")
+	flag.StringVar(&d.TenantPods, "tenant-pods", "", `TenantPods: the chart's tenancy.tenantPods as one line of JSON, {"enabled":true,"placement":{...}} (INFRARED_TENANT_PODS; empty for none)`)
+	flag.StringVar(&d.TenantQuotas, "tenant-quotas", "", `TenantQuotas: the chart's tenancy.quotas as one line of JSON, {"enabled":true,"zones":{...},"builds":{...}} (INFRARED_TENANT_QUOTAS; empty for none)`)
+	flag.BoolVar(&d.AdmissionPolicies, "admission-policies", false, "AdmissionPolicies: the operator's admission policies on tenants' namespaces (INFRARED_ADMISSION_POLICIES)")
+	flag.BoolVar(&d.DenyLogging, "deny-logging", false, "DenyLogging: GKE logs the denies of tenants' namespaces (INFRARED_DENY_LOGGING)")
+	flag.BoolVar(&d.ArgoCDRestrictDefaultProject, "argocd-restrict-default-project", false, "ArgoCDRestrictDefaultProject: Argo CD's default project takes the platform's root alone (INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -666,6 +700,13 @@ func mergeDataFile(d *Data, path string) error {
 		"grafana-url":           func() { d.GrafanaURL = explicit.GrafanaURL },
 		"registry-pulls":        func() { d.RegistryPulls = explicit.RegistryPulls },
 		"stores-security":       func() { d.StoresSecurity = explicit.StoresSecurity },
+		"tenant-pods":           func() { d.TenantPods = explicit.TenantPods },
+		"tenant-quotas":         func() { d.TenantQuotas = explicit.TenantQuotas },
+		"admission-policies":    func() { d.AdmissionPolicies = explicit.AdmissionPolicies },
+		"deny-logging":          func() { d.DenyLogging = explicit.DenyLogging },
+		"argocd-restrict-default-project": func() {
+			d.ArgoCDRestrictDefaultProject = explicit.ArgoCDRestrictDefaultProject
+		},
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -741,7 +782,30 @@ func validate(d Data) error {
 	if err := validateGrafanaURL(d.GrafanaURL); err != nil {
 		errs = append(errs, err)
 	}
+	errs = append(errs, validateTenancyCarry("TenantPods", d.TenantPods, "placement"),
+		validateTenancyCarry("TenantQuotas", d.TenantQuotas, "zones", "builds"))
 	return errors.Join(errs...)
+}
+
+// validateTenancyCarry checks one of the tenancy's settings the infrared
+// Application carries as a line of JSON (TenantPods, TenantQuotas): empty, or
+// one JSON object on one line with "enabled": true and only the keys the
+// chart's block takes, so it lands in the Application's values as the chart
+// reads it.
+func validateTenancyCarry(name, v string, keys ...string) error {
+	if v == "" {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if strings.ContainsAny(v, "\n\r") || json.Unmarshal([]byte(v), &m) != nil || string(m["enabled"]) != "true" {
+		return fmt.Errorf(`%s must be one line of JSON, {"enabled":true, ...}, as the operator carries it, got %q`, name, v)
+	}
+	for k := range m {
+		if k != "enabled" && !slices.Contains(keys, k) {
+			return fmt.Errorf("%s takes enabled and %s alone, got %q", name, strings.Join(keys, ", "), k)
+		}
+	}
+	return nil
 }
 
 // validateDomainTokenKey checks DomainTokenKey: empty, or a key of a Secret,

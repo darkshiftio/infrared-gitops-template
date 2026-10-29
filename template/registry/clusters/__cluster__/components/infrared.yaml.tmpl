@@ -220,7 +220,7 @@ spec:
             singleNode: true
 [[- end ]]
 [[- end ]]
-[[- if or .NetworkPolicies .RegistryPulls .StoresSecurity ]]
+[[- if or .NetworkPolicies .RegistryPulls .StoresSecurity .TenantPods .TenantQuotas .AdmissionPolicies .DenyLogging .ArgoCDRestrictDefaultProject ]]
 [[- if .NetworkPolicies ]]
           # The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal
           # ADR 0066 D1): the operator fences every org's namespaces, and this
@@ -235,6 +235,15 @@ spec:
           # The stores' own security (INFRARED_STORES_SECURITY, ADR 0066 D3):
           # SeaweedFS under mutual TLS and signed tokens.
 [[- end ]]
+[[- if or .TenantPods .TenantQuotas .AdmissionPolicies .DenyLogging .ArgoCDRestrictDefaultProject ]]
+          # The rest of the tenancy (ADR 0066 D4, D5, D6, D10), which the
+          # operator does: tenants' pods without a token and on their placement
+          # (INFRARED_TENANT_PODS), their quotas (INFRARED_TENANT_QUOTAS), the
+          # admission policies on their namespaces (INFRARED_ADMISSION_POLICIES),
+          # GKE's logging of their denies (INFRARED_DENY_LOGGING) and Argo CD's
+          # default project kept to the platform's root
+          # (INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT).
+[[- end ]]
           tenancy:
 [[- if .NetworkPolicies ]]
             networkPolicies:
@@ -247,6 +256,24 @@ spec:
 [[- if .StoresSecurity ]]
             storesSecurity:
               enabled: true
+[[- end ]]
+[[- if .TenantPods ]]
+            tenantPods: [[ .TenantPods ]]
+[[- end ]]
+[[- if .TenantQuotas ]]
+            quotas: [[ .TenantQuotas ]]
+[[- end ]]
+[[- if .AdmissionPolicies ]]
+            admissionPolicies:
+              enabled: true
+[[- end ]]
+[[- if .DenyLogging ]]
+            denyLogging:
+              enabled: true
+[[- end ]]
+[[- if .ArgoCDRestrictDefaultProject ]]
+            argoCD:
+              restrictDefaultProject: true
 [[- end ]]
 [[- end ]]
 [[- $c := .Copies ]]

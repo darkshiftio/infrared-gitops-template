@@ -71,6 +71,17 @@ NETWORK_POLICIES ?= false
 # own security (as INFRARED_STORES_SECURITY). infrared-docs-internal ADR 0066 D3.
 REGISTRY_PULLS  ?= false
 STORES_SECURITY ?= false
+# The rest of the tenancy, which the operator does and the infrared Application
+# carries (infrared-docs-internal ADR 0066 D4, D5, D6, D10): TENANT_PODS and
+# TENANT_QUOTAS are the chart's tenancy.tenantPods and tenancy.quotas as one line
+# of JSON with "enabled":true (as INFRARED_TENANT_PODS and INFRARED_TENANT_QUOTAS),
+# empty for none; the three switches as INFRARED_ADMISSION_POLICIES,
+# INFRARED_DENY_LOGGING and INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT.
+TENANT_PODS                     ?=
+TENANT_QUOTAS                   ?=
+ADMISSION_POLICIES              ?= false
+DENY_LOGGING                    ?= false
+ARGOCD_RESTRICT_DEFAULT_PROJECT ?= false
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -84,7 +95,10 @@ render:
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
 		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)' \
 		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)" -network-policies=$(NETWORK_POLICIES) \
-		-registry-pulls=$(REGISTRY_PULLS) -stores-security=$(STORES_SECURITY)
+		-registry-pulls=$(REGISTRY_PULLS) -stores-security=$(STORES_SECURITY) \
+		-tenant-pods '$(TENANT_PODS)' -tenant-quotas '$(TENANT_QUOTAS)' \
+		-admission-policies=$(ADMISSION_POLICIES) -deny-logging=$(DENY_LOGGING) \
+		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT)
 
 ## verify: the gate CI runs
 verify:
