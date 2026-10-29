@@ -75,6 +75,15 @@ spec:
       ports:
         - protocol: TCP
           port: 10443
+    # cloudflared, in this namespace: the tunnel's one in-cluster hop
+    # (infrared-docs-internal ADR 0064). No such pod runs without the tunnel.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 10443
     # vmagent: Envoy's metrics, every zone's requests (VMPodScrape edge-envoy).
     - from:
         - namespaceSelector:

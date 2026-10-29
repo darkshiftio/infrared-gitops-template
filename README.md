@@ -979,7 +979,7 @@ for the platform.
 | Namespace | Policy (component) | Admits |
 |---|---|---|
 | `envoy-gateway-system`, but Envoy's pods | `infrared-fence` (`edge`) | the platform; the control plane on Envoy Gateway's topology injector webhook, 9443 |
-| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator |
+| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); cloudflared on 10443, from this namespace (the tunnel's one in-cluster hop, ADR 0064; no such pod runs without it); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator and cloudflared |
 | `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform |
 | `external-dns` | `infrared-fence` (`external-dns`) | the platform |
 | `cert-manager`, `external-secrets` | `infrared-fence` (their charts' `extraObjects`) | the platform; the control plane on each webhook's port, 10250 |
