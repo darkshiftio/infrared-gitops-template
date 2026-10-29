@@ -219,6 +219,14 @@ type Data struct {
 	// <GrafanaURL>/login/generic_oauth. Empty renders as before the field
 	// existed.
 	GrafanaURL string `json:"GrafanaURL,omitempty"`
+	// NetworkPolicies is the operator's INFRARED_NETWORK_POLICIES, the
+	// Infrared chart's tenancy.networkPolicies.enabled: every platform
+	// namespace gets its ingress NetworkPolicy, Argo CD's own policies admit
+	// no org's namespace, and the infrared Application carries the setting
+	// (infrared-docs-internal ADR 0066 D1; see "The network fence"). False
+	// renders as before the field existed, and an operator leaves it out of
+	// the data.
+	NetworkPolicies bool `json:"NetworkPolicies,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -557,6 +565,7 @@ func main() {
 		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
 	flag.BoolVar(&d.OIDC, "oidc", false, "OIDC: Infrared is the OpenID Connect provider of the install's own tools (INFRARED_OIDC); with -grafana-url and -infrared-host, Grafana signs people in through it")
 	flag.StringVar(&d.GrafanaURL, "grafana-url", "", "GrafanaURL: Grafana's address in a browser, http(s) with no trailing slash (INFRARED_OIDC_GRAFANA_URL; empty for none)")
+	flag.BoolVar(&d.NetworkPolicies, "network-policies", false, "NetworkPolicies: every platform namespace's ingress NetworkPolicy, the network fence (INFRARED_NETWORK_POLICIES)")
 	flag.Parse()
 
 	if dataFile != "" {

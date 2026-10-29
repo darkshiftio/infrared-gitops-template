@@ -1,0 +1,115 @@
+[[- $oci := true ]][[ range .Disabled ]][[ if eq . "origin-ca-issuer" ]][[ $oci = false ]][[ end ]][[ end ]]
+[[- if and .NetworkPolicies (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+# =============================================================================
+# The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
+# D1; README "The network fence"): the edge's namespace and, with it,
+# origin-ca-issuer's. Envoy's own pods admit Cloudflare on the listeners
+# (through the nodes' hostPorts, where the firewall admits Cloudflare alone;
+# an ipBlock never matches a pod or a node on GKE Dataplane V2), Infrared's
+# operator (its HTTPS check of a zone's addresses goes to the Service edge, on
+# 443), and vmagent on the metrics port. Every other pod here admits the
+# platform, and the control plane on Envoy Gateway's topology injector.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-6"
+spec:
+  podSelector:
+    matchExpressions:
+      - key: gateway.envoyproxy.io/owning-gateway-name
+        operator: DoesNotExist
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+    # Envoy Gateway's topology injector webhook: from the control plane, whatever path it takes.
+    - ports:
+        - protocol: TCP
+          port: 9443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-edge
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-6"
+spec:
+  podSelector:
+    matchLabels:
+      gateway.envoyproxy.io/owning-gateway-name: edge
+      gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+  policyTypes:
+    - Ingress
+  ingress:
+    # Cloudflare, through the nodes' hostPorts 80 and 443 (Envoy's 10080 and
+    # 10443): the world, which on Dataplane V2 is never a pod or a node.
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 10080
+        - protocol: TCP
+          port: 10443
+    # Infrared's operator: its HTTPS check of each zone's addresses.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: infrared
+              app.kubernetes.io/component: operator
+      ports:
+        - protocol: TCP
+          port: 10443
+    # vmagent: Envoy's metrics, every zone's requests (VMPodScrape edge-envoy).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vmagent
+      ports:
+        - protocol: TCP
+          port: 19001
+[[- if $oci ]]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: origin-ca-issuer
+  annotations:
+    argocd.argoproj.io/sync-wave: "-6"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+[[- end ]]
+[[- else -]]
+# The network fence is off (INFRARED_NETWORK_POLICIES), or the edge is not
+# rendered here: this file holds no objects.
+[[- end ]]

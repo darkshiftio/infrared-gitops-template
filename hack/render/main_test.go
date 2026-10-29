@@ -927,3 +927,22 @@ func TestDomainTokenKey(t *testing.T) {
 		}
 	}
 }
+
+// The network fence (ADR 0066 D1): NetworkPolicies loads from the operator's
+// Data by its Go name, and absent is off, as an operator from before it
+// leaves it out.
+func TestNetworkPoliciesField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string]bool{
+		`{"clusterName": "c1", "NetworkPolicies": true}`: true,
+		`{"clusterName": "c1"}`:                          false,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.NetworkPolicies != want {
+			t.Errorf("%s: loaded NetworkPolicies %t, %v; want %t", body, d.NetworkPolicies, err, want)
+		}
+	}
+}

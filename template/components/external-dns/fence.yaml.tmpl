@@ -1,0 +1,30 @@
+[[- if and .NetworkPolicies (eq .Edge "gateway") -]]
+# =============================================================================
+# The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
+# D1; README "The network fence"): external-dns's namespace, which serves
+# nothing but its metrics.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrared-fence
+  namespace: external-dns
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The platform: every namespace that is neither an org's nor a zone.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: infrared.darkshift.io/org
+                operator: DoesNotExist
+              - key: infrared.darkshift.io/zone
+                operator: DoesNotExist
+[[- else -]]
+# The network fence is off (INFRARED_NETWORK_POLICIES), or external-dns is not
+# rendered here: this file holds no objects.
+[[- end ]]
