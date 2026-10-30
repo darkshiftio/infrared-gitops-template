@@ -1,4 +1,9 @@
-[[- if and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
+[[- if and (eq .Edge "gateway") .TunnelID .PlatformDomain .DomainTokenKey -]]
+# external-dns-domain does not run behind a Cloudflare Tunnel (the
+# Installation's spec.tunnel, infrared-docs-internal ADR 0064): the platform
+# domain's wildcard is a proxied CNAME to the tunnel, made once by a person.
+# This component holds no objects and no Application points at it.
+[[- else if and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
 # The second source of the `external-dns-domain` Application (wave 12): the
 # platform domain's own Cloudflare token, copied from the platform's tokens,
 # and the hook that waits for them. Every object is in the namespace
