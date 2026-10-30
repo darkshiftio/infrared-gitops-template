@@ -2,6 +2,11 @@
 [[- if not $on -]]
 # external-dns is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
+[[- else if and (eq .Edge "gateway") .TunnelID -]]
+# external-dns is left out behind a Cloudflare Tunnel (the Installation's
+# spec.tunnel, infrared-docs-internal ADR 0064): the edge's names are proxied
+# CNAMEs to the tunnel, made once by a person, so nothing publishes them and
+# no Cloudflare token that writes DNS is copied. This file holds no objects.
 [[- else if eq .Edge "gateway" -]]
 # external-dns, on Cloudflare: the edge's DNS records, proxied. Wave 12.
 #

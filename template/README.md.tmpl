@@ -4,7 +4,8 @@
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
-[[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
+[[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey (not $tunnel) -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -31,7 +32,9 @@ components/
 [[- if $codeIndex ]]
   code-index/              Infrared's code index: Zoekt and the code service, the cache on the pod's own disk
 [[- end ]]
-[[- if eq .Edge "gateway" ]]
+[[- if $tunnel ]]
+  edge/                    the Gateway, its certificate from a certificate authority inside the cluster, cloudflared and the edge's routes
+[[- else if eq .Edge "gateway" ]]
   edge/                    the Gateway, its origin certificate[[ if $split ]]s, one for each Cloudflare zone,[[ end ]] and the edge's routes
   external-dns/            external-dns's Cloudflare token, copied from the platform's tokens
 [[- if $split ]]
@@ -94,17 +97,21 @@ products/                  yours: one directory per product (see "Products")
 [[- if not (contains " envoy-gateway " $disabled) ]]
 | 11 | `envoy-gateway` | Envoy Gateway, the edge's controller, and its CRDs |
 [[- end ]]
-[[- if not (contains " origin-ca-issuer " $disabled) ]]
+[[- if and (not $tunnel) (not (contains " origin-ca-issuer " $disabled)) ]]
 | 11 | `origin-ca-issuer` | Cloudflare's origin issuer, for the edge's certificate |
 [[- end ]]
-[[- if not (contains " external-dns " $disabled) ]]
+[[- if and (not $tunnel) (not (contains " external-dns " $disabled)) ]]
 | 12 | `external-dns` | the edge's DNS records in Cloudflare[[ if $split ]] outside the platform domain's own zone, Infrared's name among them[[ end ]], proxied, owned by `[[ .ClusterName ]]` |
 [[- if and $split (not (contains " external-dns-domain " $disabled)) ]]
 | 12 | `external-dns-domain` | the platform domain's records, `*.[[ .PlatformDomain ]]` and `edge.[[ .PlatformDomain ]]`, in its own Cloudflare zone with that zone's own token, proxied, owned by `[[ .ClusterName ]]` |
 [[- end ]]
 [[- end ]]
 [[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
+[[- if $tunnel ]]
+| 13 | `edge` | Gateway `edge` behind the Cloudflare Tunnel `[[ .TunnelID ]]`: cloudflared, the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+[[- else ]]
 | 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+[[- end ]]
 [[- end ]]
 [[- end ]]
 [[- if not (contains " infisical " $disabled) ]]
@@ -183,7 +190,7 @@ Every Application here carries the label
 ## Getting in
 [[ if and (eq .Edge "gateway") .InfraredHost ]]
 Infrared answers at **https://[[ .InfraredHost ]]**, through Cloudflare's
-proxy.[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
+proxy[[ if $tunnel ]] and the cluster's Cloudflare Tunnel[[ end ]].[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
 Everything else is reached by port-forward.
 [[- else ]]
 Everything is reached by port-forward; nothing is exposed.
