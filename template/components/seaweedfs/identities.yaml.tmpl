@@ -1,4 +1,6 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
+[[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
+[[- $mtls := and .StoresSecurity $certManager -]]
 [[- if .Stores -]]
 # =============================================================================
 # SeaweedFS's S3 identities: who may do what, in which bucket.
@@ -20,8 +22,9 @@
 #                   back (stores-restore), while the restore lasts
 [[- end ]]
 #
-# No identity is an administrator. The buckets are made by the chart's bucket
-# hook, with weed shell, which needs no S3 key.
+# No identity is an administrator. The buckets are made [[ if $mtls ]]by the PostSync Job
+# seaweedfs-buckets (prepare.yaml), with weed shell, which needs no S3 key.[[ else ]]by the chart's bucket
+# hook, with weed shell, which needs no S3 key.[[ end ]]
 # =============================================================================
 apiVersion: v1
 kind: Secret

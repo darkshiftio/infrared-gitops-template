@@ -57,6 +57,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.CustomHostnames` | `false` or `true` | the Installation's `spec.previews.customHostnames`, in gateway mode only: addresses under an org's own domains are Cloudflare for SaaS custom hostnames, whose origin certificates come from Let's Encrypt over HTTP-01 (Issuer `letsencrypt-http`, cert-manager's Gateway API support) |
 | `.ACMEEmail` | `` or `alerts@example.com` | the Installation's `spec.previews.acmeEmail`, Let's Encrypt's contact for those certificates; empty registers without one |
 | `.DomainTokenKey` | absent or ``, `cloudflare-domain-api-token` | the Installation's `spec.previews.domainTokenKey`, in gateway mode with a `.PlatformDomain` only: the key of the Secret `infrared-platform-tokens` that holds a Cloudflare token for `.PlatformDomain`'s zone, which is not `.InfraredHost`'s (a hosted plane's tenants' domain, infrared-docs-internal ADR 0063). The edge then serves `*.<PlatformDomain>` with a certificate, an issuer and an external-dns of their own on that token (see "The platform domain on a token of its own"); empty, one token serves every name, as before |
+| `.TunnelID` | absent or ``, `6ff42ae2-765d-4adf-8112-31c55c1551ef` | the Installation's `spec.tunnel.id`, in gateway mode only: the UUID, lower case, of the Cloudflare Tunnel the edge is reached through (infrared-docs-internal ADR 0064). The edge then binds no node's ports, runs cloudflared beside Envoy, gives the Gateway a certificate from a certificate authority inside the cluster, and leaves external-dns, external-dns-domain and Cloudflare's origin issuer out, so `.DomainTokenKey` is not read (see "Behind a Cloudflare Tunnel"); empty, the edge is on the nodes' own ports, as before |
+| `.TunnelCredentialsKey` | absent or ``, `cloudflare-tunnel-credentials` | the Installation's `spec.tunnel.credentialsKey`, with `.TunnelID`: the key of the Secret `infrared-platform-tokens` that holds the tunnel's credentials file, which cloudflared runs it with; empty is `cloudflare-tunnel-credentials` |
 | `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
 | `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`, and `code-index`, which the chart hands on only with `codeIndex.enabled` (see "The code index"); empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
@@ -98,8 +100,10 @@ array, exactly as the operator's environment carries them, `-forge` with
 `INFRARED_REGISTRY_RETENTION` carries it (camelCase keys); `-copies`,
 `-postgres-archive` and `-restore` as their Data in JSON (camelCase keys too);
 `-postgres-server-name`; `-oidc` with `-grafana-url`; `-domain-token-key`
-(with `-edge gateway` and `-platform-domain`); `-network-policies`; and
-`-registry-pulls` and `-stores-security`.
+(with `-edge gateway` and `-platform-domain`); `-tunnel-id` with
+`-tunnel-credentials-key` (with `-edge gateway`; the key's default is
+`cloudflare-tunnel-credentials`); `-network-policies`; and `-registry-pulls`
+and `-stores-security`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -107,8 +111,9 @@ rendered before the field existed, with one exception, decided on 2026-10-06:
 backup bucket turned on by itself before (the Barman Cloud plugin and its
 certificates, the Cluster's WAL archiver, `postgres/backup.yaml`, and the
 waits for them); with it `true`, those files render as they did. Only `.Edge`, `.Stores`, `.Disabled`,
-`.Forge`, `.Registry`, `.SubstrateCapable` and, on a gateway edge with a
-`.PlatformDomain`, `.DomainTokenKey` turn anything on or off: a Traefik
+`.Forge`, `.Registry`, `.SubstrateCapable`, on a gateway edge with a
+`.PlatformDomain` `.DomainTokenKey`, and on a gateway edge `.TunnelID` turn
+anything on or off: a Traefik
 cluster that carries `spec.previews` by hand, on any cloud, renders the same
 files as one without (`make verify` checks it). A `.Backup` without the stores
 changes only what the `infrared` Application carries (see "The install's
@@ -140,19 +145,26 @@ operator leaves `.OIDC` and `.GrafanaURL` out of its data while they are unset.
 `external-dns-domain`, and changes the README and the `infrared` Application;
 `hack/render` refuses it without `.Edge` `gateway` and a `.PlatformDomain`,
 and the operator leaves it out of its data while it is unset (`make verify`
-checks it). `.NetworkPolicies` adds a `fence.yaml` to the components that make
-a platform namespace (`builds`, `edge`, `external-dns`, `postgres`,
-`substrate`, `substrate-actors`, `substrate-podcert`, `telemetry`), each of
-which holds no objects without it, and changes the Applications that carry a
-policy in their chart's values (`cert-manager`, `external-secrets`,
-`victoria-metrics-k8s-stack`), the `argocd` Application (its patches) and the
-`infrared` Application; the operator leaves it out of its data while it is
-unset (`make verify` checks it). `.RegistryPulls` changes `zot-base`, the
-comments of `zot`'s Application, of the builder and of the builds README, and
-the `infrared` Application; `.StoresSecurity` changes SeaweedFS's Application,
-its PreSync hook and the `infrared` Application; without `.Stores` and
-`.Registry` each changes the `infrared` Application alone. The operator leaves
-both out of its data while they are unset (`make verify` checks it).
+checks it). `.TunnelID` changes only the edge (its Envoy, certificate, wait,
+routes' comments and cloudflared), the files of what it leaves out
+(external-dns, external-dns-domain and the origin issuer, which then hold no
+objects), the Envoy Gateway Application's comment, the store, the README and
+the `infrared` Application; `hack/render` refuses it without `.Edge`
+`gateway`, and the operator leaves both tunnel fields out of its data while
+the tunnel is unset (`make verify` checks it). `.NetworkPolicies` adds a
+`fence.yaml` to the components that make a platform namespace (`builds`,
+`edge`, `external-dns`, `postgres`, `substrate`, `substrate-actors`,
+`substrate-podcert`, `telemetry`), each of which holds no objects without
+it, and changes the Applications that carry a policy in their chart's
+values (`cert-manager`, `external-secrets`, `victoria-metrics-k8s-stack`),
+the `argocd` Application (its patches) and the `infrared` Application; the
+operator leaves it out of its data while it is unset (`make verify` checks
+it). `.RegistryPulls` changes `zot-base`, the comments of `zot`'s
+Application, of the builder and of the builds README, and the `infrared`
+Application; `.StoresSecurity` changes SeaweedFS's Application, its PreSync
+hook and the `infrared` Application; without `.Stores` and `.Registry` each
+changes the `infrared` Application alone. The operator leaves both out of
+its data while they are unset (`make verify` checks it).
 `.TenantPods`, `.TenantQuotas`, `.AdmissionPolicies`, `.DenyLogging` and
 `.ArgoCDRestrictDefaultProject` change the `infrared` Application alone, with or
 without the stores and the registry: the operator does all of it. It leaves
@@ -211,6 +223,7 @@ set, so a cluster without it renders the same file as before:
 | `.ImageRegistry`, `.Images` | `image.registry`, each `<component>.image` (see "Images") |
 | `.Edge` `gateway` | `installation.edge: gateway` |
 | `.PlatformDomain` and `.InfraredHost`, in gateway mode | `installation.previews.domain`, and `installation.previews.signInURL: https://<InfraredHost>`; with `.DomainTokenKey`, `installation.previews.domainTokenKey` too |
+| `.TunnelID`, in gateway mode | `installation.tunnel: {id, credentialsKey}`, the key `.TunnelCredentialsKey` or `cloudflare-tunnel-credentials`; its credentials stay in `infrared-platform-tokens` |
 | `.Stores` | `stores.enabled: true` |
 | `.StoresSingleNode`, with `.Stores` | `stores.singleNode: true` |
 | `.Backup.Bucket` (with its `.Endpoint`, `.Region` and `.Prefix` when set) | `backup` (`bucket`, `endpoint`, `region`, `prefix`) |
@@ -282,10 +295,10 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
 | 11 | `platform-tokens` (gateway, backups, Substrate's pull secret, or the code index) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
 | 11 | `envoy-gateway` (gateway only) | `docker.io/envoyproxy` `gateway-crds-helm` (its own CRDs) and `gateway-helm` | v1.9.2 |
-| 11 | `origin-ca-issuer` (gateway only) | `ghcr.io/cloudflare/origin-ca-issuer-charts` `origin-ca-issuer`, CRDs from https://github.com/cloudflare/origin-ca-issuer `deploy/crds` | chart 0.6.10, v0.15.0 |
-| 12 | `external-dns` (gateway only) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
-| 12 | `external-dns-domain` (gateway, with `.DomainTokenKey`) | the same chart as `external-dns`, release `external-dns-domain` in the namespace `external-dns`, + `components/external-dns-domain` | 1.22.0 (v0.22.0) |
-| 13 | `edge` (gateway, with a name) | `components/edge` | — |
+| 11 | `origin-ca-issuer` (gateway only, without a tunnel) | `ghcr.io/cloudflare/origin-ca-issuer-charts` `origin-ca-issuer`, CRDs from https://github.com/cloudflare/origin-ca-issuer `deploy/crds` | chart 0.6.10, v0.15.0 |
+| 12 | `external-dns` (gateway only, without a tunnel) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
+| 12 | `external-dns-domain` (gateway, with `.DomainTokenKey`, without a tunnel) | the same chart as `external-dns`, release `external-dns-domain` in the namespace `external-dns`, + `components/external-dns-domain` | 1.22.0 (v0.22.0) |
+| 13 | `edge` (gateway, with a name) | `components/edge`; with `.TunnelID` cloudflared too (see "Behind a Cloudflare Tunnel") | behind a tunnel, `docker.io/cloudflare/cloudflared` 2026.10.5, by digest |
 | 15 | `infisical` | cloudsmith `infisical-standalone` + `components/infisical` | 1.11.0 |
 | 16 | `cloudnative-pg` (Stores only) | https://cloudnative-pg.github.io/charts `cloudnative-pg`, with a backup bucket and the WAL archive (`.PostgresArchive.Enabled`) also `plugin-barman-cloud` + `components/cloudnative-pg` | chart 0.29.1 (CloudNativePG 1.30.1), chart 0.8.1 (Barman Cloud plugin 0.15.1), by digest |
 | 17 | `postgres` (Stores only) | `components/postgres` | PostgreSQL 18.6, by digest |
@@ -433,10 +446,10 @@ it renders to a comment only otherwise.
 |---|---|
 | `platform-tokens` | ClusterSecretStore `infrared-platform` (Kubernetes provider) reading the Secret `infrared-platform-tokens` in `.InfraredNamespace`, which the Infrared chart keeps, as ServiceAccount `platform-tokens-reader` (get on that one Secret). `conditions` limit it to the namespaces below. With Agent Substrate and an `.ImagePullSecret`, it also reads that Secret, for Substrate's namespaces (see "Agent Substrate"), and renders even without a Gateway; so it does with the code index, for whose namespace it copies the install's record and credential (see "The code index"). |
 | `envoy-gateway` | Envoy Gateway's CRDs and controller. The Gateway API CRDs are the cluster's (k3s ships them) and are never installed here. |
-| `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. |
-| `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. |
+| `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. Left out behind a tunnel. |
+| `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. Left out behind a tunnel. |
 | `external-dns-domain` | Only with `.DomainTokenKey`. The same chart, version and values as `external-dns` on the platform domain's own token: release `external-dns-domain` in the namespace `external-dns`, its token from the ExternalSecret `external-dns/cloudflare-domain-api-token` (wave -1, after a PreSync wait for the store). See "The platform domain on a token of its own". Left out with `external-dns`, or by its own name. |
-| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect`, HTTPRoute `edge-name` (with `.PlatformDomain`) and HTTPRoute `.InfraredNamespace`/`infrared`. Envoy's Service is named `edge`. With `.DomainTokenKey` also the ExternalSecret `envoy-gateway-system/cloudflare-domain-api-token`, the OriginIssuer `cloudflare-origin-domain` and the Certificate `edge-domain` (Secret `edge-domain-tls`), and `edge` then holds `.InfraredHost` alone. In waves: the tokens' copies (-5), the issuers (-4), the certificates (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. |
+| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect`, HTTPRoute `edge-name` (with `.PlatformDomain`) and HTTPRoute `.InfraredNamespace`/`infrared`. Envoy's Service is named `edge`. With `.DomainTokenKey` also the ExternalSecret `envoy-gateway-system/cloudflare-domain-api-token`, the OriginIssuer `cloudflare-origin-domain` and the Certificate `edge-domain` (Secret `edge-domain-tls`), and `edge` then holds `.InfraredHost` alone. In waves: the tokens' copies (-5), the issuers (-4), the certificates (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. Behind a tunnel, the objects and waves of "Behind a Cloudflare Tunnel" below. |
 
 All that read or make a token wait first, in a PreSync hook (see "Order on
 a fresh cluster"): `platform-tokens` for External Secrets' webhook,
@@ -460,8 +473,9 @@ certificate, admitting routes from that zone's namespace only. The Gateway's
 `allowedListeners` admits ListenerSets from its own namespace alone.
 
 No load balancer is ever made: on Linode a LoadBalancer Service is a
-NodeBalancer. Envoy runs as a DaemonSet that binds each node's ports 80 and
-443 (hostPort onto its 10080 and 10443), and its Service is NodePort with
+NodeBalancer. Without a tunnel (below), Envoy runs as a DaemonSet that binds
+each node's ports 80 and 443 (hostPort onto its 10080 and 10443), and its
+Service is NodePort with
 `externalTrafficPolicy: Local`, which makes Envoy Gateway report the
 ExternalIP of every node with a ready Envoy as the Gateway's addresses.
 external-dns publishes those, so a rebuilt node's address reaches DNS by
@@ -513,6 +527,61 @@ unredirected, and Full (strict) accepts the Let's Encrypt certificate where it
 refuses a self-signed one with 526). The `cert-manager` Application then sets
 `config.enableGatewayAPI`. Infrared asks the Issuer for a custom hostname's
 certificate only once Cloudflare has activated the hostname.
+
+#### Behind a Cloudflare Tunnel
+
+A hosted plane can be reached through a Cloudflare Tunnel of its own instead
+of its nodes' ports (infrared-docs-internal ADR 0064): cloudflared runs in the
+cluster and dials out to Cloudflare on port 7844 (QUIC on UDP, or HTTP/2 on
+TCP), Cloudflare's edge sends each request for the edge's names down that
+connection, and the nodes take no traffic from outside. The tunnel is locally
+managed, so its routes are this template's, rendered from the Installation's
+names. With `.TunnelID` (the Installation's `spec.tunnel.id`) on a gateway
+edge:
+
+| What | Without a tunnel | Behind a tunnel |
+|---|---|---|
+| Envoy | a DaemonSet on each node's ports 80 and 443 (hostPort), its Service `edge` a NodePort | the same DaemonSet and listeners on no host port, its Service `edge` a ClusterIP |
+| The Gateway's certificate | `edge` from Cloudflare's Origin CA (`cloudflare-origin`), and with `.DomainTokenKey` `edge-domain` too | `edge` (Secret `edge-tls`), `*.<PlatformDomain>` and `.InfraredHost` unless the wildcard covers it, from the CA Issuer `edge-ca`, whose authority, the Certificate `edge-ca` (Secret `edge-ca`, ten years, renewed on the same key), the self-signed Issuer `edge-self-signed` makes |
+| Cloudflare tokens | `cloudflare-api-token`, copied for external-dns and the issuer, and with `.DomainTokenKey` the domain's own | none: `.DomainTokenKey` is not read |
+| DNS | external-dns (and external-dns-domain) publish the edge's names at the nodes' addresses | proxied CNAMEs to `<TunnelID>.cfargotunnel.com`, made once by a person; `external-dns`, `external-dns-domain` and `origin-ca-issuer` are left out, with their components |
+| cloudflared | none | `components/edge/tunnel.yaml`, in `envoy-gateway-system`: the ExternalSecret `cloudflared-credentials` (key `credentials.json`, from the key `.TunnelCredentialsKey` of `infrared-platform-tokens`), the ConfigMap `cloudflared`, the Deployment `cloudflared` (two replicas on two nodes, not root, a read-only filesystem, no ServiceAccount token) and a PodDisruptionBudget of one |
+
+cloudflared's routes, the first that matches wins; a route whose name is empty
+is left out:
+
+| Name | To | As |
+|---|---|---|
+| `.InfraredHost` | `https://edge.envoy-gateway-system.svc.cluster.local:443` | that name (`originServerName`) |
+| `*.<PlatformDomain>` | the same | the request's own name (`matchSNItoHost`) |
+| anything else | a 404; with `.CustomHostnames`, the same Service | the request's own name |
+
+Each route checks Envoy's certificate against the edge's authority (`caPool`,
+the Secret `edge-ca`'s `ca.crt`, mounted alone) and speaks HTTP/2 to Envoy.
+Cloudflare's edge shows visitors its own certificate, which covers a name one
+label under a zone, and the zones' SSL/TLS mode no longer governs the hop to
+the origin. cloudflared sends every request to Envoy's HTTPS port, so plain
+HTTP is for Cloudflare's edge to redirect, with each zone's Always Use HTTPS
+on: the redirect route and `http-any` stay, and nothing from outside reaches
+them. cloudflared reads its config and credentials only at start, so its pods
+carry the tunnel, the key and the routes in the annotation
+`infrared.darkshift.io/tunnel`, and a change of any rolls them.
+
+In the edge's waves: cloudflared's credentials (-7), the self-signed issuer
+(-6), the authority (-5), its issuer (-4), the certificate (-3), EnvoyProxy
+(-2), GatewayClass (-1), the Gateway and its routes (0), cloudflared (1), and
+with `.CustomHostnames` the Issuer `letsencrypt-http` (2), so the tunnel never
+waits for Let's Encrypt. The edge's PreSync wait asks for cert-manager's
+Issuer CRD in place of the origin issuer's. The store `infrared-platform`
+admits `envoy-gateway-system` alone for the edge, and the `infrared`
+Application carries `installation.tunnel`.
+
+Not yet behind a tunnel: a zone's own addresses. Infrared asks
+`cloudflare-origin`, which a tunnel leaves out, for the certificate of an
+address under a managed root, and cert-manager's HTTP-01 challenge for a custom
+hostname arrives through cloudflared at Envoy's HTTPS port, never `http-any`.
+A plane behind a tunnel serves its zones under `.PlatformDomain` alone until
+that changes.
 
 ### The stores
 
@@ -572,7 +641,9 @@ and changes nothing without the stores.
 
 S3 answers at `http://seaweedfs-s3.stores.svc:8333`. The chart's bucket hook
 makes the buckets `ate-snapshots` (Agent Substrate's snapshots) and `registry`
-(the registry's images and charts) after each sync, with `weed shell`. Each
+(the registry's images and charts) after each sync, with `weed shell` (under
+the stores' own mutual TLS, the PostSync Job `seaweedfs-buckets` instead: see
+"The stores' own security"). Each
 bucket has an S3 identity that reaches it alone (Read, Write, List and Tagging
 on that bucket; no identity is an administrator), in
 `components/seaweedfs/identities.yaml`, which holds no key: each key is an
@@ -1035,9 +1106,9 @@ for the platform.
 | Namespace | Policy (component) | Admits |
 |---|---|---|
 | `envoy-gateway-system`, but Envoy's pods | `infrared-fence` (`edge`) | the platform; the control plane on Envoy Gateway's topology injector webhook, 9443 |
-| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); cloudflared on 10443, from this namespace (the tunnel's one in-cluster hop, ADR 0064; no such pod runs without it); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator and cloudflared |
-| `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform |
-| `external-dns` | `infrared-fence` (`external-dns`) | the platform |
+| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); cloudflared on 10443, from this namespace (the tunnel's one in-cluster hop, ADR 0064; no such pod runs without it); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator and cloudflared. Behind a Cloudflare Tunnel (`.TunnelID`, ADR 0064) Envoy binds no node's port, so the rule for Cloudflare goes and no one outside the cluster gets in |
+| `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform. None behind a Cloudflare Tunnel, which leaves the issuer and its namespace out |
+| `external-dns` | `infrared-fence` (`external-dns`) | the platform. None behind a Cloudflare Tunnel, which leaves external-dns out |
 | `cert-manager`, `external-secrets` | `infrared-fence` (their charts' `extraObjects`) | the platform; the control plane on each webhook's port, 10250 |
 | `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
 | `cnpg-system` | `infrared-fence` (`postgres`) | the platform; the control plane on CloudNativePG's webhook, 9443 |
@@ -1090,6 +1161,19 @@ and `randAlphaNum`, new at every render under Argo CD, so its security config
 holds only the certificates' paths (`make verify` renders the chart twice and
 compares). The hook also waits for cert-manager's CRDs and webhook. Without
 cert-manager (`.Disabled`) only the tokens hold, and gRPC stays plain.
+
+The buckets are made by a Job of the template's own under mutual TLS. The
+SeaweedFS chart's bucket hook (4.48.0) mounts its security config but not the
+CA or the client certificate that config names, so its `weed shell` waits for
+the master for ever and makes no bucket, and the registry, with no bucket
+`registry`, never starts (fixed upstream after 4.48, seaweedfs#11589). With
+cert-manager the chart's hook is left out (no `s3.createBuckets`), and the
+`seaweedfs` Application's PostSync Job `seaweedfs-buckets`
+(`components/seaweedfs/prepare.yaml`) makes `ate-snapshots` and `registry`
+after each sync: `weed shell` in SeaweedFS's own image, with the security
+config, the CA's certificate (never its key) and the client certificate.
+Without cert-manager the chart's hook needs no certificate and makes them as
+before. The Job can go once the chart is 4.49 or later.
 
 Zot, Agent Substrate, the copies and the restore speak S3 with their
 identities, and change nothing. To rotate the keys, delete
@@ -1256,6 +1340,8 @@ make render CLUSTER=demo FLAVOR=k3s     # renders into out/
 make render CLUSTER=demo FLAVOR=eks REGION=us-west-2
 make render BUILD_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com/acme
 make render EDGE=gateway PLATFORM_DOMAIN=preprod.example.com INFRARED_HOST=infrared.preprod.example.com
+make render EDGE=gateway PLATFORM_DOMAIN=darkshift.cloud INFRARED_HOST=saas2.darkshift.io \
+  TUNNEL_ID=6ff42ae2-765d-4adf-8112-31c55c1551ef   # behind a Cloudflare Tunnel
 make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
   BACKUP='{"bucket": "acme-backups", "endpoint": "https://us-east-1.linodeobjects.com", "region": "us-east-1"}'
 make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
