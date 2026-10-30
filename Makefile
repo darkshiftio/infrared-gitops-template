@@ -82,6 +82,13 @@ TENANT_QUOTAS                   ?=
 ADMISSION_POLICIES              ?= false
 DENY_LOGGING                    ?= false
 ARGOCD_RESTRICT_DEFAULT_PROJECT ?= false
+# The caps (workspace TODO 473), which the operator keeps and the infrared
+# Application carries: BUILD_CAPS and TENANT_STORAGE are the chart's
+# tenancy.buildCaps and tenancy.tenantStorage as one line of JSON with
+# "enabled":true (as INFRARED_BUILD_CAPS and INFRARED_TENANT_STORAGE), empty
+# for none.
+BUILD_CAPS     ?=
+TENANT_STORAGE ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -98,7 +105,8 @@ render:
 		-registry-pulls=$(REGISTRY_PULLS) -stores-security=$(STORES_SECURITY) \
 		-tenant-pods '$(TENANT_PODS)' -tenant-quotas '$(TENANT_QUOTAS)' \
 		-admission-policies=$(ADMISSION_POLICIES) -deny-logging=$(DENY_LOGGING) \
-		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT)
+		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT) \
+		-build-caps '$(BUILD_CAPS)' -tenant-storage '$(TENANT_STORAGE)'
 
 ## verify: the gate CI runs
 verify:

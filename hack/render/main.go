@@ -271,6 +271,20 @@ type Data struct {
 	// the platform org's gitops repo alone (ADR 0066 D10), and the infrared
 	// Application carries the setting. False renders as before.
 	ArgoCDRestrictDefaultProject bool `json:"ArgoCDRestrictDefaultProject,omitempty"`
+	// BuildCaps is the operator's INFRARED_BUILD_CAPS, the Infrared chart's
+	// tenancy.buildCaps, as one line of JSON ({"enabled": true,
+	// "deadlineMinutes": ..., "minutesPerOrgPerDay": ...}): each tenant
+	// build's deadline and its org's build minutes a UTC day (workspace TODO
+	// 473). The operator keeps them; the infrared Application carries the
+	// setting. Empty renders as before the field existed, and an operator
+	// leaves it out of the data.
+	BuildCaps string `json:"BuildCaps,omitempty"`
+	// TenantStorage is the operator's INFRARED_TENANT_STORAGE, the Infrared
+	// chart's tenancy.tenantStorage, as one line of JSON ({"enabled": true,
+	// "capGi": ..., "minDiskGi": ...}): the cap on every tenant org's volumes
+	// together (workspace TODO 473), which the infrared Application carries.
+	// Empty renders as before.
+	TenantStorage string `json:"TenantStorage,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -617,6 +631,8 @@ func main() {
 	flag.BoolVar(&d.AdmissionPolicies, "admission-policies", false, "AdmissionPolicies: the operator's admission policies on tenants' namespaces (INFRARED_ADMISSION_POLICIES)")
 	flag.BoolVar(&d.DenyLogging, "deny-logging", false, "DenyLogging: GKE logs the denies of tenants' namespaces (INFRARED_DENY_LOGGING)")
 	flag.BoolVar(&d.ArgoCDRestrictDefaultProject, "argocd-restrict-default-project", false, "ArgoCDRestrictDefaultProject: Argo CD's default project takes the platform's root alone (INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT)")
+	flag.StringVar(&d.BuildCaps, "build-caps", "", `BuildCaps: the chart's tenancy.buildCaps as one line of JSON, {"enabled":true,"deadlineMinutes":20,"minutesPerOrgPerDay":60} (INFRARED_BUILD_CAPS; empty for none)`)
+	flag.StringVar(&d.TenantStorage, "tenant-storage", "", `TenantStorage: the chart's tenancy.tenantStorage as one line of JSON, {"enabled":true,"capGi":400,"minDiskGi":10} (INFRARED_TENANT_STORAGE; empty for none)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -707,6 +723,8 @@ func mergeDataFile(d *Data, path string) error {
 		"argocd-restrict-default-project": func() {
 			d.ArgoCDRestrictDefaultProject = explicit.ArgoCDRestrictDefaultProject
 		},
+		"build-caps":     func() { d.BuildCaps = explicit.BuildCaps },
+		"tenant-storage": func() { d.TenantStorage = explicit.TenantStorage },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -783,7 +801,9 @@ func validate(d Data) error {
 		errs = append(errs, err)
 	}
 	errs = append(errs, validateTenancyCarry("TenantPods", d.TenantPods, "placement"),
-		validateTenancyCarry("TenantQuotas", d.TenantQuotas, "zones", "builds"))
+		validateTenancyCarry("TenantQuotas", d.TenantQuotas, "zones", "builds"),
+		validateTenancyCarry("BuildCaps", d.BuildCaps, "deadlineMinutes", "minutesPerOrgPerDay"),
+		validateTenancyCarry("TenantStorage", d.TenantStorage, "capGi", "minDiskGi"))
 	return errors.Join(errs...)
 }
 

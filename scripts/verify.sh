@@ -2242,6 +2242,38 @@ done
 if kubeconform -strict -ignore-missing-schemas -summary "$work/tenancy/$infrared_app" >/dev/null; then ok "tenancy: the infrared Application passes kubeconform"
 else bad "tenancy: the infrared Application fails kubeconform"; fi
 
+# --- The caps (workspace TODO 473) ------------------------------------------------
+# BuildCaps and TenantStorage (the operator's INFRARED_BUILD_CAPS and
+# INFRARED_TENANT_STORAGE, each one line of JSON as the chart's block takes
+# it): the operator keeps both, so each changes only the infrared Application,
+# which carries it under tenancy for Argo CD's adoption to keep. Beside the
+# rest of the tenancy, the same.
+caps_build='{"enabled":true,"deadlineMinutes":20,"minutesPerOrgPerDay":60}'
+caps_storage='{"enabled":true,"capGi":400,"minDiskGi":10}'
+caps_want="$(jq -c -S -n --argjson b "$caps_build" --argjson s "$caps_storage" '{buildCaps: $b, tenantStorage: $s}')"
+"$work/render" -out "$work/caps" -cluster demo -flavor k3s -build-registry "" -build-caps "$caps_build" -tenant-storage "$caps_storage" >/dev/null
+[ "$(d3_diff "$work/k3s" "$work/caps")" = "$infrared_app" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/caps/$infrared_app" | jq -c -S .)" = "$caps_want" ] \
+  && ok "caps: both change only the infrared Application, which carries them under tenancy as the chart takes them" \
+  || bad "caps: differs from the plain k3s render in '$(d3_diff "$work/k3s" "$work/caps")', or the infrared Application carries $(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/caps/$infrared_app")"
+jq --arg b "$caps_build" --arg s "$caps_storage" '. + {BuildCaps: $b, TenantStorage: $s}' "$work/tenancy-data.json" >"$work/caps-data.json"
+"$work/render" -out "$work/caps-data" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/caps-data.json" >/dev/null
+[ "$(d3_diff "$work/tenancy-data" "$work/caps-data")" = "registry/clusters/demo-pl/components/infrared.yaml" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/caps-data/registry/clusters/demo-pl/components/infrared.yaml" | jq -c -S .)" \
+    = "$(jq -c -S --argjson c "$caps_want" '. + {networkPolicies: {enabled: true}} + $c' <<<"$tenancy_want")" ] \
+  && ok "caps-data: from the operator's data, beside the rest of the tenancy, one tenancy block in the infrared Application alone" \
+  || bad "caps-data: differs from the tenancy alone in '$(d3_diff "$work/tenancy-data" "$work/caps-data")', or the tenancy block is $(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/caps-data/registry/clusters/demo-pl/components/infrared.yaml")"
+for bad_carry in '{"deadlineMinutes":20}' '{"enabled":true,"minutes":60}' 'not json'; do
+  if "$work/render" -out "$work/caps-bad" -cluster demo -flavor k3s -build-registry "" -build-caps "$bad_carry" >/dev/null 2>&1; then
+    bad "caps: hack/render took BuildCaps $bad_carry"
+  else ok "caps: hack/render refuses BuildCaps $bad_carry"; fi
+done
+if "$work/render" -out "$work/caps-bad" -cluster demo -flavor k3s -build-registry "" -tenant-storage '{"enabled":true,"capGB":400}' >/dev/null 2>&1; then
+  bad "caps: hack/render took TenantStorage with capGB"
+else ok "caps: hack/render refuses TenantStorage with capGB"; fi
+if kubeconform -strict -ignore-missing-schemas -summary "$work/caps/$infrared_app" >/dev/null; then ok "caps: the infrared Application passes kubeconform"
+else bad "caps: the infrared Application fails kubeconform"; fi
+
 # --- Grafana's sign-in through Infrared (ADR 0053) ---------------------------------
 # With OIDC, GrafanaURL and InfraredHost (variant oidc, from a -data file as the
 # operator passes them), Grafana signs people in through Infrared: the browser

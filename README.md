@@ -87,6 +87,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.AdmissionPolicies` | absent or `false`, `true` | the operator's `INFRARED_ADMISSION_POLICIES`, the chart's `tenancy.admissionPolicies.enabled`: the operator's admission policies on tenants' namespaces (ADR 0066 D6), which the `infrared` Application carries |
 | `.DenyLogging` | absent or `false`, `true` | the operator's `INFRARED_DENY_LOGGING`, the chart's `tenancy.denyLogging.enabled`: GKE logs the denies of tenants' namespaces (ADR 0066 D10), which the `infrared` Application carries |
 | `.ArgoCDRestrictDefaultProject` | absent or `false`, `true` | the operator's `INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT`, the chart's `tenancy.argoCD.restrictDefaultProject`: Argo CD's default project takes the platform org's gitops repo alone (ADR 0066 D10), which the `infrared` Application carries |
+| `.BuildCaps` | absent or `""`, one line of JSON | the operator's `INFRARED_BUILD_CAPS`, the Infrared chart's `tenancy.buildCaps` as `{"enabled":true,"deadlineMinutes":...,"minutesPerOrgPerDay":...}`: each tenant build's deadline and its org's build minutes a UTC day (workspace TODO 473). The operator keeps them; the `infrared` Application carries the setting (see "The caps"). `hack/render` refuses anything but one line of JSON with `"enabled":true` and those two keys |
+| `.TenantStorage` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_STORAGE`, the chart's `tenancy.tenantStorage` as `{"enabled":true,"capGi":...,"minDiskGi":...}`: the cap on every tenant org's volumes together (workspace TODO 473), which the `infrared` Application carries |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -157,6 +159,7 @@ both out of its data while they are unset (`make verify` checks it).
 `.ArgoCDRestrictDefaultProject` change the `infrared` Application alone, with or
 without the stores and the registry: the operator does all of it. It leaves
 each out of its data while it is unset (`make verify` checks it).
+`.BuildCaps` and `.TenantStorage` do the same.
 
 ### What the operator does after rendering
 
@@ -233,6 +236,8 @@ set, so a cluster without it renders the same file as before:
 | `.AdmissionPolicies` | `tenancy.admissionPolicies.enabled: true` |
 | `.DenyLogging` | `tenancy.denyLogging.enabled: true` |
 | `.ArgoCDRestrictDefaultProject` | `tenancy.argoCD.restrictDefaultProject: true` |
+| `.BuildCaps` | `tenancy.buildCaps`, the JSON as it is |
+| `.TenantStorage` | `tenancy.tenantStorage`, the JSON as it is |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -1142,6 +1147,21 @@ platform org's zone exempt; every zone's quota, limits and token; GKE's deny
 logging; Argo CD's default project and its initial admin Secret gone. Nothing
 is made, and no Secret's data is read. It runs against a cluster, never from
 CI.
+
+### The caps
+
+The Infrared chart's `tenancy.buildCaps` and `tenancy.tenantStorage`
+(workspace TODO 473) are the operator's to keep; this repo renders nothing for
+them but the `infrared` Application, which carries each. The operator, while
+each is on, and for every org but the platform org:
+
+- gives each running build pod a deadline (`activeDeadlineSeconds`), adds up
+  the minutes the org's builds ran each UTC day in the ConfigMap
+  `build-minutes-<org>`, and at the day's cap holds the org's new build pods
+  with the ResourceQuota `infrared-build-pause` until midnight UTC;
+- keeps the ValidatingAdmissionPolicy `infrared-tenancy-storage`, which refuses
+  a tenant's new or larger volume past what remains of the cap on every tenant
+  org's volumes together.
 
 ### Order on a fresh cluster
 
