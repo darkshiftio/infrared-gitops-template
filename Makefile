@@ -18,6 +18,15 @@ INFRARED_HOST   ?=
 # make render EDGE=gateway PLATFORM_DOMAIN=darkshift.cloud INFRARED_HOST=saas1.darkshift.io \
 #   DOMAIN_TOKEN_KEY=cloudflare-domain-api-token
 DOMAIN_TOKEN_KEY ?=
+# TUNNEL_ID: with EDGE=gateway, the UUID of the Cloudflare Tunnel the edge is
+# reached through (infrared-docs-internal ADR 0064): cloudflared in the
+# cluster, no host ports, no external-dns or origin issuer; and
+# TUNNEL_CREDENTIALS_KEY, the key of infrared-platform-tokens that holds its
+# credentials file. E.g.
+# make render EDGE=gateway PLATFORM_DOMAIN=darkshift.cloud INFRARED_HOST=saas2.darkshift.io \
+#   TUNNEL_ID=6ff42ae2-765d-4adf-8112-31c55c1551ef
+TUNNEL_ID              ?=
+TUNNEL_CREDENTIALS_KEY ?= cloudflare-tunnel-credentials
 # STORES: true renders CloudNativePG, one Postgres Cluster and SeaweedFS; BACKUP
 # (JSON, as INFRARED_BACKUP) copies them to a bucket outside the cluster;
 # DISABLED (a JSON array, as INFRARED_DISABLED_COMPONENTS) leaves components out.
@@ -71,6 +80,24 @@ NETWORK_POLICIES ?= false
 # own security (as INFRARED_STORES_SECURITY). infrared-docs-internal ADR 0066 D3.
 REGISTRY_PULLS  ?= false
 STORES_SECURITY ?= false
+# The rest of the tenancy, which the operator does and the infrared Application
+# carries (infrared-docs-internal ADR 0066 D4, D5, D6, D10): TENANT_PODS and
+# TENANT_QUOTAS are the chart's tenancy.tenantPods and tenancy.quotas as one line
+# of JSON with "enabled":true (as INFRARED_TENANT_PODS and INFRARED_TENANT_QUOTAS),
+# empty for none; the three switches as INFRARED_ADMISSION_POLICIES,
+# INFRARED_DENY_LOGGING and INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT.
+TENANT_PODS                     ?=
+TENANT_QUOTAS                   ?=
+ADMISSION_POLICIES              ?= false
+DENY_LOGGING                    ?= false
+ARGOCD_RESTRICT_DEFAULT_PROJECT ?= false
+# The caps (workspace TODO 473), which the operator keeps and the infrared
+# Application carries: BUILD_CAPS and TENANT_STORAGE are the chart's
+# tenancy.buildCaps and tenancy.tenantStorage as one line of JSON with
+# "enabled":true (as INFRARED_BUILD_CAPS and INFRARED_TENANT_STORAGE), empty
+# for none.
+BUILD_CAPS     ?=
+TENANT_STORAGE ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -79,12 +106,17 @@ render:
 	rm -rf $(OUT)
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
 		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" -domain-token-key "$(DOMAIN_TOKEN_KEY)" \
+		-tunnel-id "$(TUNNEL_ID)" -tunnel-credentials-key "$(TUNNEL_CREDENTIALS_KEY)" \
 		-stores=$(STORES) -stores-single-node=$(STORES_SINGLE_NODE) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
 		-substrate-registry "$(SUBSTRATE_REGISTRY)" -registry-token '$(REGISTRY_TOKEN)' \
 		-oidc=$(OIDC) -grafana-url "$(GRAFANA_URL)" -network-policies=$(NETWORK_POLICIES) \
-		-registry-pulls=$(REGISTRY_PULLS) -stores-security=$(STORES_SECURITY)
+		-registry-pulls=$(REGISTRY_PULLS) -stores-security=$(STORES_SECURITY) \
+		-tenant-pods '$(TENANT_PODS)' -tenant-quotas '$(TENANT_QUOTAS)' \
+		-admission-policies=$(ADMISSION_POLICIES) -deny-logging=$(DENY_LOGGING) \
+		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT) \
+		-build-caps '$(BUILD_CAPS)' -tenant-storage '$(TENANT_STORAGE)'
 
 ## verify: the gate CI runs
 verify:

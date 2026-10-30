@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -965,5 +967,164 @@ func TestRegistryPullsAndStoresSecurityFields(t *testing.T) {
 		if err := mergeDataFile(&d, path); err != nil || d.RegistryPulls != want[0] || d.StoresSecurity != want[1] {
 			t.Errorf("%s: loaded RegistryPulls %t, StoresSecurity %t, %v; want %v", body, d.RegistryPulls, d.StoresSecurity, err, want)
 		}
+	}
+}
+
+// The rest of the tenancy (ADR 0066 D4, D5, D6, D10): each loads from the
+// operator's Data by its Go name, absent is off, as an operator from before
+// them leaves them out, and the two JSON carries are refused unless they are
+// one line of JSON the chart's block takes.
+func TestTenancyFields(t *testing.T) {
+	const pods = `{"enabled":true,"placement":{"runtimeClassName":"gvisor"}}`
+	const quotas = `{"enabled":true,"zones":{"cpu":"2","memory":"4Gi","storage":"10Gi","pods":20,"volumes":4},"builds":{"concurrency":2,"memory":"4Gi"}}`
+	path := filepath.Join(t.TempDir(), "data.json")
+	full, err := json.Marshal(map[string]any{"clusterName": "c1", "TenantPods": pods, "TenantQuotas": quotas,
+		"AdmissionPolicies": true, "DenyLogging": true, "ArgoCDRestrictDefaultProject": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for body, want := range map[string]Data{
+		string(full): {TenantPods: pods, TenantQuotas: quotas, AdmissionPolicies: true, DenyLogging: true, ArgoCDRestrictDefaultProject: true},
+		`{"clusterName": "c1", "DenyLogging": true}`: {DenyLogging: true},
+		`{"clusterName": "c1"}`:                      {},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		got := Data{TenantPods: d.TenantPods, TenantQuotas: d.TenantQuotas, AdmissionPolicies: d.AdmissionPolicies,
+			DenyLogging: d.DenyLogging, ArgoCDRestrictDefaultProject: d.ArgoCDRestrictDefaultProject}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: loaded %+v, want %+v", body, got, want)
+		}
+	}
+
+	for _, c := range []struct {
+		name, v string
+		keys    []string
+		ok      bool
+	}{
+		{"TenantPods", "", []string{"placement"}, true},
+		{"TenantPods", pods, []string{"placement"}, true},
+		{"TenantQuotas", quotas, []string{"zones", "builds"}, true},
+		{"TenantPods", `{"placement":{}}`, []string{"placement"}, false},
+		{"TenantPods", `{"enabled":false,"placement":{}}`, []string{"placement"}, false},
+		{"TenantPods", "{\"enabled\":true,\n\"placement\":{}}", []string{"placement"}, false},
+		{"TenantPods", `{"enabled":true,"resources":{}}`, []string{"placement"}, false},
+		{"TenantQuotas", `not json`, []string{"zones", "builds"}, false},
+	} {
+		if err := validateTenancyCarry(c.name, c.v, c.keys...); (err == nil) != c.ok {
+			t.Errorf("validateTenancyCarry(%s, %q) = %v, want ok %v", c.name, c.v, err, c.ok)
+		}
+	}
+}
+
+// The Cloudflare Tunnel (infrared-docs-internal ADR 0064): the operator hands
+// TunnelID and TunnelCredentialsKey by their Go names, only on a gateway edge,
+// and leaves them out otherwise; the id is a lower-case UUID, the key a
+// Secret's, and either needs a gateway edge.
+func TestTunnel(t *testing.T) {
+	id := "6ff42ae2-765d-4adf-8112-31c55c1551ef"
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "darkshift.cloud", "InfraredHost": "saas2.darkshift.io",
+		"TunnelID": "` + id + `", "TunnelCredentialsKey": "cloudflare-tunnel-credentials"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.TunnelID != id || d.TunnelCredentialsKey != "cloudflare-tunnel-credentials" {
+		t.Errorf("loaded TunnelID %q, TunnelCredentialsKey %q", d.TunnelID, d.TunnelCredentialsKey)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.TunnelID != "" || d.TunnelCredentialsKey != "" {
+		t.Errorf("an operator's data without a tunnel loaded TunnelID %q, TunnelCredentialsKey %q, %v; want none",
+			d.TunnelID, d.TunnelCredentialsKey, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct {
+		name          string
+		edge, id, key string
+		wantValidated bool
+	}{
+		{"none, any edge", "", "", "", true},
+		{"none, the flag's default key", "", "", defaultTunnelCredentialsKey, true},
+		{"a gateway edge with a tunnel and the default key", "gateway", id, defaultTunnelCredentialsKey, true},
+		{"a key the operator never leaves empty, empty", "gateway", id, "", true},
+		{"a key of dots, underscores and digits", "gateway", id, "tunnel_saas2.json", true},
+		{"no gateway edge", "traefik", id, defaultTunnelCredentialsKey, false},
+		{"the default edge, Traefik", "", id, defaultTunnelCredentialsKey, false},
+		{"an upper-case id", "gateway", strings.ToUpper(id), defaultTunnelCredentialsKey, false},
+		{"an id without hyphens", "gateway", strings.ReplaceAll(id, "-", ""), defaultTunnelCredentialsKey, false},
+		{"the tunnel's name for its id", "gateway", "saas2", defaultTunnelCredentialsKey, false},
+		{"a key with a slash", "gateway", id, "tokens/tunnel", false},
+		{"a key no Secret takes", "gateway", id, "..", false},
+		{"a key past 253 characters", "gateway", id, strings.Repeat("k", 254), false},
+		{"a key of its own without a tunnel", "gateway", "", "tunnel-saas2", false},
+	} {
+		d := base
+		d.Edge, d.PlatformDomain, d.InfraredHost = c.edge, "darkshift.cloud", "saas2.darkshift.io"
+		d.TunnelID, d.TunnelCredentialsKey = c.id, c.key
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}
+
+// The caps (workspace TODO 473): each loads from the operator's Data by its Go
+// name, absent is off, as an operator from before them leaves them out, and
+// each is refused unless it is one line of JSON the chart's block takes.
+func TestCapsFields(t *testing.T) {
+	const caps = `{"enabled":true,"deadlineMinutes":20,"minutesPerOrgPerDay":60}`
+	const storage = `{"enabled":true,"capGi":400,"minDiskGi":10}`
+	path := filepath.Join(t.TempDir(), "data.json")
+	full, err := json.Marshal(map[string]any{"clusterName": "c1", "BuildCaps": caps, "TenantStorage": storage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for body, want := range map[string]Data{
+		string(full):            {BuildCaps: caps, TenantStorage: storage},
+		`{"clusterName": "c1"}`: {},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if got := (Data{BuildCaps: d.BuildCaps, TenantStorage: d.TenantStorage}); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: loaded %+v, want %+v", body, got, want)
+		}
+	}
+	for _, c := range []struct {
+		name, v string
+		ok      bool
+	}{
+		{"BuildCaps", caps, true},
+		{"TenantStorage", storage, true},
+		{"BuildCaps", `{"deadlineMinutes":20}`, false},
+		{"BuildCaps", `{"enabled":true,"minutes":60}`, false},
+		{"TenantStorage", `{"enabled":true,"capGB":400}`, false},
+		{"TenantStorage", "{\"enabled\":true,\n\"capGi\":400}", false},
+	} {
+		keys := map[string][]string{"BuildCaps": {"deadlineMinutes", "minutesPerOrgPerDay"}, "TenantStorage": {"capGi", "minDiskGi"}}[c.name]
+		if err := validateTenancyCarry(c.name, c.v, keys...); (err == nil) != c.ok {
+			t.Errorf("validateTenancyCarry(%s, %q) = %v, want ok %v", c.name, c.v, err, c.ok)
+		}
+	}
+	d := Data{BuildCaps: `{"enabled":true,"minutes":60}`}
+	if err := validate(d); err == nil || !strings.Contains(err.Error(), "BuildCaps") {
+		t.Errorf("validate took BuildCaps %q: %v", d.BuildCaps, err)
 	}
 }

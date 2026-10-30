@@ -1,12 +1,119 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+[[- /* Behind a Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064) the edge's certificate comes from a certificate authority inside the cluster, which cloudflared trusts: no origin issuer, no Cloudflare token, and no split by zone. */ -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID ]]
 [[- /* The platform domain in a Cloudflare zone of its own, on a token of its own (spec.previews.domainTokenKey, infrared-docs-internal ADR 0063): its wildcard takes a copy of that token, an issuer and a certificate of their own, and the certificate edge keeps Infrared's name alone. */ -]]
-[[- $split := and .PlatformDomain .DomainTokenKey ]]
+[[- $split := and .PlatformDomain .DomainTokenKey (not $tunnel) ]]
 [[- /* Infrared's name needs a name of its own on the certificate only when the wildcard does not cover it: one label under the platform domain. A wildcard on a certificate of its own covers it nowhere. */ -]]
 [[- $covered := false ]]
 [[- if and .PlatformDomain .InfraredHost (not $split) ]]
 [[- $label := trimSuffix (printf ".%s" .PlatformDomain) .InfraredHost ]]
 [[- if and (hasSuffix (printf ".%s" .PlatformDomain) .InfraredHost) (not (contains "." $label)) ]][[ $covered = true ]][[ end ]]
 [[- end -]]
+[[- if $tunnel -]]
+# =============================================================================
+# The edge's certificate, from a certificate authority inside the cluster.
+# =============================================================================
+# Behind the cluster's Cloudflare Tunnel (the Installation's spec.tunnel,
+# infrared-docs-internal ADR 0064) cloudflared is this Gateway's only client
+# (tunnel.yaml). Cloudflare's edge shows visitors its own certificate, which
+# covers a name one label under a zone, and carries each request down the
+# tunnel; cloudflared then makes a TLS connection of its own to Envoy and
+# checks this certificate against the authority below (caPool), so the zones'
+# SSL/TLS mode no longer governs that hop. No name needs Cloudflare's Origin
+# CA, so there is no OriginIssuer and no copy of a Cloudflare token: the
+# install holds none for its own names, and external-dns does not run.
+[[- if .DomainTokenKey ]]
+#
+# Behind the tunnel spec.previews.domainTokenKey ([[ .DomainTokenKey ]])
+# is not read: with no issuer and no external-dns, no Cloudflare token signs
+# or publishes a name, so one certificate, edge, serves every zone's names.
+[[- end ]]
+#
+# A self-signed issuer makes the authority, edge-ca (Secret edge-ca), for ten
+# years, and cert-manager renews it on the same key, so a cloudflared started
+# before a renewal still trusts what it signs. The CA Issuer edge-ca on it
+# signs the Certificate edge (Secret edge-tls), which cert-manager renews at
+# two thirds of its 90 days; Envoy reloads it by itself.
+#
+# Waves: cloudflared's credentials (-7, tunnel.yaml), then the self-signed
+# issuer (-6), the authority (-5), its issuer (-4) and the certificate (-3),
+# then the Envoy fleet and the Gateway (gateway.yaml, -2 to 0), and cloudflared
+# last (tunnel.yaml). External Secrets' and cert-manager's webhooks admit the
+# first five, so each has a wave of its own, before everything whose health
+# depends on it, and each waits for the one before it to be Healthy: the
+# authority's issuer needs the authority's Secret, and the certificate the
+# issuer.
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: edge-self-signed
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-6"
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-ca
+  namespace: envoy-gateway-system
+  annotations:
+    # Healthy once issued: the authority's issuer needs its Secret.
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  isCA: true
+  commonName: [[ printf "Infrared edge %s" .ClusterName | quote ]]
+  secretName: edge-ca
+  # Ten years, renewed at two thirds on the same key (rotationPolicy Never),
+  # so what it signed before a renewal still verifies against it.
+  duration: 87600h0m0s
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: edge-self-signed
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: edge-ca
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-4"
+spec:
+  ca:
+    secretName: edge-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge
+  namespace: envoy-gateway-system
+  annotations:
+    # Healthy once issued: the Gateway's listeners need its Secret.
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  secretName: edge-tls
+  dnsNames:
+[[- if .PlatformDomain ]]
+    - [[ printf "*.%s" .PlatformDomain | quote ]]
+[[- end ]]
+[[- if and .InfraredHost (not $covered) ]]
+    - [[ .InfraredHost | quote ]]
+[[- end ]]
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: edge-ca
+[[- else -]]
 # =============================================================================
 # The edge's certificate, from Cloudflare's Origin CA.
 # =============================================================================
@@ -167,6 +274,7 @@ spec:
     kind: OriginIssuer
     name: cloudflare-origin-domain
 [[- end ]]
+[[- end ]]
 [[- if .CustomHostnames ]]
 ---
 # =============================================================================
@@ -182,13 +290,21 @@ spec:
 # cert-manager's Gateway API support (the cert-manager Application) makes
 # those routes. Its wave is its own, after the Gateway its solver names:
 # cert-manager's webhook admits it.
+[[- if $tunnel ]]
+#
+# Behind the Cloudflare Tunnel these challenges cannot pass yet: cloudflared
+# sends every request, a challenge's plain HTTP among them, to Envoy's HTTPS
+# port, where the address has no certificate yet, so none reaches http-any
+# (infrared-docs-internal ADR 0064). Its wave, 2, comes after cloudflared's,
+# so the tunnel never waits for Let's Encrypt.
+[[- end ]]
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: letsencrypt-http
   namespace: envoy-gateway-system
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "[[ if $tunnel ]]2[[ else ]]1[[ end ]]"
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory

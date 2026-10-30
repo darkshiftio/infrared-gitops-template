@@ -4,6 +4,11 @@
 # of its own (the Installation's spec.previews.domainTokenKey, on a Gateway
 # edge with a previews domain). This cluster's external-dns serves every name
 # with the platform's one token, so this file holds no objects.
+[[- else if .TunnelID -]]
+# external-dns-domain is left out behind a Cloudflare Tunnel (the
+# Installation's spec.tunnel, infrared-docs-internal ADR 0064): the platform
+# domain's wildcard is a proxied CNAME to the tunnel, made once by a person, so
+# its own token ([[ .DomainTokenKey ]]) is not read. This file holds no objects.
 [[- else if not $on -]]
 # external-dns-domain is left out: the Installation names it, or external-dns,
 # among its disabled components (INFRARED_DISABLED_COMPONENTS), so this file

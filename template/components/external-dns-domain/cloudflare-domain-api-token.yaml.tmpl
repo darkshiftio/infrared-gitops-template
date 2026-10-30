@@ -1,4 +1,9 @@
-[[- if and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
+[[- if and (eq .Edge "gateway") .TunnelID .PlatformDomain .DomainTokenKey -]]
+# external-dns-domain does not run behind a Cloudflare Tunnel (the
+# Installation's spec.tunnel, infrared-docs-internal ADR 0064): the platform
+# domain's wildcard is a proxied CNAME to the tunnel, made once by a person.
+# No token to copy.
+[[- else if and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey -]]
 # external-dns-domain's Cloudflare token, for the platform domain's own zone:
 # the key [[ .DomainTokenKey ]] of the Secret infrared-platform-tokens
 # ([[ .InfraredNamespace ]], the Installation's spec.previews.domainTokenKey), copied

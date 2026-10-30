@@ -1,4 +1,9 @@
-[[- if eq .Edge "gateway" -]]
+[[- if and (eq .Edge "gateway") .TunnelID -]]
+# external-dns does not run behind a Cloudflare Tunnel (the Installation's
+# spec.tunnel, infrared-docs-internal ADR 0064): the edge's names are proxied
+# CNAMEs to the tunnel, made once by a person. This component holds no
+# objects and no Application points at it.
+[[- else if eq .Edge "gateway" -]]
 # The second source of the `external-dns` Application (wave 12): its Cloudflare
 # token, copied from the platform's tokens, and the hook that waits for them.
 apiVersion: kustomize.config.k8s.io/v1beta1

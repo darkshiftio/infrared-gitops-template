@@ -60,8 +60,9 @@ type Data struct {
 	// before it existed.
 
 	// Edge is the Installation's spec.edge: "" or "traefik" (as before), or
-	// "gateway", which turns on the edge components (Envoy Gateway, external-dns
-	// and Cloudflare's origin issuer). "" means traefik.
+	// "gateway", which turns on the edge components (Envoy Gateway, and without
+	// a TunnelID external-dns and Cloudflare's origin issuer). "" means
+	// traefik.
 	Edge string `json:"Edge"`
 	// PlatformDomain is the Installation's spec.previews.domain, "" when unset.
 	// In gateway mode zones answer at <zone>.<PlatformDomain>.
@@ -89,6 +90,22 @@ type Data struct {
 	// cloudflare-api-token and the Certificate edge. "" renders as before, and
 	// an operator leaves it out of the data.
 	DomainTokenKey string `json:"DomainTokenKey,omitempty"`
+	// TunnelID is spec.tunnel.id on a gateway edge: the UUID, lower case, of
+	// the Cloudflare Tunnel the edge is reached through (infrared-docs-internal
+	// ADR 0064). Envoy then binds no node's ports and its Service is a
+	// ClusterIP; cloudflared runs beside it (components/edge/tunnel.yaml) with
+	// a route for Infrared's name and *.<PlatformDomain>; the edge's
+	// certificate comes from a certificate authority inside the cluster
+	// (edge-ca); and external-dns, external-dns-domain and Cloudflare's origin
+	// issuer are left out, so DomainTokenKey is not read. "" renders as
+	// before, and an operator leaves it out of the data.
+	TunnelID string `json:"TunnelID,omitempty"`
+	// TunnelCredentialsKey is spec.tunnel.credentialsKey, with TunnelID: the
+	// key of the Secret infrared-platform-tokens that holds the tunnel's
+	// credentials file, which the template copies to cloudflared. "" is the
+	// default, cloudflare-tunnel-credentials, and an operator leaves it out of
+	// the data without a tunnel.
+	TunnelCredentialsKey string `json:"TunnelCredentialsKey,omitempty"`
 	// ImageRegistry is the registry of Infrared's own images (the operator's
 	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
 	ImageRegistry string `json:"ImageRegistry"`
@@ -242,6 +259,49 @@ type Data struct {
 	// "The stores' own security"). False renders as before the field existed,
 	// and an operator leaves it out of the data.
 	StoresSecurity bool `json:"StoresSecurity,omitempty"`
+	// TenantPods is the operator's INFRARED_TENANT_PODS, the Infrared chart's
+	// tenancy.tenantPods, as one line of JSON ({"enabled": true, "placement":
+	// {...}}): a tenant's zone and build pods carry no Kubernetes token, and a
+	// zone's pods the install's placement (infrared-docs-internal ADR 0066 D4,
+	// D5). The operator does it all; the infrared Application carries the
+	// setting. Empty renders as before the field existed, and an operator
+	// leaves it out of the data.
+	TenantPods string `json:"TenantPods,omitempty"`
+	// TenantQuotas is the operator's INFRARED_TENANT_QUOTAS, the Infrared
+	// chart's tenancy.quotas, as one line of JSON ({"enabled": true, "zones":
+	// {...}, "builds": {...}}): a tenant org's quotas (ADR 0066 D4), which the
+	// infrared Application carries. Empty renders as before.
+	TenantQuotas string `json:"TenantQuotas,omitempty"`
+	// AdmissionPolicies is the operator's INFRARED_ADMISSION_POLICIES, the
+	// Infrared chart's tenancy.admissionPolicies.enabled: the operator applies
+	// ValidatingAdmissionPolicies on tenants' namespaces (ADR 0066 D6), and the
+	// infrared Application carries the setting. False renders as before.
+	AdmissionPolicies bool `json:"AdmissionPolicies,omitempty"`
+	// DenyLogging is the operator's INFRARED_DENY_LOGGING, the Infrared chart's
+	// tenancy.denyLogging.enabled: GKE logs the denies of tenants' namespaces
+	// (ADR 0066 D10), and the infrared Application carries the setting. False
+	// renders as before.
+	DenyLogging bool `json:"DenyLogging,omitempty"`
+	// ArgoCDRestrictDefaultProject is the operator's
+	// INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT, the Infrared chart's
+	// tenancy.argoCD.restrictDefaultProject: Argo CD's default project takes
+	// the platform org's gitops repo alone (ADR 0066 D10), and the infrared
+	// Application carries the setting. False renders as before.
+	ArgoCDRestrictDefaultProject bool `json:"ArgoCDRestrictDefaultProject,omitempty"`
+	// BuildCaps is the operator's INFRARED_BUILD_CAPS, the Infrared chart's
+	// tenancy.buildCaps, as one line of JSON ({"enabled": true,
+	// "deadlineMinutes": ..., "minutesPerOrgPerDay": ...}): each tenant
+	// build's deadline and its org's build minutes a UTC day (workspace TODO
+	// 473). The operator keeps them; the infrared Application carries the
+	// setting. Empty renders as before the field existed, and an operator
+	// leaves it out of the data.
+	BuildCaps string `json:"BuildCaps,omitempty"`
+	// TenantStorage is the operator's INFRARED_TENANT_STORAGE, the Infrared
+	// chart's tenancy.tenantStorage, as one line of JSON ({"enabled": true,
+	// "capGi": ..., "minDiskGi": ...}): the cap on every tenant org's volumes
+	// together (workspace TODO 473), which the infrared Application carries.
+	// Empty renders as before.
+	TenantStorage string `json:"TenantStorage,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -551,6 +611,10 @@ func main() {
 	flag.StringVar(&d.InfraredHost, "infrared-host", "", "InfraredHost: Infrared's own name in gateway mode, the sign-in URL's host (empty for none)")
 	flag.StringVar(&d.DomainTokenKey, "domain-token-key", "",
 		"DomainTokenKey: the key of infrared-platform-tokens with a Cloudflare token for the platform domain's own zone; needs -edge gateway and -platform-domain (empty: one token for both)")
+	flag.StringVar(&d.TunnelID, "tunnel-id", "",
+		"TunnelID: the UUID, lower case, of the Cloudflare Tunnel the edge is reached through; needs -edge gateway (empty: the edge on the nodes' own ports)")
+	flag.StringVar(&d.TunnelCredentialsKey, "tunnel-credentials-key", defaultTunnelCredentialsKey,
+		"TunnelCredentialsKey: the key of infrared-platform-tokens with the tunnel's credentials file, with -tunnel-id")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
@@ -583,6 +647,13 @@ func main() {
 	flag.BoolVar(&d.NetworkPolicies, "network-policies", false, "NetworkPolicies: every platform namespace's ingress NetworkPolicy, the network fence (INFRARED_NETWORK_POLICIES)")
 	flag.BoolVar(&d.RegistryPulls, "registry-pulls", false, "RegistryPulls: the registry reads for no one without a login, and each zone pulls as its org (INFRARED_REGISTRY_PULLS)")
 	flag.BoolVar(&d.StoresSecurity, "stores-security", false, "StoresSecurity: SeaweedFS under its own security, mutual TLS and signed tokens (INFRARED_STORES_SECURITY)")
+	flag.StringVar(&d.TenantPods, "tenant-pods", "", `TenantPods: the chart's tenancy.tenantPods as one line of JSON, {"enabled":true,"placement":{...}} (INFRARED_TENANT_PODS; empty for none)`)
+	flag.StringVar(&d.TenantQuotas, "tenant-quotas", "", `TenantQuotas: the chart's tenancy.quotas as one line of JSON, {"enabled":true,"zones":{...},"builds":{...}} (INFRARED_TENANT_QUOTAS; empty for none)`)
+	flag.BoolVar(&d.AdmissionPolicies, "admission-policies", false, "AdmissionPolicies: the operator's admission policies on tenants' namespaces (INFRARED_ADMISSION_POLICIES)")
+	flag.BoolVar(&d.DenyLogging, "deny-logging", false, "DenyLogging: GKE logs the denies of tenants' namespaces (INFRARED_DENY_LOGGING)")
+	flag.BoolVar(&d.ArgoCDRestrictDefaultProject, "argocd-restrict-default-project", false, "ArgoCDRestrictDefaultProject: Argo CD's default project takes the platform's root alone (INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT)")
+	flag.StringVar(&d.BuildCaps, "build-caps", "", `BuildCaps: the chart's tenancy.buildCaps as one line of JSON, {"enabled":true,"deadlineMinutes":20,"minutesPerOrgPerDay":60} (INFRARED_BUILD_CAPS; empty for none)`)
+	flag.StringVar(&d.TenantStorage, "tenant-storage", "", `TenantStorage: the chart's tenancy.tenantStorage as one line of JSON, {"enabled":true,"capGi":400,"minDiskGi":10} (INFRARED_TENANT_STORAGE; empty for none)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -600,8 +671,8 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, stores %t, backup bucket %q, disabled %q, forge %q, registry %q, substrate capable %t, recipients %d, restore point %q)\n",
-		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge, d.Registry, d.SubstrateCapable,
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, tunnel %q, stores %t, backup bucket %q, disabled %q, forge %q, registry %q, substrate capable %t, recipients %d, restore point %q)\n",
+		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.TunnelID, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge, d.Registry, d.SubstrateCapable,
 		len(d.Copies.Recipients), d.Restore.Point)
 }
 
@@ -623,49 +694,60 @@ func mergeDataFile(d *Data, path string) error {
 	}
 	*d = fromFile
 	overrides := map[string]func(){
-		"cluster":               func() { d.ClusterName = explicit.ClusterName },
-		"flavor":                func() { d.ClusterFlavor = explicit.ClusterFlavor },
-		"region":                func() { d.Region = explicit.Region },
-		"org":                   func() { d.OrgName = explicit.OrgName },
-		"repo-owner":            func() { d.GitopsRepoOwner = explicit.GitopsRepoOwner },
-		"repo-name":             func() { d.GitopsRepoName = explicit.GitopsRepoName },
-		"repo-url":              func() { d.GitopsRepoURL = explicit.GitopsRepoURL },
-		"branch":                func() { d.DefaultBranch = explicit.DefaultBranch },
-		"template-version":      func() { d.TemplateVersion = explicit.TemplateVersion },
-		"infrared-version":      func() { d.InfraredVersion = explicit.InfraredVersion },
-		"chart-repo":            func() { d.InfraredChartRepo = explicit.InfraredChartRepo },
-		"chart-version":         func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
-		"namespace":             func() { d.InfraredNamespace = explicit.InfraredNamespace },
-		"pull-secret":           func() { d.ImagePullSecret = explicit.ImagePullSecret },
-		"build-registry":        func() { d.BuildRegistry = explicit.BuildRegistry },
-		"edge":                  func() { d.Edge = explicit.Edge },
-		"platform-domain":       func() { d.PlatformDomain = explicit.PlatformDomain },
-		"infrared-host":         func() { d.InfraredHost = explicit.InfraredHost },
-		"domain-token-key":      func() { d.DomainTokenKey = explicit.DomainTokenKey },
-		"image-registry":        func() { d.ImageRegistry = explicit.ImageRegistry },
-		"images":                func() { d.Images = explicit.Images },
-		"cloud":                 func() { d.Cloud = explicit.Cloud },
-		"substrate-capable":     func() { d.SubstrateCapable = explicit.SubstrateCapable },
-		"stores":                func() { d.Stores = explicit.Stores },
-		"stores-single-node":    func() { d.StoresSingleNode = explicit.StoresSingleNode },
-		"backup":                func() { d.Backup = explicit.Backup },
-		"disabled":              func() { d.Disabled = explicit.Disabled },
-		"forge":                 func() { d.Forge = explicit.Forge },
-		"forge-url":             func() { d.ForgeURL = explicit.ForgeURL },
-		"registry":              func() { d.Registry = explicit.Registry },
-		"copies":                func() { d.Copies = explicit.Copies },
-		"postgres-archive":      func() { d.PostgresArchive = explicit.PostgresArchive },
-		"registry-retention":    func() { d.RegistryRetention = explicit.RegistryRetention },
-		"restore":               func() { d.Restore = explicit.Restore },
-		"postgres-server-name":  func() { d.PostgresServerName = explicit.PostgresServerName },
-		"substrate-registry":    func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
-		"registry-token":        func() { d.RegistryToken = explicit.RegistryToken },
-		"cloud-identity":        func() { d.CloudIdentity = explicit.CloudIdentity },
-		"running-chart-version": func() { d.RunningChartVersion = explicit.RunningChartVersion },
-		"oidc":                  func() { d.OIDC = explicit.OIDC },
-		"grafana-url":           func() { d.GrafanaURL = explicit.GrafanaURL },
-		"registry-pulls":        func() { d.RegistryPulls = explicit.RegistryPulls },
-		"stores-security":       func() { d.StoresSecurity = explicit.StoresSecurity },
+		"cluster":                func() { d.ClusterName = explicit.ClusterName },
+		"flavor":                 func() { d.ClusterFlavor = explicit.ClusterFlavor },
+		"region":                 func() { d.Region = explicit.Region },
+		"org":                    func() { d.OrgName = explicit.OrgName },
+		"repo-owner":             func() { d.GitopsRepoOwner = explicit.GitopsRepoOwner },
+		"repo-name":              func() { d.GitopsRepoName = explicit.GitopsRepoName },
+		"repo-url":               func() { d.GitopsRepoURL = explicit.GitopsRepoURL },
+		"branch":                 func() { d.DefaultBranch = explicit.DefaultBranch },
+		"template-version":       func() { d.TemplateVersion = explicit.TemplateVersion },
+		"infrared-version":       func() { d.InfraredVersion = explicit.InfraredVersion },
+		"chart-repo":             func() { d.InfraredChartRepo = explicit.InfraredChartRepo },
+		"chart-version":          func() { d.InfraredChartVersion = explicit.InfraredChartVersion },
+		"namespace":              func() { d.InfraredNamespace = explicit.InfraredNamespace },
+		"pull-secret":            func() { d.ImagePullSecret = explicit.ImagePullSecret },
+		"build-registry":         func() { d.BuildRegistry = explicit.BuildRegistry },
+		"edge":                   func() { d.Edge = explicit.Edge },
+		"platform-domain":        func() { d.PlatformDomain = explicit.PlatformDomain },
+		"infrared-host":          func() { d.InfraredHost = explicit.InfraredHost },
+		"domain-token-key":       func() { d.DomainTokenKey = explicit.DomainTokenKey },
+		"tunnel-id":              func() { d.TunnelID = explicit.TunnelID },
+		"tunnel-credentials-key": func() { d.TunnelCredentialsKey = explicit.TunnelCredentialsKey },
+		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
+		"images":                 func() { d.Images = explicit.Images },
+		"cloud":                  func() { d.Cloud = explicit.Cloud },
+		"substrate-capable":      func() { d.SubstrateCapable = explicit.SubstrateCapable },
+		"stores":                 func() { d.Stores = explicit.Stores },
+		"stores-single-node":     func() { d.StoresSingleNode = explicit.StoresSingleNode },
+		"backup":                 func() { d.Backup = explicit.Backup },
+		"disabled":               func() { d.Disabled = explicit.Disabled },
+		"forge":                  func() { d.Forge = explicit.Forge },
+		"forge-url":              func() { d.ForgeURL = explicit.ForgeURL },
+		"registry":               func() { d.Registry = explicit.Registry },
+		"copies":                 func() { d.Copies = explicit.Copies },
+		"postgres-archive":       func() { d.PostgresArchive = explicit.PostgresArchive },
+		"registry-retention":     func() { d.RegistryRetention = explicit.RegistryRetention },
+		"restore":                func() { d.Restore = explicit.Restore },
+		"postgres-server-name":   func() { d.PostgresServerName = explicit.PostgresServerName },
+		"substrate-registry":     func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
+		"registry-token":         func() { d.RegistryToken = explicit.RegistryToken },
+		"cloud-identity":         func() { d.CloudIdentity = explicit.CloudIdentity },
+		"running-chart-version":  func() { d.RunningChartVersion = explicit.RunningChartVersion },
+		"oidc":                   func() { d.OIDC = explicit.OIDC },
+		"grafana-url":            func() { d.GrafanaURL = explicit.GrafanaURL },
+		"registry-pulls":         func() { d.RegistryPulls = explicit.RegistryPulls },
+		"stores-security":        func() { d.StoresSecurity = explicit.StoresSecurity },
+		"tenant-pods":            func() { d.TenantPods = explicit.TenantPods },
+		"tenant-quotas":          func() { d.TenantQuotas = explicit.TenantQuotas },
+		"admission-policies":     func() { d.AdmissionPolicies = explicit.AdmissionPolicies },
+		"deny-logging":           func() { d.DenyLogging = explicit.DenyLogging },
+		"argocd-restrict-default-project": func() {
+			d.ArgoCDRestrictDefaultProject = explicit.ArgoCDRestrictDefaultProject
+		},
+		"build-caps":     func() { d.BuildCaps = explicit.BuildCaps },
+		"tenant-storage": func() { d.TenantStorage = explicit.TenantStorage },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -705,6 +787,7 @@ func validate(d Data) error {
 		errs = append(errs, fmt.Errorf("ACMEEmail must be one email address, got %q", d.ACMEEmail))
 	}
 	errs = append(errs, validateDomainTokenKey(d)...)
+	errs = append(errs, validateTunnel(d)...)
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
 			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
@@ -741,7 +824,32 @@ func validate(d Data) error {
 	if err := validateGrafanaURL(d.GrafanaURL); err != nil {
 		errs = append(errs, err)
 	}
+	errs = append(errs, validateTenancyCarry("TenantPods", d.TenantPods, "placement"),
+		validateTenancyCarry("TenantQuotas", d.TenantQuotas, "zones", "builds"),
+		validateTenancyCarry("BuildCaps", d.BuildCaps, "deadlineMinutes", "minutesPerOrgPerDay"),
+		validateTenancyCarry("TenantStorage", d.TenantStorage, "capGi", "minDiskGi"))
 	return errors.Join(errs...)
+}
+
+// validateTenancyCarry checks one of the tenancy's settings the infrared
+// Application carries as a line of JSON (TenantPods, TenantQuotas): empty, or
+// one JSON object on one line with "enabled": true and only the keys the
+// chart's block takes, so it lands in the Application's values as the chart
+// reads it.
+func validateTenancyCarry(name, v string, keys ...string) error {
+	if v == "" {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if strings.ContainsAny(v, "\n\r") || json.Unmarshal([]byte(v), &m) != nil || string(m["enabled"]) != "true" {
+		return fmt.Errorf(`%s must be one line of JSON, {"enabled":true, ...}, as the operator carries it, got %q`, name, v)
+	}
+	for k := range m {
+		if k != "enabled" && !slices.Contains(keys, k) {
+			return fmt.Errorf("%s takes enabled and %s alone, got %q", name, strings.Join(keys, ", "), k)
+		}
+	}
+	return nil
 }
 
 // validateDomainTokenKey checks DomainTokenKey: empty, or a key of a Secret,
@@ -757,6 +865,36 @@ func validateDomainTokenKey(d Data) []error {
 	}
 	if d.Edge != "gateway" || d.PlatformDomain == "" {
 		errs = append(errs, errors.New("DomainTokenKey needs Edge gateway and a PlatformDomain: only the Gateway edge serves the platform domain on a token of its own"))
+	}
+	return errs
+}
+
+// defaultTunnelCredentialsKey is the key of infrared-platform-tokens that
+// holds the tunnel's credentials file when TunnelCredentialsKey names none:
+// the key the Infrared chart's platformTokens.cloudflareTunnelCredentials
+// writes, and the Installation's default.
+const defaultTunnelCredentialsKey = "cloudflare-tunnel-credentials"
+
+// validateTunnel checks the Cloudflare Tunnel: none, or a tunnel's UUID in
+// lower case, as the Installation takes it, on a gateway edge, the one edge
+// it fronts, with its credentials key a key of a Secret. A credentials key
+// other than the default needs the tunnel it is for.
+func validateTunnel(d Data) []error {
+	if d.TunnelID == "" {
+		if d.TunnelCredentialsKey != "" && d.TunnelCredentialsKey != defaultTunnelCredentialsKey {
+			return []error{errors.New("TunnelCredentialsKey needs a TunnelID: it names the credentials of the tunnel the edge is reached through")}
+		}
+		return nil
+	}
+	var errs []error
+	if !tunnelID.MatchString(d.TunnelID) {
+		errs = append(errs, fmt.Errorf("TunnelID must be a Cloudflare Tunnel's UUID, lower case, e.g. 6ff42ae2-765d-4adf-8112-31c55c1551ef, got %q", d.TunnelID))
+	}
+	if d.Edge != "gateway" {
+		errs = append(errs, errors.New("TunnelID needs Edge gateway: the tunnel fronts the Gateway edge alone"))
+	}
+	if k := d.TunnelCredentialsKey; k != "" && (!secretKey.MatchString(k) || k == "." || strings.HasPrefix(k, "..")) {
+		errs = append(errs, fmt.Errorf("TunnelCredentialsKey must be a Secret's key: letters, digits, '-', '_' and '.', at most 253, not . or .., got %q", k))
 	}
 	return errs
 }
@@ -869,6 +1007,8 @@ var (
 	backupPrefix = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	// secretKey is a key of a Secret's data.
 	secretKey = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
+	// tunnelID is a Cloudflare Tunnel's UUID, lower case.
+	tunnelID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	// registryHost is a registry's DNS name, with a port or without.
 	registryHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	// registryPath is a registry host and a repository path under it.
