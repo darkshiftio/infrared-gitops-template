@@ -1080,3 +1080,51 @@ func TestTunnel(t *testing.T) {
 		}
 	}
 }
+
+// The caps (workspace TODO 473): each loads from the operator's Data by its Go
+// name, absent is off, as an operator from before them leaves them out, and
+// each is refused unless it is one line of JSON the chart's block takes.
+func TestCapsFields(t *testing.T) {
+	const caps = `{"enabled":true,"deadlineMinutes":20,"minutesPerOrgPerDay":60}`
+	const storage = `{"enabled":true,"capGi":400,"minDiskGi":10}`
+	path := filepath.Join(t.TempDir(), "data.json")
+	full, err := json.Marshal(map[string]any{"clusterName": "c1", "BuildCaps": caps, "TenantStorage": storage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for body, want := range map[string]Data{
+		string(full):            {BuildCaps: caps, TenantStorage: storage},
+		`{"clusterName": "c1"}`: {},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if got := (Data{BuildCaps: d.BuildCaps, TenantStorage: d.TenantStorage}); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: loaded %+v, want %+v", body, got, want)
+		}
+	}
+	for _, c := range []struct {
+		name, v string
+		ok      bool
+	}{
+		{"BuildCaps", caps, true},
+		{"TenantStorage", storage, true},
+		{"BuildCaps", `{"deadlineMinutes":20}`, false},
+		{"BuildCaps", `{"enabled":true,"minutes":60}`, false},
+		{"TenantStorage", `{"enabled":true,"capGB":400}`, false},
+		{"TenantStorage", "{\"enabled\":true,\n\"capGi\":400}", false},
+	} {
+		keys := map[string][]string{"BuildCaps": {"deadlineMinutes", "minutesPerOrgPerDay"}, "TenantStorage": {"capGi", "minDiskGi"}}[c.name]
+		if err := validateTenancyCarry(c.name, c.v, keys...); (err == nil) != c.ok {
+			t.Errorf("validateTenancyCarry(%s, %q) = %v, want ok %v", c.name, c.v, err, c.ok)
+		}
+	}
+	d := Data{BuildCaps: `{"enabled":true,"minutes":60}`}
+	if err := validate(d); err == nil || !strings.Contains(err.Error(), "BuildCaps") {
+		t.Errorf("validate took BuildCaps %q: %v", d.BuildCaps, err)
+	}
+}

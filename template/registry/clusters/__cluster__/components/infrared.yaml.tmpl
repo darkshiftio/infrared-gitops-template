@@ -228,7 +228,7 @@ spec:
             singleNode: true
 [[- end ]]
 [[- end ]]
-[[- if or .NetworkPolicies .RegistryPulls .StoresSecurity .TenantPods .TenantQuotas .AdmissionPolicies .DenyLogging .ArgoCDRestrictDefaultProject ]]
+[[- if or .NetworkPolicies .RegistryPulls .StoresSecurity .TenantPods .TenantQuotas .AdmissionPolicies .DenyLogging .ArgoCDRestrictDefaultProject .BuildCaps .TenantStorage ]]
 [[- if .NetworkPolicies ]]
           # The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal
           # ADR 0066 D1): the operator fences every org's namespaces, and this
@@ -251,6 +251,12 @@ spec:
           # GKE's logging of their denies (INFRARED_DENY_LOGGING) and Argo CD's
           # default project kept to the platform's root
           # (INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT).
+[[- end ]]
+[[- if or .BuildCaps .TenantStorage ]]
+          # The caps (workspace TODO 473), which the operator keeps: each
+          # tenant build's deadline and its org's build minutes a UTC day
+          # (INFRARED_BUILD_CAPS), and every tenant org's volumes together
+          # (INFRARED_TENANT_STORAGE).
 [[- end ]]
           tenancy:
 [[- if .NetworkPolicies ]]
@@ -282,6 +288,12 @@ spec:
 [[- if .ArgoCDRestrictDefaultProject ]]
             argoCD:
               restrictDefaultProject: true
+[[- end ]]
+[[- if .BuildCaps ]]
+            buildCaps: [[ .BuildCaps ]]
+[[- end ]]
+[[- if .TenantStorage ]]
+            tenantStorage: [[ .TenantStorage ]]
 [[- end ]]
 [[- end ]]
 [[- $c := .Copies ]]
