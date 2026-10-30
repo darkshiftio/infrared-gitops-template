@@ -1,4 +1,6 @@
 [[- $oci := true ]][[ range .Disabled ]][[ if eq . "origin-ca-issuer" ]][[ $oci = false ]][[ end ]][[ end ]]
+[[- /* Behind a Cloudflare Tunnel (spec.tunnel, ADR 0064) no Application makes origin-ca-issuer's namespace, and no node's port reaches Envoy. */ -]]
+[[- if .TunnelID ]][[ $oci = false ]][[ end ]]
 [[- if and .NetworkPolicies (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 # =============================================================================
 # The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
@@ -9,6 +11,13 @@
 # operator (its HTTPS check of a zone's addresses goes to the Service edge, on
 # 443), and vmagent on the metrics port. Every other pod here admits the
 # platform, and the control plane on Envoy Gateway's topology injector.
+[[- if .TunnelID ]]
+#
+# Behind the Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064)
+# Envoy binds no node's port, so it admits no one from outside the cluster:
+# cloudflared, beside it, is the tunnel's one way in. The origin issuer is
+# left out, and its namespace with it.
+[[- end ]]
 # =============================================================================
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -53,6 +62,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+[[- if not .TunnelID ]]
     # Cloudflare, through the nodes' hostPorts 80 and 443 (Envoy's 10080 and
     # 10443): the world, which on Dataplane V2 is never a pod or a node.
     - from:
@@ -63,6 +73,7 @@ spec:
           port: 10080
         - protocol: TCP
           port: 10443
+[[- end ]]
     # Infrared's operator: its HTTPS check of each zone's addresses.
     - from:
         - namespaceSelector:

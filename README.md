@@ -1090,9 +1090,9 @@ for the platform.
 | Namespace | Policy (component) | Admits |
 |---|---|---|
 | `envoy-gateway-system`, but Envoy's pods | `infrared-fence` (`edge`) | the platform; the control plane on Envoy Gateway's topology injector webhook, 9443 |
-| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); cloudflared on 10443, from this namespace (the tunnel's one in-cluster hop, ADR 0064; no such pod runs without it); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator and cloudflared. |
-| `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform |
-| `external-dns` | `infrared-fence` (`external-dns`) | the platform |
+| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); cloudflared on 10443, from this namespace (the tunnel's one in-cluster hop, ADR 0064; no such pod runs without it); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator and cloudflared. Behind a Cloudflare Tunnel (`.TunnelID`, ADR 0064) Envoy binds no node's port, so the rule for Cloudflare goes and no one outside the cluster gets in |
+| `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform. None behind a Cloudflare Tunnel, which leaves the issuer and its namespace out |
+| `external-dns` | `infrared-fence` (`external-dns`) | the platform. None behind a Cloudflare Tunnel, which leaves external-dns out |
 | `cert-manager`, `external-secrets` | `infrared-fence` (their charts' `extraObjects`) | the platform; the control plane on each webhook's port, 10250 |
 | `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
 | `cnpg-system` | `infrared-fence` (`postgres`) | the platform; the control plane on CloudNativePG's webhook, 9443 |

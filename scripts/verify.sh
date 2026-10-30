@@ -187,9 +187,11 @@
 #     NetworkPolicies, every platform namespace a component makes has its
 #     ingress policy, whose first rule admits the platform alone (no org's
 #     namespace, no zone); the webhooks' ports admit the control plane;
-#     Envoy admits Cloudflare, the operator and vmagent alone; the stores
-#     their own callers alone; Argo CD's seven policies, patched, admit no
-#     org's namespace; the infrared Application carries the setting; alone,
+#     Envoy admits Cloudflare, cloudflared, the operator and vmagent alone,
+#     and behind a Cloudflare Tunnel (ADR 0064) no one from outside the
+#     cluster, with no policy for the namespaces the tunnel leaves out; the
+#     stores their own callers alone; Argo CD's seven policies, patched, admit
+#     no org's namespace; the infrared Application carries the setting; alone,
 #     it changes only the Applications that carry it
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
@@ -2201,6 +2203,20 @@ want_edge='{"ingress":[{"from":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"por
 [ "$(fence_policy "$work/fence" envoy-gateway-system infrared-edge)" = "$(yq -p json -o json -I0 'sort_keys(..)' <<<"$want_edge")" ] \
   && ok "fence: Envoy admits Cloudflare on its listeners, cloudflared and the operator on 10443 and vmagent on its metrics, nothing else" \
   || bad "fence: Envoy's policy is $(fence_policy "$work/fence" envoy-gateway-system infrared-edge)"
+# Behind a Cloudflare Tunnel (ADR 0064), on the hosted plane's shape: Envoy binds
+# no node's port, so its policy drops the world's rule and admits cloudflared,
+# the operator and vmagent alone; and the fence names no namespace the tunnel
+# leaves out (the origin issuer's, external-dns's), which no Application makes.
+yq -p json -o json '. + {"NetworkPolicies": true}' "$work/tunnel-split.json" >"$work/fence-tunnel.json"
+"$work/render" -out "$work/fence-tunnel" -cluster demo-fl -flavor k3s -build-registry "" -data "$work/fence-tunnel.json" >/dev/null
+fence_built "$work/fence-tunnel"
+[ "$(fence_policy "$work/fence-tunnel" envoy-gateway-system infrared-edge)" = "$(yq -p json -o json -I0 'del(.ingress[0]) | sort_keys(..)' <<<"$want_edge")" ] \
+  && ok "fence-tunnel: behind the tunnel Envoy admits cloudflared and the operator on 10443 and vmagent on its metrics, no one from outside the cluster" \
+  || bad "fence-tunnel: behind the tunnel Envoy's policy is $(fence_policy "$work/fence-tunnel" envoy-gateway-system infrared-edge)"
+left="$(fences "$work/fence-tunnel" | tr ' ' '\n' | grep -E '^(origin-ca-issuer|external-dns)/' | tr '\n' ' ' | sed 's/ $//' || true)"
+[ -z "$left" ] && [ -n "$(fences "$work/fence-tunnel" | tr ' ' '\n' | grep -x 'envoy-gateway-system/infrared-fence')" ] \
+  && ok "fence-tunnel: the edge's namespace has its policy, and no namespace the tunnel leaves out has one" \
+  || bad "fence-tunnel: policies for namespaces the tunnel leaves out: '$left', or none for the edge's"
 # The stores (ADR 0066 D3): Zot, Substrate, the backup and the restore,
 # CloudNativePG and vmagent, by port; nothing else outside the namespace.
 [ "$(fence_policy "$work/fence" stores infrared-fence | yq -p json -o json -I0 '[.ingress[] | ([.from[] | (.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] // "self") + ":" + ((.podSelector.matchLabels // {}) | to_entries | map(.value) | join("+"))] | join(",")) + "@" + ([.ports[]?.port | tostring] | join(","))]')" \
@@ -2238,7 +2254,7 @@ if kubectl kustomize "$work/fence-argocd/base" >"$work/fence-argocd-base.yaml" 2
 else
   bad "fence: Argo CD's patches do not apply: $(head -c 300 "$work/fence-argocd.err")"
 fi
-for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr"; do
+for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr" "$work/fence-tunnel"; do
   if kubeconform -strict -ignore-missing-schemas -summary -schema-location default "$out-built" >/dev/null; then
     ok "$(basename "$out"): kubeconform"
   else
