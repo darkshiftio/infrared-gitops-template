@@ -2321,7 +2321,8 @@ yq -p json -o json '. + {"StoresSecurity": true}' "$work/substrate.json" >"$work
 yq -p json -o json '.Disabled += ["cert-manager"]' "$work/stores-sec.json" >"$work/stores-sec-no-cm.json"
 "$work/render" -out "$work/stores-sec" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/stores-sec.json" >/dev/null
 "$work/render" -out "$work/stores-sec-no-cm" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/stores-sec-no-cm.json" >/dev/null
-want_sec="components/seaweedfs/prepare.yaml registry/clusters/demo-pl/components/infrared.yaml registry/clusters/demo-pl/components/seaweedfs.yaml"
+want_sec="components/seaweedfs/identities.yaml components/seaweedfs/prepare.yaml"
+want_sec="$want_sec registry/clusters/demo-pl/components/infrared.yaml registry/clusters/demo-pl/components/seaweedfs.yaml"
 [ "$(d3_diff "$work/pulls-open" "$work/stores-sec")" = "$(words "$want_sec")" ] \
   && ok "stores-sec: renders what the switch off does, but $want_sec" \
   || bad "stores-sec: differs from the switch off in '$(d3_diff "$work/pulls-open" "$work/stores-sec")', want '$want_sec'"
@@ -2351,13 +2352,34 @@ prep_env() { sel "$1" "select(.kind == \"Job\" and .metadata.name == \"seaweedfs
       | grep -cE '^if ! kubectl get secret "\$JWT_SECRET"|^  (volume-write|filer-write|filer-read): \$')" = 4 ] \
   && ok "stores-sec: the PreSync hook makes seaweedfs-jwt once, and waits for cert-manager's CRDs and webhook" \
   || bad "stores-sec: the PreSync hook does not make seaweedfs-jwt once, or does not wait for cert-manager"
+# The buckets: the chart's bucket hook (4.48.0) mounts the security config but
+# not the CA or the client certificate it names, so under mutual TLS its weed
+# shell waits for the master for ever. It is left out (no createBuckets), and
+# the PostSync Job seaweedfs-buckets makes the same buckets with both, in the
+# image SeaweedFS runs.
+bj='select(.kind == "Job" and .metadata.name == "seaweedfs-buckets")'
+bj_pod="$bj | .spec.template.spec"
+[ "$(sel "$sw_app" "$sw_v | .s3 | has(\"createBuckets\")")" = false ] \
+  && [ "$(sel "$sw_prep" "$bj | .metadata.annotations[\"argocd.argoproj.io/hook\"]")" = PostSync ] \
+  && [ "$(sel "$sw_prep" "$bj_pod | .containers[0].env[] | select(.name == \"BUCKETS\") | .value")" = "ate-snapshots registry" ] \
+  && [ "$(sel "$sw_prep" "$bj_pod | .containers[0].image")" = "docker.io/chrislusf/seaweedfs:$(sel "$sw_app" "$sw_v | .image.tag")" ] \
+  && [ "$(line "$sw_prep" "$bj_pod | .volumes[] | .name + \"=\" + (.configMap.name // .secret.secretName // \"emptyDir\")")" \
+    = "security-config=seaweedfs-security-config ca-cert=seaweedfs-ca-cert client-cert=seaweedfs-client-cert tmp=emptyDir" ] \
+  && [ "$(line "$sw_prep" "$bj_pod | .containers[0].volumeMounts[] | .mountPath")" \
+    = "/etc/seaweedfs/security.toml /usr/local/share/ca-certificates/ca/ /usr/local/share/ca-certificates/client/ /tmp" ] \
+  && [ "$(sel "$sw_prep" "$bj_pod | .volumes[] | select(.name == \"ca-cert\") | .secret.items[] | .key + \">\" + .path")" = "tls.crt>tls.crt" ] \
+  && [ "$(sel "$sw_prep" "$bj_pod | (.automountServiceAccountToken, .securityContext.runAsNonRoot, .containers[0].securityContext.readOnlyRootFilesystem) | tostring" | tr '\n' ' ')" = "false true true " ] \
+  && ok "stores-sec: the chart's bucket hook left out, and the PostSync Job seaweedfs-buckets makes ate-snapshots and registry with the CA's certificate (not its key) and the client certificate, in SeaweedFS's image" \
+  || bad "stores-sec: the buckets are not made under mutual TLS: the chart's hook renders, or the Job seaweedfs-buckets is missing or lacks the certificates"
 sw_app_nocm="$work/stores-sec-no-cm/registry/clusters/demo-pl/components/seaweedfs.yaml"
 [ "$(sel "$sw_app_nocm" "$sw_v | .global.seaweedfs.enableSecurity")" = null ] \
   && [ "$(sw_keys "$sw_app_nocm" .s3.extraEnvironmentVars)" = "$(sw_keys "$sw_app" .s3.extraEnvironmentVars)" ] \
   && [ "$(prep_env "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" WAIT_SERVICES)" = stores/postgres-rw ] \
   && [ "$(prep_env "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" WAIT_CRDS)" = externalsecrets.external-secrets.io ] \
-  && ok "stores-sec-no-cm: without cert-manager, the tokens alone, and no wait for it" \
-  || bad "stores-sec-no-cm: without cert-manager, SeaweedFS still asks for mutual TLS, or the hook waits for cert-manager"
+  && [ "$(sel "$sw_app_nocm" "$sw_v | .s3.createBuckets[].name" | tr '\n' ' ')" = "ate-snapshots registry " ] \
+  && [ -z "$(sel "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" "$bj | .metadata.name")" ] \
+  && ok "stores-sec-no-cm: without cert-manager, the tokens alone, no wait for it, and the chart's bucket hook as before" \
+  || bad "stores-sec-no-cm: without cert-manager, SeaweedFS still asks for mutual TLS, the hook waits for cert-manager, or the buckets are not the chart's hook's"
 if kubectl kustomize "$work/stores-sec/components/seaweedfs" >"$work/stores-sec-seaweedfs.yaml" \
   && kubeconform -strict -ignore-missing-schemas -summary "$work/stores-sec-seaweedfs.yaml" >/dev/null; then
   ok "stores-sec: components/seaweedfs builds and passes kubeconform"
@@ -2387,6 +2409,16 @@ if helm pull seaweedfs --repo https://seaweedfs.github.io/seaweedfs/helm --versi
       && [ "$(line "$work/sw1.yaml" 'select(.kind == "StatefulSet" and .metadata.name == "seaweedfs-filer") | .spec.template.spec.containers[0] | [.livenessProbe.httpGet.path, .readinessProbe.httpGet.path] | .[]')" = "/healthz /readyz" ] \
       && ok "stores-sec: SeaweedFS $sw_version renders the same twice, its security config the gRPC certificates' paths and no key, each server's keys by environment, the master without HTTP" \
       || bad "stores-sec: SeaweedFS $sw_version's render is wrong (two renders differ, a key in its security config, or a server without its keys)"
+    # weed shell, in the Job seaweedfs-buckets, reads [grpc] ca and [grpc.client]
+    # cert and key: each under a directory the Job mounts from the Secret the
+    # chart's Certificate writes.
+    sw_paths="$(awk '/^\[/ { section = $0 } /^(ca|cert|key) *=/ && (section == "[grpc]" || section == "[grpc.client]") { gsub(/"/, "", $3); print $3 }' <<<"$sw_toml" | tr '\n' ' ')"
+    sw_secret() { sel "$work/sw1.yaml" "select(.kind == \"Certificate\" and .metadata.name == \"seaweedfs-$1-cert\") | .spec.secretName"; }
+    [ "$sw_paths" = "/usr/local/share/ca-certificates/ca/tls.crt /usr/local/share/ca-certificates/client/tls.crt /usr/local/share/ca-certificates/client/tls.key " ] \
+      && [ "$(sw_secret ca) $(sw_secret client)" = "seaweedfs-ca-cert seaweedfs-client-cert" ] \
+      && [ -z "$(sel "$work/sw1.yaml" 'select(.kind == "Job") | .metadata.name')" ] \
+      && ok "stores-sec: SeaweedFS $sw_version renders no bucket hook, and seaweedfs-buckets mounts the CA and the client certificate where its security config names them" \
+      || bad "stores-sec: SeaweedFS $sw_version renders a bucket hook, or its client's certificate paths ($sw_paths) or Secrets are not what seaweedfs-buckets mounts"
     if kubeconform -strict -ignore-missing-schemas -summary "$work/sw1.yaml" >/dev/null; then ok "stores-sec: SeaweedFS's render passes kubeconform"
     else bad "stores-sec: SeaweedFS's render fails kubeconform"; fi
   else

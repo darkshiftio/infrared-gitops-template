@@ -31,8 +31,10 @@
 [[- end ]]
 #
 # S3 at http://seaweedfs-s3.stores.svc:8333, with an identity per bucket
-# (components/seaweedfs/identities.yaml). The chart's bucket hook makes the
-# buckets ate-snapshots and registry after each sync.
+# (components/seaweedfs/identities.yaml).[[ if $mtls ]] The PostSync Job seaweedfs-buckets
+# (components/seaweedfs/prepare.yaml) makes the buckets ate-snapshots and
+# registry after each sync, with the certificates the chart's bucket hook lacks.[[ else ]] The chart's bucket hook makes the
+# buckets ate-snapshots and registry after each sync.[[ end ]]
 [[- if .Backup.Bucket ]]
 #
 # Every hour both buckets are copied to s3://[[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs
@@ -346,9 +348,15 @@ spec:
                   name: seaweedfs-jwt
                   key: filer-read
 [[- end ]]
+[[- if $mtls ]]
+            # No createBuckets: the chart's bucket hook mounts no certificate,
+            # so under mutual TLS its weed shell would wait for the master for
+            # ever. The PostSync Job seaweedfs-buckets makes them instead.
+[[- else ]]
             createBuckets:
               - name: ate-snapshots
               - name: registry
+[[- end ]]
             # The gateway holds each upload's parts in memory: at 512Mi it was
             # OOMKilled while eight image builds pushed their layers at once
             # (2026-10-16).
