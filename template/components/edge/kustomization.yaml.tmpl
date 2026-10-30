@@ -15,6 +15,9 @@ resources:
 [[- if .TunnelID ]]
   - tunnel.yaml
 [[- end ]]
+[[- if .NetworkPolicies ]]
+  - fence.yaml
+[[- end ]]
 [[- else -]]
 # The edge is not a Gateway with a name to serve, so this component holds no
 # objects and no Application points at it.

@@ -41,6 +41,9 @@ resources:
   - images.yaml
   - templates.yaml
 [[- end ]]
+[[- if .NetworkPolicies ]]
+  - fence.yaml
+[[- end ]]
 [[- else -]]
 # Agent Substrate runs only where the operator's preflight found the cluster able
 # to host it, with the platform's own stores and the registry inside the

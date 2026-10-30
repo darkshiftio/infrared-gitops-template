@@ -57,8 +57,12 @@ made by hand: the Infrared operator mints every credential.
   under `<org>/`, listed by the ServiceAccount `builds/builder-<org>`.
 
 Each is a `kubernetes.io/dockerconfigjson` Secret for `[[ .Registry ]]`, with
-the annotation `kpack.io/docker: [[ .Registry ]]`. Anything in the cluster
-pulls without a login. Zot makes a repository on its first push, so none is
+the annotation `kpack.io/docker: [[ .Registry ]]`.[[ if .RegistryPulls ]] No one pulls without a login
+(the Infrared chart's `tenancy.registryPulls`): a build pulls the builder as its
+organization's user, which reads `platform/`, and a zone's pods pull as theirs,
+with the Secret `zot-pull` the operator lists on the zone's `default`
+ServiceAccount.[[ else ]] Anything in the cluster
+pulls without a login.[[ end ]] Zot makes a repository on its first push, so none is
 made beforehand. Builds name the registry by its address, never by a name:
 their tools speak plain HTTP only to a private address.
 [[ else ]]

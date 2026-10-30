@@ -183,6 +183,14 @@
 #     grafana.ini; the grafana chart takes the values; with any of the three
 #     unset nothing changes, and a GrafanaURL with a trailing slash, a query or
 #     no scheme is refused
+#   - the network fence (infrared-docs-internal ADR 0066 D1): with
+#     NetworkPolicies, every platform namespace a component makes has its
+#     ingress policy, whose first rule admits the platform alone (no org's
+#     namespace, no zone); the webhooks' ports admit the control plane;
+#     Envoy admits Cloudflare, the operator and vmagent alone; the stores
+#     their own callers alone; Argo CD's seven policies, patched, admit no
+#     org's namespace; the infrared Application carries the setting; alone,
+#     it changes only the Applications that carry it
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
@@ -2117,6 +2125,260 @@ for bad_identity in '{}' '{"awsRoleArn":"arn:aws:iam::123456789012:role/x","awsW
     ok "cloud identity $bad_identity: refused"
   fi
 done
+
+# --- The network fence (ADR 0066 D1) -------------------------------------------------
+# With NetworkPolicies (the operator's INFRARED_NETWORK_POLICIES), every
+# platform namespace a component makes gets its ingress policy, Argo CD's own
+# admit no org's namespace, and the infrared Application carries the setting.
+# The fenced variants are rendered here, apart from the list above, whose
+# checks pin each component's objects exactly. Alone, on a plain k3s cluster,
+# the flag changes only the Applications that carry a policy and the setting.
+fence_alone_changes="registry/clusters/demo/components/argocd.yaml registry/clusters/demo/components/cert-manager.yaml registry/clusters/demo/components/external-secrets.yaml $infrared_app $vmks_rel"
+"$work/render" -out "$work/network-policies-alone" -cluster demo -flavor k3s -build-registry "" -network-policies >/dev/null
+changed="$({ diff -rq "$work/k3s" "$work/network-policies-alone" || true; } | sed -E "s#^Files $work/k3s/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+[ "$changed" = "$(words "$fence_alone_changes")" ] \
+  && ok "network-policies-alone: renders what the plain k3s render does, but $changed" \
+  || bad "network-policies-alone: differs from the plain k3s render in '$changed', want '$(words "$fence_alone_changes")'"
+
+yq -p json -o json '. + {"NetworkPolicies": true}' "$work/substrate.json" >"$work/fence.json"
+yq -p json -o json '. + {"NetworkPolicies": true}' "$work/telemetry.json" >"$work/fence-telemetry.json"
+"$work/render" -out "$work/fence" -cluster demo-fn -flavor k3s -build-registry "$zot_registry" -data "$work/fence.json" >/dev/null
+"$work/render" -out "$work/fence-telemetry" -cluster demo-ft -flavor k3s -build-registry "" -data "$work/fence-telemetry.json" >/dev/null
+"$work/render" -out "$work/fence-ecr" -cluster demo-fe -flavor eks -region us-west-2 -build-registry "$ecr_registry" -network-policies >/dev/null
+# Every policy of a fenced render: its components built, and the policies
+# its Applications carry in their charts' extraObjects (cert-manager's and
+# External Secrets' as strings their charts run through tpl).
+fence_built() {
+  local out="$1" dir
+  mkdir -p "$out-built"
+  for dir in "$out"/components/*/; do
+    [ -f "$dir/kustomization.yaml" ] && holds_objects "$dir/kustomization.yaml" || continue
+    kubectl kustomize "$dir" >"$out-built/$(basename "$dir").yaml" || bad "$(basename "$out"): kustomize build $dir"
+  done
+  for app in "$out"/registry/clusters/*/components/*.yaml; do
+    yq -r '.spec.source.helm.valuesObject.extraObjects[]? | select(tag == "!!str") | "---\n" + .' "$app" >>"$out-built/extra-objects.yaml" 2>/dev/null || true
+    yq '.spec.source.helm.valuesObject.extraObjects[]? | select(tag == "!!map") | split_doc' "$app" >>"$out-built/extra-objects.yaml" 2>/dev/null || true
+    echo "---" >>"$out-built/extra-objects.yaml"
+  done
+}
+# Each built file is its own stream: concatenated, one file's last object and
+# the next file's first would run together.
+fences() { yq -N -r 'select(.kind == "NetworkPolicy" and (.metadata.name == "infrared-fence" or .metadata.name == "infrared-edge")) | .metadata.namespace + "/" + .metadata.name' "$1-built"/*.yaml | sort | tr '\n' ' ' | sed 's/ $//'; }
+fence_policy() { yq -N -o json -I0 "select(.kind == \"NetworkPolicy\" and .metadata.namespace == \"$2\" and .metadata.name == \"$3\") | .spec | sort_keys(..)" "$1-built"/*.yaml; }
+for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr"; do fence_built "$out"; done
+
+want_fences="ate-system/infrared-fence ate-workers/infrared-fence builds/infrared-fence cert-manager/infrared-fence cnpg-system/infrared-fence envoy-gateway-system/infrared-edge envoy-gateway-system/infrared-fence external-dns/infrared-fence external-secrets/infrared-fence kpack/infrared-fence monitoring/infrared-fence origin-ca-issuer/infrared-fence podcertificate-controller-system/infrared-fence stores/infrared-fence"
+[ "$(fences "$work/fence")" = "$want_fences" ] \
+  && ok "fence: every platform namespace of the one install's shape has its policy" \
+  || bad "fence: the policies are '$(fences "$work/fence")', want '$want_fences'"
+[ -n "$(fences "$work/fence-telemetry" | tr ' ' '\n' | grep -x 'monitoring/infrared-fence')" ] \
+  && ok "fence-telemetry: the telemetry vmagent's monitoring has its policy without the metrics stack" \
+  || bad "fence-telemetry: monitoring has no policy without the metrics stack"
+[ -n "$(fences "$work/fence-ecr" | tr ' ' '\n' | grep -x 'build-credentials/infrared-fence')" ] \
+  && ok "fence-ecr: the ECR login's namespace has its policy" || bad "fence-ecr: build-credentials has no policy"
+
+# Every infrared-fence admits the platform first: each namespace that is
+# neither an org's nor a zone's.
+platform_peer='[{"from":[{"namespaceSelector":{"matchExpressions":[{"key":"infrared.darkshift.io/org","operator":"DoesNotExist"},{"key":"infrared.darkshift.io/zone","operator":"DoesNotExist"}]}}]}]'
+peers_ok=1
+for f in $want_fences; do
+  [ "${f#*/}" = infrared-fence ] && [ "${f%%/*}" != stores ] || continue
+  [ "$(fence_policy "$work/fence" "${f%%/*}" infrared-fence | yq -p json -o json -I0 '[.ingress[0]]')" = "$platform_peer" ] \
+    || { bad "fence: ${f%%/*}'s first rule does not admit the platform alone"; peers_ok=0; }
+done
+[ "$peers_ok" = 1 ] && ok "fence: every platform namespace's first rule admits the platform: no org's namespace, no zone"
+# The control plane calls the webhooks on their ports from wherever it is.
+webhooks_ok=1
+for w in cert-manager:10250 external-secrets:10250 cnpg-system:9443 kpack:8443 envoy-gateway-system:9443; do
+  [ "$(fence_policy "$work/fence" "${w%%:*}" infrared-fence | yq -p json -o json -I0 '[.ingress[] | select(has("from") | not) | .ports[].port]')" = "[${w#*:}]" ] \
+    || { bad "fence: ${w%%:*}'s webhook port ${w#*:} is not open to the control plane"; webhooks_ok=0; }
+done
+[ "$webhooks_ok" = 1 ] && ok "fence: each webhook's port admits the control plane"
+# Envoy: Cloudflare (the world, through the hostPorts) on its listeners, the
+# operator on 10443 and vmagent on the metrics port; nothing else, so behind a
+# tunnel only cloudflared and the operator reach it (lane B's edge proof).
+want_edge='{"ingress":[{"from":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":10080,"protocol":"TCP"},{"port":10443,"protocol":"TCP"}]},{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"infrared"}},"podSelector":{"matchLabels":{"app.kubernetes.io/component":"operator","app.kubernetes.io/part-of":"infrared"}}}],"ports":[{"port":10443,"protocol":"TCP"}]},{"from":[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"cloudflared"}}}],"ports":[{"port":10443,"protocol":"TCP"}]},{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"vmagent"}}}],"ports":[{"port":19001,"protocol":"TCP"}]}],"podSelector":{"matchLabels":{"gateway.envoyproxy.io/owning-gateway-name":"edge","gateway.envoyproxy.io/owning-gateway-namespace":"envoy-gateway-system"}},"policyTypes":["Ingress"]}'
+[ "$(fence_policy "$work/fence" envoy-gateway-system infrared-edge)" = "$(yq -p json -o json -I0 'sort_keys(..)' <<<"$want_edge")" ] \
+  && ok "fence: Envoy admits Cloudflare on its listeners, cloudflared and the operator on 10443 and vmagent on its metrics, nothing else" \
+  || bad "fence: Envoy's policy is $(fence_policy "$work/fence" envoy-gateway-system infrared-edge)"
+# The stores (ADR 0066 D3): Zot, Substrate, the backup and the restore,
+# CloudNativePG and vmagent, by port; nothing else outside the namespace.
+[ "$(fence_policy "$work/fence" stores infrared-fence | yq -p json -o json -I0 '[.ingress[] | ([.from[] | (.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] // "self") + ":" + ((.podSelector.matchLabels // {}) | to_entries | map(.value) | join("+"))] | join(",")) + "@" + ([.ports[]?.port | tostring] | join(","))]')" \
+    = '["self:@","registry:zot@8333","ate-system:@8333,5432","infrared:infrared-backup,infrared:restore+infrared@5432","cnpg-system:@","monitoring:vmagent@"]' ] \
+  && ok "fence: the stores admit Zot, Substrate, the backup and restore, CloudNativePG and vmagent alone" \
+  || bad "fence: the stores' policy is $(fence_policy "$work/fence" stores infrared-fence)"
+# Substrate's API and router keep their own two policies alone.
+[ "$(fence_policy "$work/fence" ate-system infrared-fence | yq -p json -o json -I0 '.podSelector')" \
+    = '{"matchExpressions":[{"key":"app","operator":"NotIn","values":["ate-api-server","atenet-router"]}]}' ] \
+  && ok "fence: Substrate's API and router are left to their own policies" || bad "fence: ate-system's policy selects Substrate's API or router"
+# The infrared Application carries the setting, so adoption keeps it.
+[ "$(yq -r '.spec.sources[0].helm.valuesObject.tenancy.networkPolicies.enabled' "$work/fence/registry/clusters/demo-fn/components/infrared.yaml")" = true ] \
+  && ok "fence: the infrared Application carries tenancy.networkPolicies.enabled" \
+  || bad "fence: the infrared Application does not carry tenancy.networkPolicies.enabled"
+# Argo CD's patches apply to its vendored policies: every rule that admitted
+# every namespace (a namespaceSelector {}, or the server's empty rule) admits
+# the platform alone after them, and none is left. jq, not yq, compares the
+# objects; both sides are counted, so a check that reads nothing fails.
+argocd_open='select(.kind == "NetworkPolicy") | .spec.ingress[]? | select(. == {} or ((.from // []) | any(.namespaceSelector == {})))'
+argocd_peer='select(.kind == "NetworkPolicy") | .spec.ingress[]?.from[]? | select(.namespaceSelector == {matchExpressions: [{key: "infrared.darkshift.io/org", operator: "DoesNotExist"}, {key: "infrared.darkshift.io/zone", operator: "DoesNotExist"}]})'
+argocd_count() { yq -N -o json -I0 . "$2" | jq -c "$1" | wc -l | tr -d ' '; }
+mkdir -p "$work/fence-argocd"
+cp -R "$work/fence/components/argocd" "$work/fence-argocd/base"
+{ printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: [base]\npatches:\n'
+  yq '.spec.source.kustomize.patches' "$work/fence/registry/clusters/demo-fn/components/argocd.yaml" | sed 's/^/  /'; } >"$work/fence-argocd/kustomization.yaml"
+if kubectl kustomize "$work/fence-argocd/base" >"$work/fence-argocd-base.yaml" 2>"$work/fence-argocd.err" \
+  && kubectl kustomize "$work/fence-argocd" >"$work/fence-argocd.yaml" 2>"$work/fence-argocd.err"; then
+  open_before="$(argocd_count "$argocd_open" "$work/fence-argocd-base.yaml")"
+  open_after="$(argocd_count "$argocd_open" "$work/fence-argocd.yaml")"
+  argocd_peers="$(argocd_count "$argocd_peer" "$work/fence-argocd.yaml")"
+  argocd_policies="$(argocd_count 'select(.kind == "NetworkPolicy")' "$work/fence-argocd.yaml")"
+  [ "$open_before" -gt 0 ] && [ "$open_after" = 0 ] && [ "$argocd_peers" = "$open_before" ] && [ "$argocd_policies" = 7 ] \
+    && ok "fence: Argo CD's $open_before rules that admitted every namespace admit the platform alone, and none of its seven policies admits every namespace" \
+    || bad "fence: Argo CD's policies: $open_before rules admitted every namespace before the patches, $open_after after, $argocd_peers admit the platform, $argocd_policies policies (want 7)"
+else
+  bad "fence: Argo CD's patches do not apply: $(head -c 300 "$work/fence-argocd.err")"
+fi
+for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr"; do
+  if kubeconform -strict -ignore-missing-schemas -summary -schema-location default "$out-built" >/dev/null; then
+    ok "$(basename "$out"): kubeconform"
+  else
+    bad "$(basename "$out"): kubeconform"
+  fi
+done
+
+# --- The registry by identity and the stores' own security (ADR 0066 D3) ------------
+# With RegistryPulls (the operator's INFRARED_REGISTRY_PULLS), zot-base reads for
+# no one without a login: "**" grants neither anonymous nor default read, every
+# signed-in user reads platform/ (kpack's builder, which each org's builds run as
+# its own user), and with Agent Substrate's test actors, which atelet pulls with
+# no login, anyone reads platform/substrate/. With StoresSecurity
+# (INFRARED_STORES_SECURITY), SeaweedFS runs under its own security. Each, without
+# the stores and the registry, changes only the infrared Application, which
+# carries it; with them, only what it is for.
+d3_diff() { { diff -rq "$1" "$2" || true; } | sed -E "s#^Files $1/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//'; }
+"$work/render" -out "$work/d3-alone" -cluster demo -flavor k3s -build-registry "" -registry-pulls -stores-security >/dev/null
+[ "$(d3_diff "$work/k3s" "$work/d3-alone")" = "$infrared_app" ] \
+  && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.tenancy' "$work/d3-alone/$infrared_app")" \
+    = '{"registryPulls":{"enabled":true},"storesSecurity":{"enabled":true}}' ] \
+  && ok "d3-alone: without the stores and the registry, both switches change only the infrared Application, which carries them" \
+  || bad "d3-alone: differs from the plain k3s render in '$(d3_diff "$work/k3s" "$work/d3-alone")', or the infrared Application does not carry both"
+
+# The registry: the one install's shape (Substrate with its test actors), and
+# without the test actors. Against the same render with the switch off, only
+# zot-base, three comments and the infrared Application change.
+yq -p json -o json '. + {"RegistryPulls": true}' "$work/substrate.json" >"$work/pulls.json"
+yq -p json -o json '.Disabled += ["substrate-test-actors"]' "$work/pulls.json" >"$work/pulls-no-actors.json"
+"$work/render" -out "$work/pulls-open" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/substrate.json" >/dev/null
+"$work/render" -out "$work/pulls" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/pulls.json" >/dev/null
+"$work/render" -out "$work/pulls-no-actors" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/pulls-no-actors.json" >/dev/null
+want_pulls="components/builds/README.md components/builds/builder.yaml components/zot/base.yaml"
+want_pulls="$want_pulls registry/clusters/demo-pl/components/infrared.yaml registry/clusters/demo-pl/components/zot.yaml"
+[ "$(d3_diff "$work/pulls-open" "$work/pulls")" = "$(words "$want_pulls")" ] \
+  && ok "pulls: renders what the switch off does, but $want_pulls" \
+  || bad "pulls: differs from the switch off in '$(d3_diff "$work/pulls-open" "$work/pulls")', want '$want_pulls'"
+zb_rules() { sel "$1/components/zot/base.yaml" 'select(.kind == "ConfigMap" and .metadata.name == "zot-base") | .data["config.json"]' | jq -c -S "$2"; }
+pulls_platform='{"actions":["read","create","update","delete"],"users":["platform"]}'
+pulls_closed="{\"**\":{\"anonymousPolicy\":[],\"defaultPolicy\":[]},\"platform/**\":{\"anonymousPolicy\":[],\"defaultPolicy\":[\"read\"],\"policies\":[$pulls_platform]}}"
+pulls_actors="$(jq -c -S --argjson p "$pulls_platform" '. + {"platform/substrate/**": {anonymousPolicy: ["read"], defaultPolicy: ["read"], policies: [$p]}}' <<<"$pulls_closed")"
+[ "$(zb_rules "$work/pulls-no-actors" '.http.accessControl.repositories')" = "$pulls_closed" ] \
+  && ok "pulls-no-actors: zot-base reads for no one without a login, and every signed-in user reads platform/" \
+  || bad "pulls-no-actors: zot-base's rules are $(zb_rules "$work/pulls-no-actors" '.http.accessControl.repositories')"
+[ "$(zb_rules "$work/pulls" '.http.accessControl.repositories')" = "$pulls_actors" ] \
+  && [ "$(zb_rules "$work/pulls" '.http.accessControl.adminPolicy')" = '{"actions":["read","delete"],"users":["infrared"]}' ] \
+  && [ "$(zb_rules "$work/pulls" '.http.auth')" = '{"apikey":true,"htpasswd":{"path":"/etc/zot-auth/htpasswd"}}' ] \
+  && ok "pulls: and anyone reads platform/substrate/ alone, the test actors atelet pulls with no login; infrared reads and deletes anywhere" \
+  || bad "pulls: zot-base's rules are $(zb_rules "$work/pulls" '.http.accessControl')"
+[ "$(yq -r '.spec.sources[0].helm.valuesObject.tenancy.registryPulls.enabled' "$work/pulls/registry/clusters/demo-pl/components/infrared.yaml")" = true ] \
+  && ok "pulls: the infrared Application carries tenancy.registryPulls.enabled" \
+  || bad "pulls: the infrared Application does not carry tenancy.registryPulls.enabled"
+if kubectl kustomize "$work/pulls/components/zot" >"$work/pulls-zot.yaml" \
+  && kubeconform -strict -ignore-missing-schemas -summary "$work/pulls-zot.yaml" >/dev/null; then
+  ok "pulls: components/zot builds and passes kubeconform"
+else
+  bad "pulls: components/zot does not build or pass kubeconform"
+fi
+
+# The stores' own security: the one install's shape, and without cert-manager,
+# where only the tokens hold. Against the same render with the switch off, only
+# SeaweedFS's Application, its PreSync hook and the infrared Application change.
+yq -p json -o json '. + {"StoresSecurity": true}' "$work/substrate.json" >"$work/stores-sec.json"
+yq -p json -o json '.Disabled += ["cert-manager"]' "$work/stores-sec.json" >"$work/stores-sec-no-cm.json"
+"$work/render" -out "$work/stores-sec" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/stores-sec.json" >/dev/null
+"$work/render" -out "$work/stores-sec-no-cm" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/stores-sec-no-cm.json" >/dev/null
+want_sec="components/seaweedfs/prepare.yaml registry/clusters/demo-pl/components/infrared.yaml registry/clusters/demo-pl/components/seaweedfs.yaml"
+[ "$(d3_diff "$work/pulls-open" "$work/stores-sec")" = "$(words "$want_sec")" ] \
+  && ok "stores-sec: renders what the switch off does, but $want_sec" \
+  || bad "stores-sec: differs from the switch off in '$(d3_diff "$work/pulls-open" "$work/stores-sec")', want '$want_sec'"
+sw_app="$work/stores-sec/registry/clusters/demo-pl/components/seaweedfs.yaml"
+sw_v='.spec.sources[] | select(.chart == "seaweedfs") | .helm.valuesObject'
+sw_keys() { yq -o json -I0 "$sw_v | $2" "$1" | jq -c -S '[to_entries[] | select(.key | startswith("WEED_JWT")) | .key + "<-" + .value.secretKeyRef.name + "/" + .value.secretKeyRef.key]'; }
+[ "$(yq -o json -I0 "$sw_v | .global.seaweedfs | [.enableSecurity, .securityConfig.jwtSigning]" "$sw_app")" \
+    = '[true,{"volumeWrite":false,"volumeRead":false,"filerWrite":false,"filerRead":false}]' ] \
+  && [ "$(sel "$sw_app" "$sw_v | .master.disableHttp")" = true ] \
+  && [ "$(sw_keys "$sw_app" .master.extraEnvironmentVars)" = '["WEED_JWT_SIGNING_KEY<-seaweedfs-jwt/volume-write"]' ] \
+  && [ "$(sw_keys "$sw_app" .volume.extraEnvironmentVars)" = '["WEED_JWT_SIGNING_KEY<-seaweedfs-jwt/volume-write"]' ] \
+  && [ "$(sw_keys "$sw_app" .filer.secretExtraEnvironmentVars)" \
+    = '["WEED_JWT_FILER_SIGNING_KEY<-seaweedfs-jwt/filer-write","WEED_JWT_FILER_SIGNING_READ_KEY<-seaweedfs-jwt/filer-read","WEED_JWT_SIGNING_KEY<-seaweedfs-jwt/volume-write"]' ] \
+  && [ "$(sw_keys "$sw_app" .s3.extraEnvironmentVars)" \
+    = '["WEED_JWT_FILER_SIGNING_KEY<-seaweedfs-jwt/filer-write","WEED_JWT_FILER_SIGNING_READ_KEY<-seaweedfs-jwt/filer-read"]' ] \
+  && [ "$(sel "$sw_app" "$sw_v | .filer.extraEnvironmentVars.WEED_FILER_EXPOSE_DIRECTORY_METADATA_ENABLED")" = false ] \
+  && [ "$(line "$sw_app" "$sw_v | .filer | [.livenessProbe.httpGet.path, .readinessProbe.httpGet.path] | .[]")" = "/healthz /readyz" ] \
+  && ok "stores-sec: gRPC under mutual TLS, the chart's own keys off, each server its keys from seaweedfs-jwt, the master's HTTP off, the filer probed on /healthz and /readyz" \
+  || bad "stores-sec: SeaweedFS's security values are wrong: $(yq -o json -I0 "$sw_v | [.global, .master, .volume.extraEnvironmentVars, .s3.extraEnvironmentVars]" "$sw_app")"
+sw_prep="$work/stores-sec/components/seaweedfs/prepare.yaml"
+prep_env() { sel "$1" "select(.kind == \"Job\" and .metadata.name == \"seaweedfs-prepare\") | .spec.template.spec.containers[0].env[] | select(.name == \"$2\") | .value"; }
+[ "$(prep_env "$sw_prep" JWT_SECRET)" = seaweedfs-jwt ] \
+  && [ "$(prep_env "$sw_prep" WAIT_CRDS)" = "externalsecrets.external-secrets.io certificates.cert-manager.io issuers.cert-manager.io" ] \
+  && [ "$(prep_env "$sw_prep" WAIT_SERVICES)" = "stores/postgres-rw cert-manager/cert-manager-webhook" ] \
+  && sel "$sw_prep" 'select(.kind == "Role" and .metadata.name == "seaweedfs-prepare") | .rules[0].resourceNames[]' | grep -qx seaweedfs-jwt \
+  && [ "$(sel "$sw_prep" 'select(.kind == "Job" and .metadata.name == "seaweedfs-prepare") | .spec.template.spec.containers[0].command[2]' \
+      | grep -cE '^if ! kubectl get secret "\$JWT_SECRET"|^  (volume-write|filer-write|filer-read): \$')" = 4 ] \
+  && ok "stores-sec: the PreSync hook makes seaweedfs-jwt once, and waits for cert-manager's CRDs and webhook" \
+  || bad "stores-sec: the PreSync hook does not make seaweedfs-jwt once, or does not wait for cert-manager"
+sw_app_nocm="$work/stores-sec-no-cm/registry/clusters/demo-pl/components/seaweedfs.yaml"
+[ "$(sel "$sw_app_nocm" "$sw_v | .global.seaweedfs.enableSecurity")" = null ] \
+  && [ "$(sw_keys "$sw_app_nocm" .s3.extraEnvironmentVars)" = "$(sw_keys "$sw_app" .s3.extraEnvironmentVars)" ] \
+  && [ "$(prep_env "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" WAIT_SERVICES)" = stores/postgres-rw ] \
+  && [ "$(prep_env "$work/stores-sec-no-cm/components/seaweedfs/prepare.yaml" WAIT_CRDS)" = externalsecrets.external-secrets.io ] \
+  && ok "stores-sec-no-cm: without cert-manager, the tokens alone, and no wait for it" \
+  || bad "stores-sec-no-cm: without cert-manager, SeaweedFS still asks for mutual TLS, or the hook waits for cert-manager"
+if kubectl kustomize "$work/stores-sec/components/seaweedfs" >"$work/stores-sec-seaweedfs.yaml" \
+  && kubeconform -strict -ignore-missing-schemas -summary "$work/stores-sec-seaweedfs.yaml" >/dev/null; then
+  ok "stores-sec: components/seaweedfs builds and passes kubeconform"
+else
+  bad "stores-sec: components/seaweedfs does not build or pass kubeconform"
+fi
+# SeaweedFS's chart itself, with these values: the chart makes its keys with
+# lookup and randAlphaNum, new at every render under Argo CD, so two renders
+# must be the same and its security config must hold no key, only the gRPC
+# certificates' paths. Skipped (and said) when the chart can't be fetched.
+sw_version="$(yq -r '.spec.sources[] | select(.chart == "seaweedfs") | .targetRevision' "$sw_app")"
+yq "$sw_v" "$sw_app" >"$work/sw-values.yaml"
+if helm pull seaweedfs --repo https://seaweedfs.github.io/seaweedfs/helm --version "$sw_version" --untar -d "$work/sw-chart" >/dev/null 2>&1; then
+  if helm template seaweedfs "$work/sw-chart/seaweedfs" -n stores -f "$work/sw-values.yaml" >"$work/sw1.yaml" 2>"$work/sw.err" \
+    && helm template seaweedfs "$work/sw-chart/seaweedfs" -n stores -f "$work/sw-values.yaml" >"$work/sw2.yaml" 2>>"$work/sw.err"; then
+    sw_toml="$(sel "$work/sw1.yaml" 'select(.kind == "ConfigMap" and .metadata.name == "seaweedfs-security-config") | .data["security.toml"]')"
+    sw_env() { line "$work/sw1.yaml" "select(.metadata.name == \"seaweedfs-$1\" and (.kind == \"StatefulSet\" or .kind == \"Deployment\"))
+      | .spec.template.spec.containers[0].env[] | select(.name | test(\"^WEED_JWT\")) | .name + \"<-\" + .valueFrom.secretKeyRef.key"; }
+    cmp -s "$work/sw1.yaml" "$work/sw2.yaml" \
+      && grep -qx '\[grpc\]' <<<"$sw_toml" && ! grep -q '^\[jwt' <<<"$sw_toml" && ! grep -qi 'key = "[^/]' <<<"$sw_toml" \
+      && [ "$(line "$work/sw1.yaml" 'select(.kind == "Certificate") | .metadata.name' | tr ' ' '\n' | grep -cE '^seaweedfs-(ca|master|volume|filer|client)-cert$')" = 5 ] \
+      && [ "$(sw_env master)" = "WEED_JWT_SIGNING_KEY<-volume-write" ] && [ "$(sw_env volume)" = "WEED_JWT_SIGNING_KEY<-volume-write" ] \
+      && [ "$(sw_env filer | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" \
+        = "WEED_JWT_FILER_SIGNING_KEY<-filer-write WEED_JWT_FILER_SIGNING_READ_KEY<-filer-read WEED_JWT_SIGNING_KEY<-volume-write" ] \
+      && [ "$(sw_env s3 | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" = "WEED_JWT_FILER_SIGNING_KEY<-filer-write WEED_JWT_FILER_SIGNING_READ_KEY<-filer-read" ] \
+      && sel "$work/sw1.yaml" 'select(.kind == "StatefulSet" and .metadata.name == "seaweedfs-master") | .spec.template.spec.containers[0].command[2]' | grep -q -- '-disableHttp' \
+      && [ "$(line "$work/sw1.yaml" 'select(.kind == "StatefulSet" and .metadata.name == "seaweedfs-filer") | .spec.template.spec.containers[0] | [.livenessProbe.httpGet.path, .readinessProbe.httpGet.path] | .[]')" = "/healthz /readyz" ] \
+      && ok "stores-sec: SeaweedFS $sw_version renders the same twice, its security config the gRPC certificates' paths and no key, each server's keys by environment, the master without HTTP" \
+      || bad "stores-sec: SeaweedFS $sw_version's render is wrong (two renders differ, a key in its security config, or a server without its keys)"
+    if kubeconform -strict -ignore-missing-schemas -summary "$work/sw1.yaml" >/dev/null; then ok "stores-sec: SeaweedFS's render passes kubeconform"
+    else bad "stores-sec: SeaweedFS's render fails kubeconform"; fi
+  else
+    bad "stores-sec: helm template seaweedfs $sw_version: $(head -c 300 "$work/sw.err")"
+  fi
+else
+  echo "skip: seaweedfs $sw_version could not be fetched; its render is not checked"
+fi
 
 # --- Grafana's sign-in through Infrared (ADR 0053) ---------------------------------
 # With OIDC, GrafanaURL and InfraredHost (variant oidc, from a -data file as the

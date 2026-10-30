@@ -236,6 +236,29 @@ type Data struct {
 	// <GrafanaURL>/login/generic_oauth. Empty renders as before the field
 	// existed.
 	GrafanaURL string `json:"GrafanaURL,omitempty"`
+	// NetworkPolicies is the operator's INFRARED_NETWORK_POLICIES, the
+	// Infrared chart's tenancy.networkPolicies.enabled: every platform
+	// namespace gets its ingress NetworkPolicy, Argo CD's own policies admit
+	// no org's namespace, and the infrared Application carries the setting
+	// (infrared-docs-internal ADR 0066 D1; see "The network fence"). False
+	// renders as before the field existed, and an operator leaves it out of
+	// the data.
+	NetworkPolicies bool `json:"NetworkPolicies,omitempty"`
+	// RegistryPulls is the operator's INFRARED_REGISTRY_PULLS, the Infrared
+	// chart's tenancy.registryPulls.enabled: zot-base reads for no one without
+	// a login, each zone pulls as its org's own registry user (the operator
+	// hands it zot-pull), and the infrared Application carries the setting
+	// (infrared-docs-internal ADR 0066 D3; see "The registry"). False renders
+	// as before the field existed, and an operator leaves it out of the data.
+	RegistryPulls bool `json:"RegistryPulls,omitempty"`
+	// StoresSecurity is the operator's INFRARED_STORES_SECURITY, the Infrared
+	// chart's tenancy.storesSecurity.enabled: SeaweedFS takes no caller it
+	// cannot identify (gRPC under mutual TLS from cert-manager, the filer's
+	// HTTP and volume writes under signed tokens, the master's HTTP admin
+	// off), and the infrared Application carries the setting (ADR 0066 D3; see
+	// "The stores' own security"). False renders as before the field existed,
+	// and an operator leaves it out of the data.
+	StoresSecurity bool `json:"StoresSecurity,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -578,6 +601,9 @@ func main() {
 		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
 	flag.BoolVar(&d.OIDC, "oidc", false, "OIDC: Infrared is the OpenID Connect provider of the install's own tools (INFRARED_OIDC); with -grafana-url and -infrared-host, Grafana signs people in through it")
 	flag.StringVar(&d.GrafanaURL, "grafana-url", "", "GrafanaURL: Grafana's address in a browser, http(s) with no trailing slash (INFRARED_OIDC_GRAFANA_URL; empty for none)")
+	flag.BoolVar(&d.NetworkPolicies, "network-policies", false, "NetworkPolicies: every platform namespace's ingress NetworkPolicy, the network fence (INFRARED_NETWORK_POLICIES)")
+	flag.BoolVar(&d.RegistryPulls, "registry-pulls", false, "RegistryPulls: the registry reads for no one without a login, and each zone pulls as its org (INFRARED_REGISTRY_PULLS)")
+	flag.BoolVar(&d.StoresSecurity, "stores-security", false, "StoresSecurity: SeaweedFS under its own security, mutual TLS and signed tokens (INFRARED_STORES_SECURITY)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -661,6 +687,8 @@ func mergeDataFile(d *Data, path string) error {
 		"running-chart-version":  func() { d.RunningChartVersion = explicit.RunningChartVersion },
 		"oidc":                   func() { d.OIDC = explicit.OIDC },
 		"grafana-url":            func() { d.GrafanaURL = explicit.GrafanaURL },
+		"registry-pulls":         func() { d.RegistryPulls = explicit.RegistryPulls },
+		"stores-security":        func() { d.StoresSecurity = explicit.StoresSecurity },
 	}
 	for name, apply := range overrides {
 		if set[name] {

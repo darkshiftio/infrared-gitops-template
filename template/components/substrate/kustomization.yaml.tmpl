@@ -41,6 +41,9 @@ resources:
   - atenet-router.yaml
   - atenet-egress.yaml
   - sandboxconfig-gvisor.yaml
+[[- if .NetworkPolicies ]]
+  - fence.yaml
+[[- end ]]
 [[- if .SubstrateRegistry ]]
 # Substrate's images from [[ .SubstrateRegistry ]] (INFRARED_SUBSTRATE_REGISTRY), each
 # by the same tag and digest as on ghcr.

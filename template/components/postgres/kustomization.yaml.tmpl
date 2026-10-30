@@ -14,6 +14,9 @@ resources:
 [[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
   - backup.yaml
 [[- end ]]
+[[- if .NetworkPolicies ]]
+  - fence.yaml
+[[- end ]]
 [[- else -]]
 # The platform's own stores are off (INFRARED_STORES), so this component holds
 # no objects and no Application points at it.

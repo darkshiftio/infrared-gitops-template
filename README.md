@@ -81,6 +81,9 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.RunningChartVersion` | absent (an older operator), `0.1.0-alpha.153` | the chart version of the operator that renders; the `infrared` Application carries Infrared's image pins (`.Images`) only while `.InfraredChartVersion` equals it, so an upgrade that pins a newer chart runs that chart's images, its operator included, which then pins its own |
 | `.OIDC` | absent or `false`, `true` | the operator's `INFRARED_OIDC`, the Infrared chart's `oidc.enabled`: Infrared is the OpenID Connect provider of the install's own tools (infrared-docs-internal ADR 0053). With `.GrafanaURL` and `.InfraredHost`, Grafana signs people in through Infrared (see "Grafana's sign-in through Infrared"); without either, it changes nothing |
 | `.GrafanaURL` | absent or ``, `https://grafana.infrared-cp-google.private.darkshift.io` | the operator's `INFRARED_OIDC_GRAFANA_URL`, the chart's `oidc.grafanaURL`: Grafana's address in a browser, http(s) with no trailing slash. Grafana's `root_url` is it with a slash, and its redirect URI `<GrafanaURL>/login/generic_oauth`, which infrared-api matches exactly |
+| `.NetworkPolicies` | absent or `false`, `true` | the operator's `INFRARED_NETWORK_POLICIES`, the Infrared chart's `tenancy.networkPolicies.enabled`: the network fence (infrared-docs-internal ADR 0066 D1). Every platform namespace a component makes gets its ingress NetworkPolicy, Argo CD's own policies admit no org's namespace, and the `infrared` Application carries the setting (see "The network fence"); the operator fences each org's namespaces itself |
+| `.RegistryPulls` | absent or `false`, `true` | the operator's `INFRARED_REGISTRY_PULLS`, the Infrared chart's `tenancy.registryPulls.enabled`: the registry by identity (ADR 0066 D3). `zot-base` reads for no one without a login, every signed-in user reads `platform/`, and with Agent Substrate's test actors anyone reads `platform/substrate/`; the operator gives each zone its org's own pull credential, and the `infrared` Application carries the setting (see "The registry") |
+| `.StoresSecurity` | absent or `false`, `true` | the operator's `INFRARED_STORES_SECURITY`, the Infrared chart's `tenancy.storesSecurity.enabled`: SeaweedFS under its own security (ADR 0066 D3), mutual TLS on gRPC from cert-manager and signed tokens on the filer's HTTP and on volume writes, the master's HTTP off; the `infrared` Application carries the setting (see "The stores' own security") |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -92,9 +95,10 @@ array, exactly as the operator's environment carries them, `-forge` with
 `INFRARED_REGISTRY_RETENTION` carries it (camelCase keys); `-copies`,
 `-postgres-archive` and `-restore` as their Data in JSON (camelCase keys too);
 `-postgres-server-name`; `-oidc` with `-grafana-url`; `-domain-token-key`
-(with `-edge gateway` and `-platform-domain`); and `-tunnel-id` with
+(with `-edge gateway` and `-platform-domain`); `-tunnel-id` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
-`cloudflare-tunnel-credentials`).
+`cloudflare-tunnel-credentials`); `-network-policies`; and `-registry-pulls`
+and `-stores-security`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -142,7 +146,20 @@ routes' comments and cloudflared), the files of what it leaves out
 objects), the Envoy Gateway Application's comment, the store, the README and
 the `infrared` Application; `hack/render` refuses it without `.Edge`
 `gateway`, and the operator leaves both tunnel fields out of its data while
-the tunnel is unset (`make verify` checks it).
+the tunnel is unset (`make verify` checks it). `.NetworkPolicies` adds a
+`fence.yaml` to the components that make a platform namespace (`builds`,
+`edge`, `external-dns`, `postgres`, `substrate`, `substrate-actors`,
+`substrate-podcert`, `telemetry`), each of which holds no objects without
+it, and changes the Applications that carry a policy in their chart's
+values (`cert-manager`, `external-secrets`, `victoria-metrics-k8s-stack`),
+the `argocd` Application (its patches) and the `infrared` Application; the
+operator leaves it out of its data while it is unset (`make verify` checks
+it). `.RegistryPulls` changes `zot-base`, the comments of `zot`'s
+Application, of the builder and of the builds README, and the `infrared`
+Application; `.StoresSecurity` changes SeaweedFS's Application, its PreSync
+hook and the `infrared` Application; without `.Stores` and `.Registry` each
+changes the `infrared` Application alone. The operator leaves both out of
+its data while they are unset (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -212,6 +229,9 @@ set, so a cluster without it renders the same file as before:
 | `.RegistryToken` | `registryToken: {gcpServiceAccount, registry}`, or on AWS `registryToken: {aws: {region, roleArn}, registry}` (`roleArn` only when set), and `imagePullSecrets: []` in place of `.ImagePullSecret`, which the chart derives from the token |
 | `.CloudIdentity` | `cloudIdentity: {gcpServiceAccount, aws: {roleARN}}`, or `aws: {hostNetwork: true}` or `aws: {webIdentity: true}` instead of `roleARN`; each part only when set, and nothing without `.CloudIdentity` |
 | `.Images` (operator, api, ui, runner, mcp, and the code index's `image`) | each component's `image: {tag, digest}`, only while `.InfraredChartVersion` is `.RunningChartVersion` (or that is absent) |
+| `.NetworkPolicies` | `tenancy.networkPolicies.enabled: true` |
+| `.RegistryPulls` | `tenancy.registryPulls.enabled: true` |
+| `.StoresSecurity` | `tenancy.storesSecurity.enabled: true` |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -717,9 +737,10 @@ every layer and manifest in SeaweedFS's bucket `registry`. Its Service
 `registry/zot` is a ClusterIP pinned to `.Registry`'s address, on its port, plain
 HTTP: each node mirrors that address to it (k3s's `registries.yaml`, written when
 the node is made, so the template never sets it), and anything in the cluster
-pulls without a login. Builds name the registry by that address, never by a
-name: go-containerregistry, which kpack and the buildpack lifecycle push with,
-falls back to plain HTTP only for a private address.
+pulls without a login, unless the install pulls by identity (below). Builds name
+the registry by that address, never by a name: go-containerregistry, which kpack
+and the buildpack lifecycle push with, falls back to plain HTTP only for a
+private address.
 
 | Application | What |
 |---|---|
@@ -750,12 +771,43 @@ pod and an API key does not. The pods carry `app.kubernetes.io/name: zot`, which
 the operator's network rule for publishing steps selects. Removing the `zot`
 Application removes Zot and nothing in the bucket.
 
-Two checks run against a cluster, never from CI:
+**Pulls by identity.** With `.RegistryPulls` (the Infrared chart's
+`tenancy.registryPulls.enabled`; infrared-docs-internal ADR 0066 D3, workspace
+TODO 473) no one reads the registry without a login, so no pod pulls another
+org's images. In `zot-base`, `"**"` grants neither anonymous nor default read,
+and `platform/**` gives read to every signed-in user: kpack's builder, which
+each org's builds run as the org's own user. The operator's rule for each org
+reads for others as `"**"` does, so for no one, and only the org's user reads
+`<org>/`. With Agent Substrate's test actors, anyone still reads
+`platform/substrate/`: atelet pulls an actor's image with no login (Substrate
+`ce05e5d` authenticates to `gcr.io` and `*.pkg.dev` alone), and the copies there
+are Substrate's two demo actors. Leave the test actors out of an install that
+pulls by identity (the chart's `substrate.testActors: false`) to keep even
+that closed.
+
+| Who pulls | With what |
+|---|---|
+| A zone's pods | The Secret `zot-pull`, the org's own user, which the operator writes into each of the org's zone namespaces on this cluster and lists on the namespace's `default` ServiceAccount: every pod made there without image pull secrets of its own pulls with it, a scaffolded zone's included. A pod that runs as another ServiceAccount, or names its own image pull secrets, lists `zot-pull` itself. |
+| A build's pods (`builds-<org>`, `builds`) | The org's push credential, as before: its builder ServiceAccount lists it among its image pull secrets, and it reads `platform/`. |
+| A publishing step | Its API key, the org's user, as before. Its agent holds no credential, so it reads nothing from the registry. |
+| atelet | No login: `platform/substrate/` only, with the test actors. |
+| The operator | `infrared`, which reads and deletes anywhere. |
+
+The nodes' mirror stays as it is: the kubelet hands each pull its pod's
+credential, and the registry answers an anonymous request with a challenge.
+Turning it on, the operator writes the zones' credentials at once, while
+`zot-base` still reads for anyone; turning it off, it keeps them until
+`zot-base` reads for anyone again.
+
+Three checks run against a cluster, never from CI:
 
 ```bash
 scripts/registry-check.sh <context> <org>    # D1, D2: <org> pushes only under <org>/, a copy outlives Zot's pod, and the admin's delete of it leaves the source's blobs
 scripts/registry-build-check.sh <context>    # D3: kpack pushes a whole build to the registry's address over plain HTTP, and a node runs it by digest
+scripts/registry-pulls-check.sh <context> <org> <another org>    # ADR 0066 D3: no anonymous read, each org reads only its own, and each zone pulls only its org's images
 ```
+
+Each reads the registry as `infrared` when it refuses anonymous reads.
 
 ### Agent Substrate
 
@@ -1018,6 +1070,96 @@ not optional: Grafana waits for the API to write the Secret. Nothing in these
 values holds `{{`, since the grafana chart passes `grafana.ini`'s strings through
 `tpl`.
 
+### The network fence
+
+With `.NetworkPolicies` (the Infrared chart's `tenancy.networkPolicies.enabled`;
+infrared-docs-internal ADR 0066 D1, workspace TODO 473) each org is fenced:
+anything inside an org may share, and nothing crosses an org. The operator
+stamps every org's own namespaces (`ir-org-<org>`, `builds-<org>` and each of
+its zones) with the NetworkPolicy `infrared-fence`, which denies both ways
+but the org's own namespaces, DNS, the internet outside the private ranges and
+the platform's few callers of a zone. This repo gives the platform's
+namespaces their side: an ingress policy in each namespace a component makes,
+which admits **the platform**, every namespace that is neither an org's (label
+`infrared.darkshift.io/org`) nor a zone's (`infrared.darkshift.io/zone`).
+Platform components keep reaching each other, an install's own components
+(a tailnet router, say) too, and no org's namespace or zone gets in. A zone
+carries the zone label from the moment Argo CD makes it, so it is never taken
+for the platform.
+
+| Namespace | Policy (component) | Admits |
+|---|---|---|
+| `envoy-gateway-system`, but Envoy's pods | `infrared-fence` (`edge`) | the platform; the control plane on Envoy Gateway's topology injector webhook, 9443 |
+| Envoy's pods of the Gateway `edge` | `infrared-edge` (`edge`) | Cloudflare on 10080 and 10443, through the nodes' hostPorts (an `ipBlock` of `0.0.0.0/0`, which on GKE Dataplane V2 never matches a pod or a node); Infrared's operator on 10443 (its HTTPS check of each zone's addresses, through the Service `edge`); cloudflared on 10443, from this namespace (the tunnel's one in-cluster hop, ADR 0064; no such pod runs without it); vmagent on the metrics port, 19001. Nothing else: no pod in the cluster reaches Envoy's listeners but the operator and cloudflared. |
+| `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform |
+| `external-dns` | `infrared-fence` (`external-dns`) | the platform |
+| `cert-manager`, `external-secrets` | `infrared-fence` (their charts' `extraObjects`) | the platform; the control plane on each webhook's port, 10250 |
+| `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
+| `cnpg-system` | `infrared-fence` (`postgres`) | the platform; the control plane on CloudNativePG's webhook, 9443 |
+| `builds`, `build-credentials`, `kpack` | `infrared-fence` (`builds`) | the platform; the control plane on kpack's webhook, 8443 |
+| `monitoring` | `infrared-fence` (the metrics stack's `extraObjects`, or `telemetry`) | the platform |
+| `ate-system`, but the API's and the router's pods | `infrared-fence` (`substrate`) | the platform; the API and the router keep their own two policies alone |
+| `ate-workers`, `podcertificate-controller-system` | `infrared-fence` (`substrate-actors`, `substrate-podcert`) | the platform |
+| `argocd` | Argo CD's own seven, six of them patched (the `argocd` Application) | the platform, where each admitted every namespace: the server, and the metrics of the controller (whose `argocd_app_info` names every org's Applications), the repo server, the ApplicationSet controller, Dex and notifications. Redis's admits Argo CD's own pods alone already. Each patch tests the vendored value first, so an Argo CD bump that moves it fails the sync rather than patching the wrong rule |
+| `infrared` | the Infrared chart's | the API admits its callers alone (the UI, MCP, the operator, the summary video Jobs, Envoy for zones' sign-in checks, Alertmanager, Grafana, vmagent); every other pod the platform; Gitea the org's runners and builds on 3000; the MCP server the steps that may use it on 8081 |
+
+Two namespaces have none. `registry`: every node's containerd pulls from Zot
+by its pinned address, and on Dataplane V2 a node other than Zot's own is
+`remote-node`, which no NetworkPolicy can admit, so a policy on Zot would
+stop those pulls; Zot's fence is its users (ADR 0066 D3). `code-index`: its
+own policy already admits infrared-api alone. Infisical has none here; a
+hosted install leaves it out. The kubelet's probes come from the node, which a
+policy never blocks.
+
+An install that wires a zone of its own to a platform store (the home's
+front-office reads the platform's Postgres) adds its own allow on both sides;
+policies add up, so nothing here changes for it.
+
+`scripts/fence-check.sh <context> <org> [another org]` checks a running install
+from one of the org's zones: DNS and the internet answer, every platform
+service is refused, and two orgs' zones refuse each other both ways. It runs
+against a cluster, never from CI.
+
+### The stores' own security
+
+With `.StoresSecurity` (the Infrared chart's `tenancy.storesSecurity.enabled`;
+infrared-docs-internal ADR 0066 D3) SeaweedFS takes no caller it cannot
+identify, behind the network fence or not (which admits CloudNativePG and
+vmagent to the stores on every port):
+
+| Port | With `.StoresSecurity` |
+|---|---|
+| Filer HTTP 8888 | A token signed with `filer-read` or `filer-write` from `stores/seaweedfs-jwt`, as the S3 gateways sign theirs; no directory listing. `/healthz` and `/readyz` answer, and the filers are probed there. |
+| Filer, master, volume and S3 gRPC | Mutual TLS: the SeaweedFS chart's own CA and certificates (`global.seaweedfs.enableSecurity`), which cert-manager issues and renews in `stores`, and SeaweedFS reloads. |
+| Master HTTP 9333 | Off (`-disableHttp`): no assign, lookup, collection delete, grow or vacuum. `/cluster/status`, which the probes ask, stays. |
+| Volume HTTP 8080 | A write or a delete needs a token the master or a filer signed with `volume-write`. A read by file id stays open: SeaweedFS signs reads only without a filer. A file id holds a random 32-bit cookie, and no listing exists. |
+| S3 8333 | The S3 identities, as before. |
+
+The keys are generated in the cluster: the `seaweedfs` Application's PreSync
+hook makes `stores/seaweedfs-jwt` (`volume-write`, `filer-write`, `filer-read`)
+once, never replaces it and never prints it, and each server reads its own
+from its environment (`WEED_JWT_SIGNING_KEY`, `WEED_JWT_FILER_SIGNING_KEY`,
+`WEED_JWT_FILER_SIGNING_READ_KEY`). The chart's own key generation is off
+(`global.seaweedfs.securityConfig.jwtSigning`): it makes keys with `lookup`
+and `randAlphaNum`, new at every render under Argo CD, so its security config
+holds only the certificates' paths (`make verify` renders the chart twice and
+compares). The hook also waits for cert-manager's CRDs and webhook. Without
+cert-manager (`.Disabled`) only the tokens hold, and gRPC stays plain.
+
+Zot, Agent Substrate, the copies and the restore speak S3 with their
+identities, and change nothing. To rotate the keys, delete
+`stores/seaweedfs-jwt`, sync `seaweedfs`, and restart the master, volume, filer
+and S3 pods together. Turning it on over stores that already run rolls every
+server from plain to mutual TLS: expect the object store to refuse for a few
+minutes, so the registry's pulls of uncached images and pushes, Substrate's
+snapshots and a copy that falls then fail and are retried. An install that
+starts with it on has no such window.
+
+`scripts/stores-security-check.sh <context>` checks a running install from a
+pod in `stores`: the filer, master and volume servers refuse a caller without a
+token or a certificate, and the S3 gateway still serves the registry's bucket.
+It runs against a cluster, never from CI.
+
 ### Order on a fresh cluster
 
 On a fresh cluster the root app-of-apps creates every Application within
@@ -1139,6 +1281,8 @@ make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3
 make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000
 make render STORES=true STORES_SINGLE_NODE=true   # one node, as a local install on a Mac
 make render STORES=true REGISTRY=10.43.0.50:5000 SUBSTRATE_CAPABLE=true PULL_SECRET=ghcr-pull
+make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000 EDGE=gateway \
+  PLATFORM_DOMAIN=preprod.example.com NETWORK_POLICIES=true   # the network fence
 make verify                             # the CI gate
 scripts/compare-render.sh origin/main   # this tree's zero-value render against another ref's
 ```

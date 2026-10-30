@@ -928,6 +928,46 @@ func TestDomainTokenKey(t *testing.T) {
 	}
 }
 
+// The network fence (ADR 0066 D1): NetworkPolicies loads from the operator's
+// Data by its Go name, and absent is off, as an operator from before it
+// leaves it out.
+func TestNetworkPoliciesField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string]bool{
+		`{"clusterName": "c1", "NetworkPolicies": true}`: true,
+		`{"clusterName": "c1"}`:                          false,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.NetworkPolicies != want {
+			t.Errorf("%s: loaded NetworkPolicies %t, %v; want %t", body, d.NetworkPolicies, err, want)
+		}
+	}
+}
+
+// The registry by identity and the stores' own security (ADR 0066 D3): each
+// loads from the operator's Data by its Go name, absent is off, as an
+// operator from before them leaves them out, and a flag beside -data wins
+// over the file.
+func TestRegistryPullsAndStoresSecurityFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string][2]bool{
+		`{"clusterName": "c1", "RegistryPulls": true, "StoresSecurity": true}`: {true, true},
+		`{"clusterName": "c1", "StoresSecurity": true}`:                        {false, true},
+		`{"clusterName": "c1"}`:                                                {false, false},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.RegistryPulls != want[0] || d.StoresSecurity != want[1] {
+			t.Errorf("%s: loaded RegistryPulls %t, StoresSecurity %t, %v; want %v", body, d.RegistryPulls, d.StoresSecurity, err, want)
+		}
+	}
+}
+
 // The Cloudflare Tunnel (infrared-docs-internal ADR 0064): the operator hands
 // TunnelID and TunnelCredentialsKey by their Go names, only on a gateway edge,
 // and leaves them out otherwise; the id is a lower-case UUID, the key a
