@@ -1,6 +1,27 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 [[- /* The platform domain on a Cloudflare token of its own (ADR 0063): the zones' wildcard listener takes the certificate edge-domain (certificate.yaml). */ -]]
-[[- $split := and .PlatformDomain .DomainTokenKey -]]
+[[- /* Behind a Cloudflare Tunnel (spec.tunnel, ADR 0064) Envoy binds no node's ports, its Service is a ClusterIP, and one certificate from the cluster's own authority serves every listener: no token splits it. */ -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
+[[- $split := and .PlatformDomain .DomainTokenKey (not $tunnel) -]]
+[[- if $tunnel -]]
+# =============================================================================
+# The Envoy fleet behind the cluster's Cloudflare Tunnel: one Envoy on every
+# node, on no node's ports.
+# =============================================================================
+# The edge is reached through a Cloudflare Tunnel (the Installation's
+# spec.tunnel, infrared-docs-internal ADR 0064). cloudflared (tunnel.yaml)
+# dials out to Cloudflare, which sends each request for the edge's names down
+# that connection, and forwards it to the Service edge below, a ClusterIP. So
+# nothing outside the cluster reaches Envoy, the nodes take no traffic from
+# outside, and no DNS record names a node's address: the edge's names are
+# proxied CNAMEs to the tunnel, made once by a person.
+#
+# Envoy keeps its DaemonSet and its listeners but binds no host port. Envoy
+# listens on 10080 and 10443 inside its pod (Envoy Gateway adds 10000 to a
+# port below 1024), and the Service maps 80 and 443 to those. A rollout
+# replaces one node's Envoy at a time, while the Service sends to the others.
+# =============================================================================
+[[- else -]]
 # =============================================================================
 # The Envoy fleet: one Envoy on every node, on the node's own ports 80 and 443.
 # =============================================================================
@@ -19,6 +40,7 @@
 # every node with a ready Envoy as the Gateway's addresses, which external-dns
 # publishes; the firewall keeps them closed from outside.
 # =============================================================================
+[[- end ]]
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
@@ -38,6 +60,7 @@ spec:
           rollingUpdate:
             maxUnavailable: 1
             maxSurge: 0
+[[- if not $tunnel ]]
         patch:
           type: StrategicMerge
           value:
@@ -55,13 +78,20 @@ spec:
                           containerPort: 10443
                           hostPort: 443
                           protocol: TCP
+[[- end ]]
       # A fixed name, edge, rather than one Envoy Gateway derives from the
       # Gateway's: Infrared dials edge.envoy-gateway-system.svc to check that
       # an address serves.
+[[- if $tunnel ]] cloudflared sends every request there.
+[[- end ]]
       envoyService:
         name: edge
+[[- if $tunnel ]]
+        type: ClusterIP
+[[- else ]]
         type: NodePort
         externalTrafficPolicy: Local
+[[- end ]]
   # Envoy's own default, written out as the API server would store it.
   logging:
     level:
@@ -95,6 +125,11 @@ spec:
 # routes from this namespace alone. The listener http-any takes plain HTTP for
 # every other name, a zone's own address among them, so it redirects too
 # rather than answering 404.
+[[- if $tunnel ]]
+# Behind the tunnel cloudflared sends every request to the HTTPS port, so plain
+# HTTP from outside never reaches these listeners: only Cloudflare's edge can
+# redirect it, with each zone's Always Use HTTPS on.
+[[- end ]]
 #
 # A zone's own addresses (a name outside the platform domain, under a Domain
 # its org verified) are not listed here. Infrared adds them as a ListenerSet

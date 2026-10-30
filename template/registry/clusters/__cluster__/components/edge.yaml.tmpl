@@ -3,9 +3,18 @@
 # edge is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
 [[- else if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
+[[- if .TunnelID -]]
+# The edge (components/edge): one Gateway behind the cluster's Cloudflare
+# Tunnel (the Installation's spec.tunnel, infrared-docs-internal ADR 0064),
+# cloudflared, the Gateway's certificate from a certificate authority inside
+# the cluster, the redirect from port 80, and Infrared's own route. Wave 13,
+# after Envoy Gateway (11); behind a tunnel no origin issuer or external-dns
+# runs.
+[[- else -]]
 # The edge (components/edge): one Gateway behind Cloudflare's proxy, its origin
 # certificate, the redirect from port 80, and Infrared's own route. Wave 13,
 # after Envoy Gateway and the origin issuer (11) and external-dns (12).
+[[- end ]]
 [[- if .PlatformDomain ]]
 # Zones answer at <zone>.[[ .PlatformDomain ]].
 [[- end ]]

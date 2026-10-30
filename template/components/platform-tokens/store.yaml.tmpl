@@ -11,7 +11,11 @@
 # into its own namespace with an ExternalSecret:
 #
 #   key                    copied to
-[[- if eq .Edge "gateway" ]]
+[[- if and (eq .Edge "gateway") .TunnelID ]]
+#   [[ default "cloudflare-tunnel-credentials" .TunnelCredentialsKey ]], the Cloudflare Tunnel's credentials (spec.tunnel)
+#                          envoy-gateway-system/cloudflared-credentials
+#                          (cloudflared's, components/edge/tunnel.yaml)
+[[- else if eq .Edge "gateway" ]]
 #   cloudflare-api-token   external-dns/cloudflare-api-token (DNS records)
 #                          envoy-gateway-system/cloudflare-api-token (origin
 #                          certificates)
@@ -97,7 +101,9 @@ spec:
   conditions:
     - namespaces:
 [[- if eq .Edge "gateway" ]]
+[[- if not .TunnelID ]]
         - external-dns
+[[- end ]]
         - envoy-gateway-system
 [[- end ]]
 [[- if and .Stores .Backup.Bucket ]]

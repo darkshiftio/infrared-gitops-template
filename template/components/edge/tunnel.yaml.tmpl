@@ -1,0 +1,230 @@
+[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) .TunnelID -]]
+[[- $key := default "cloudflare-tunnel-credentials" .TunnelCredentialsKey ]]
+[[- $edge := "https://edge.envoy-gateway-system.svc.cluster.local:443" -]]
+# =============================================================================
+# cloudflared: the edge's Cloudflare Tunnel.
+# =============================================================================
+# The Installation's spec.tunnel (infrared-docs-internal ADR 0064): a locally
+# managed tunnel, [[ .TunnelID ]], whose routes are these,
+# rendered from the Installation's names and never kept in Cloudflare's
+# dashboard. cloudflared dials out to Cloudflare on port 7844 (QUIC on UDP, or
+# HTTP/2 on TCP), and Cloudflare's edge sends each request for the tunnel's
+# names down that connection. cloudflared forwards it to Envoy's Service edge
+# (gateway.yaml) over TLS, as the request's own name, and checks Envoy's
+# certificate against the edge's own authority (certificate.yaml, caPool).
+# The edge's names are proxied CNAMEs, made once by a person, to
+# [[ .TunnelID ]].cfargotunnel.com: nothing here writes DNS.
+#
+# Its routes, the first that matches wins:
+[[- if .InfraredHost ]]
+#   [[ .InfraredHost ]]  Infrared, by that name (originServerName)
+[[- end ]]
+[[- if .PlatformDomain ]]
+#   *.[[ .PlatformDomain ]]  the zones, each by its own name (matchSNItoHost)
+[[- end ]]
+[[- if .CustomHostnames ]]
+#   anything else  Envoy as well, by its own name: the custom hostnames of
+#                  orgs' own domains (spec.previews.customHostnames)
+[[- else ]]
+#   anything else  404
+[[- end ]]
+#
+# Two replicas, never on one node, each holding connections of its own, so a
+# node that goes takes one replica and none of the names. cloudflared reads
+# its config and credentials only at start, so the pods carry the tunnel, its
+# credentials' key and its routes in an annotation, and a change of any rolls
+# them.
+#
+# Waves: the credentials' copy first (-7), before the edge's certificates,
+# since External Secrets' webhook admits it; cloudflared last (1), after the
+# Gateway and its certificate, since it takes visitors the moment it
+# connects.
+# =============================================================================
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cloudflared-credentials
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-7"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-platform
+  target:
+    name: cloudflared-credentials
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: credentials.json
+      remoteRef:
+        key: infrared-platform-tokens
+        property: [[ $key | quote ]]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  config.yaml: |
+    tunnel: [[ .TunnelID | quote ]]
+    credentials-file: /etc/cloudflared/credentials/credentials.json
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+    ingress:
+[[- if .InfraredHost ]]
+      - hostname: [[ .InfraredHost | quote ]]
+        service: [[ $edge ]]
+        originRequest:
+          originServerName: [[ .InfraredHost | quote ]]
+          caPool: /etc/cloudflared/ca/ca.crt
+          http2Origin: true
+[[- end ]]
+[[- if .PlatformDomain ]]
+      - hostname: [[ printf "*.%s" .PlatformDomain | quote ]]
+        service: [[ $edge ]]
+        originRequest:
+          matchSNItoHost: true
+          caPool: /etc/cloudflared/ca/ca.crt
+          http2Origin: true
+[[- end ]]
+[[- if .CustomHostnames ]]
+      - service: [[ $edge ]]
+        originRequest:
+          matchSNItoHost: true
+          caPool: /etc/cloudflared/ca/ca.crt
+          http2Origin: true
+[[- else ]]
+      - service: http_status:404
+[[- end ]]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: envoy-gateway-system
+  labels:
+    app.kubernetes.io/name: cloudflared
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  # One pod at a time, the other keeping its connections: with the replicas
+  # on two nodes, a surge pod would find no node on a cluster of two.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared
+      annotations:
+        # The tunnel, its credentials' key and its routes, read at start.
+        infrared.darkshift.io/tunnel: "[[ .TunnelID ]] [[ $key ]][[ with .InfraredHost ]] [[ . ]][[ end ]][[ with .PlatformDomain ]] *.[[ . ]][[ end ]][[ if .CustomHostnames ]] *[[ else ]] 404[[ end ]]"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: cloudflared
+              topologyKey: kubernetes.io/hostname
+      # cloudflared never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cloudflared
+          # cloudflared 2026.10.5, the image list's digest. Its entrypoint is
+          # cloudflared --no-autoupdate; it runs as 65532, distroless.
+          image: docker.io/cloudflare/cloudflared:2026.10.5@sha256:1b1d34d0a9c0bfca9de72db8460d328db3f19edd2b96169114e3e893a97bbe53
+          args:
+            - tunnel
+            - --config
+            - /etc/cloudflared/config/config.yaml
+            - run
+          ports:
+            - name: metrics
+              containerPort: 2000
+              protocol: TCP
+          # /ready answers 200 once the replica holds a connection to
+          # Cloudflare's edge.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cloudflared/config
+              readOnly: true
+            - name: credentials
+              mountPath: /etc/cloudflared/credentials
+              readOnly: true
+            - name: ca
+              mountPath: /etc/cloudflared/ca
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: cloudflared
+        - name: credentials
+          secret:
+            secretName: cloudflared-credentials
+        # The authority's certificate alone, never its key.
+        - name: ca
+          secret:
+            secretName: edge-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+---
+# A drain keeps one replica, and with it the tunnel, up.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudflared
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+[[- else -]]
+# The edge is not a Gateway with a name to serve behind a Cloudflare Tunnel
+# (the Installation's spec.tunnel): no cloudflared.
+[[- end ]]

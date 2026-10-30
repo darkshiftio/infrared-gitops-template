@@ -20,6 +20,13 @@
 # hands each to the servers that need it).
 [[- if $mtls ]] It waits for cert-manager too, whose
 # certificates carry SeaweedFS's mutual TLS: its CRDs and its webhook.
+#
+# After each sync, the PostSync Job seaweedfs-buckets (the last object here)
+# makes the buckets, with the CA and the client certificate. The chart's own
+# bucket hook does not: SeaweedFS's chart 4.48.0 mounts its security config but
+# not the certificates it names, so its weed shell waits for the master for ever
+# and makes no bucket (fixed upstream after 4.48, seaweedfs#11589); seaweedfs.yaml
+# leaves it out under mutual TLS.
 [[- end ]]
 [[- end ]]
 # =============================================================================
@@ -248,6 +255,125 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+[[- if $mtls ]]
+---
+# After each sync: the buckets ate-snapshots and registry, made with weed shell
+# over SeaweedFS's mutual TLS, as the chart's bucket hook would make them with
+# the certificates it lacks (above). It needs no S3 key and no Kubernetes API.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweedfs-buckets
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seaweedfs
+        app.kubernetes.io/component: bucket-hook
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: buckets
+          # SeaweedFS's own image, the one seaweedfs.yaml pins.
+          image: docker.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+          env:
+            - name: HOME
+              value: /tmp
+            - name: BUCKETS
+              value: "ate-snapshots registry"
+            # The cluster weed shell reaches, as the chart's hook names it.
+            - name: WEED_CLUSTER_DEFAULT
+              value: sw
+            - name: WEED_CLUSTER_SW_MASTER
+              value: seaweedfs-master.stores:9333
+            - name: WEED_CLUSTER_SW_FILER
+              value: seaweedfs-filer-client.stores:8888
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # weed shell waits for a master for ever: two minutes, then this
+              # container fails and the Job starts it again.
+              run() {
+                if ! echo "$1" | timeout 120 weed shell; then
+                  echo "weed shell did not finish '$1' within two minutes, or it failed" >&2
+                  return 1
+                fi
+              }
+              listed="$(run s3.bucket.list)"
+              for bucket in $BUCKETS; do
+                # One awk, reading to the end: grep -q would close the pipe early.
+                if printf '%s\n' "$listed" | awk -v b="$bucket" '$1 "" == b { found = 1 } END { exit !found }'; then
+                  echo "the bucket $bucket exists"
+                else
+                  run "s3.bucket.create --name $bucket"
+                fi
+              done
+              listed="$(run s3.bucket.list)"
+              for bucket in $BUCKETS; do
+                printf '%s\n' "$listed" | awk -v b="$bucket" '$1 "" == b { found = 1 } END { exit !found }' \
+                  || { echo "the bucket $bucket is still missing" >&2; exit 1; }
+              done
+              echo "the buckets $BUCKETS exist"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            # The chart's security config: the gRPC certificates' paths, no key.
+            - name: security-config
+              mountPath: /etc/seaweedfs/security.toml
+              subPath: security.toml
+              readOnly: true
+            # The paths it names for a client: the CA and the client certificate
+            # that cert-manager issues in stores.
+            - name: ca-cert
+              mountPath: /usr/local/share/ca-certificates/ca/
+              readOnly: true
+            - name: client-cert
+              mountPath: /usr/local/share/ca-certificates/client/
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: security-config
+          configMap:
+            name: seaweedfs-security-config
+        - name: ca-cert
+          secret:
+            secretName: seaweedfs-ca-cert
+            # The CA's certificate alone: its key stays out of this pod.
+            items:
+              - key: tls.crt
+                path: tls.crt
+        - name: client-cert
+          secret:
+            secretName: seaweedfs-client-cert
+        - name: tmp
+          emptyDir: {}
+[[- end ]]
 [[- else -]]
 # The platform's own stores are off (INFRARED_STORES): nothing to prepare.
 [[- end ]]
