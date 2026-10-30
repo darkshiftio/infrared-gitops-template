@@ -84,6 +84,11 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.NetworkPolicies` | absent or `false`, `true` | the operator's `INFRARED_NETWORK_POLICIES`, the Infrared chart's `tenancy.networkPolicies.enabled`: the network fence (infrared-docs-internal ADR 0066 D1). Every platform namespace a component makes gets its ingress NetworkPolicy, Argo CD's own policies admit no org's namespace, and the `infrared` Application carries the setting (see "The network fence"); the operator fences each org's namespaces itself |
 | `.RegistryPulls` | absent or `false`, `true` | the operator's `INFRARED_REGISTRY_PULLS`, the Infrared chart's `tenancy.registryPulls.enabled`: the registry by identity (ADR 0066 D3). `zot-base` reads for no one without a login, every signed-in user reads `platform/`, and with Agent Substrate's test actors anyone reads `platform/substrate/`; the operator gives each zone its org's own pull credential, and the `infrared` Application carries the setting (see "The registry") |
 | `.StoresSecurity` | absent or `false`, `true` | the operator's `INFRARED_STORES_SECURITY`, the Infrared chart's `tenancy.storesSecurity.enabled`: SeaweedFS under its own security (ADR 0066 D3), mutual TLS on gRPC from cert-manager and signed tokens on the filer's HTTP and on volume writes, the master's HTTP off; the `infrared` Application carries the setting (see "The stores' own security") |
+| `.TenantPods` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_PODS`, the Infrared chart's `tenancy.tenantPods` as `{"enabled":true,"placement":{...}}`: tenants' pods carry no Kubernetes token, and a zone's pods the install's placement (infrared-docs-internal ADR 0066 D4, D5). The operator does it; the `infrared` Application carries the setting (see "The rest of the tenancy"). `hack/render` refuses anything but one line of JSON with `"enabled":true` and `placement` |
+| `.TenantQuotas` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_QUOTAS`, the chart's `tenancy.quotas` as `{"enabled":true,"zones":{...},"builds":{...}}`: a tenant org's quotas (ADR 0066 D4), which the `infrared` Application carries |
+| `.AdmissionPolicies` | absent or `false`, `true` | the operator's `INFRARED_ADMISSION_POLICIES`, the chart's `tenancy.admissionPolicies.enabled`: the operator's admission policies on tenants' namespaces (ADR 0066 D6), which the `infrared` Application carries |
+| `.DenyLogging` | absent or `false`, `true` | the operator's `INFRARED_DENY_LOGGING`, the chart's `tenancy.denyLogging.enabled`: GKE logs the denies of tenants' namespaces (ADR 0066 D10), which the `infrared` Application carries |
+| `.ArgoCDRestrictDefaultProject` | absent or `false`, `true` | the operator's `INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT`, the chart's `tenancy.argoCD.restrictDefaultProject`: Argo CD's default project takes the platform org's gitops repo alone (ADR 0066 D10), which the `infrared` Application carries |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -160,6 +165,10 @@ Application; `.StoresSecurity` changes SeaweedFS's Application, its PreSync
 hook and the `infrared` Application; without `.Stores` and `.Registry` each
 changes the `infrared` Application alone. The operator leaves both out of
 its data while they are unset (`make verify` checks it).
+`.TenantPods`, `.TenantQuotas`, `.AdmissionPolicies`, `.DenyLogging` and
+`.ArgoCDRestrictDefaultProject` change the `infrared` Application alone, with or
+without the stores and the registry: the operator does all of it. It leaves
+each out of its data while it is unset (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -232,6 +241,11 @@ set, so a cluster without it renders the same file as before:
 | `.NetworkPolicies` | `tenancy.networkPolicies.enabled: true` |
 | `.RegistryPulls` | `tenancy.registryPulls.enabled: true` |
 | `.StoresSecurity` | `tenancy.storesSecurity.enabled: true` |
+| `.TenantPods` | `tenancy.tenantPods`, the JSON as it is (a YAML flow mapping) |
+| `.TenantQuotas` | `tenancy.quotas`, the JSON as it is |
+| `.AdmissionPolicies` | `tenancy.admissionPolicies.enabled: true` |
+| `.DenyLogging` | `tenancy.denyLogging.enabled: true` |
+| `.ArgoCDRestrictDefaultProject` | `tenancy.argoCD.restrictDefaultProject: true` |
 
 The edge and its previews are carried in gateway mode only. The operator writes
 `spec.edge` and `spec.previews` to the Installation only while each is empty, so
@@ -1174,6 +1188,44 @@ starts with it on has no such window.
 pod in `stores`: the filer, master and volume servers refuse a caller without a
 token or a certificate, and the S3 gateway still serves the registry's bucket.
 It runs against a cluster, never from CI.
+
+### The rest of the tenancy
+
+The Infrared chart's `tenancy.tenantPods`, `tenancy.quotas`,
+`tenancy.admissionPolicies`, `tenancy.denyLogging` and
+`tenancy.argoCD.restrictDefaultProject` (infrared-docs-internal ADR 0066 D4,
+D5, D6 and D10) are the operator's to do; this repo renders nothing for them
+but the `infrared` Application, which carries each so Argo CD's adoption keeps
+it (see "The install's settings"). The operator, while each is on:
+
+- gives each zone of a tenant org on this cluster a `tenancy:` block in its
+  values file (no Kubernetes token, the tenants' placement), which the chart it
+  scaffolds applies, and takes the token off each zone's `default`
+  ServiceAccount and each org's `builder`;
+- writes each such zone a ResourceQuota `infrared-quota` and a LimitRange
+  `infrared-limits` (the org's budget split evenly over its zones here), and
+  its builds namespace a cap;
+- applies ValidatingAdmissionPolicies `infrared-tenancy-*`, which refuse, in a
+  tenant's namespaces, what anyone but Infrared makes that would cross the
+  tenancy, Argo CD acting for any Application among them, and any namespace
+  deleted by Argo CD;
+- has GKE log the denies of tenants' namespaces (NetworkLogging `default`);
+- restricts Argo CD's `default` project, which this repo's root Applications
+  use, to the platform org's gitops repo and Argo CD's own objects in its
+  namespace: nothing this repo renders into `default` needs more.
+
+A Product's own chart reads the zone's `.Values.tenancy` and applies it to its
+pods (`automountServiceAccountToken`, `runtimeClassName`, `nodeSelector`,
+`tolerations`), or its pods are refused.
+
+`scripts/tenancy-check.sh <context> <tenant org> [platform org]` checks a
+running install: the policies and their bindings; in one of the tenant org's
+zones, server-side dry runs as Argo CD's controller that each rule refuses, by
+name, and that a Service and a pod as the tenants' chart makes them pass; the
+platform org's zone exempt; every zone's quota, limits and token; GKE's deny
+logging; Argo CD's default project and its initial admin Secret gone. Nothing
+is made, and no Secret's data is read. It runs against a cluster, never from
+CI.
 
 ### Order on a fresh cluster
 

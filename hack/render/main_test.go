@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -964,6 +966,58 @@ func TestRegistryPullsAndStoresSecurityFields(t *testing.T) {
 		var d Data
 		if err := mergeDataFile(&d, path); err != nil || d.RegistryPulls != want[0] || d.StoresSecurity != want[1] {
 			t.Errorf("%s: loaded RegistryPulls %t, StoresSecurity %t, %v; want %v", body, d.RegistryPulls, d.StoresSecurity, err, want)
+		}
+	}
+}
+
+// The rest of the tenancy (ADR 0066 D4, D5, D6, D10): each loads from the
+// operator's Data by its Go name, absent is off, as an operator from before
+// them leaves them out, and the two JSON carries are refused unless they are
+// one line of JSON the chart's block takes.
+func TestTenancyFields(t *testing.T) {
+	const pods = `{"enabled":true,"placement":{"runtimeClassName":"gvisor"}}`
+	const quotas = `{"enabled":true,"zones":{"cpu":"2","memory":"4Gi","storage":"10Gi","pods":20,"volumes":4},"builds":{"concurrency":2,"memory":"4Gi"}}`
+	path := filepath.Join(t.TempDir(), "data.json")
+	full, err := json.Marshal(map[string]any{"clusterName": "c1", "TenantPods": pods, "TenantQuotas": quotas,
+		"AdmissionPolicies": true, "DenyLogging": true, "ArgoCDRestrictDefaultProject": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for body, want := range map[string]Data{
+		string(full): {TenantPods: pods, TenantQuotas: quotas, AdmissionPolicies: true, DenyLogging: true, ArgoCDRestrictDefaultProject: true},
+		`{"clusterName": "c1", "DenyLogging": true}`: {DenyLogging: true},
+		`{"clusterName": "c1"}`:                      {},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		got := Data{TenantPods: d.TenantPods, TenantQuotas: d.TenantQuotas, AdmissionPolicies: d.AdmissionPolicies,
+			DenyLogging: d.DenyLogging, ArgoCDRestrictDefaultProject: d.ArgoCDRestrictDefaultProject}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: loaded %+v, want %+v", body, got, want)
+		}
+	}
+
+	for _, c := range []struct {
+		name, v string
+		keys    []string
+		ok      bool
+	}{
+		{"TenantPods", "", []string{"placement"}, true},
+		{"TenantPods", pods, []string{"placement"}, true},
+		{"TenantQuotas", quotas, []string{"zones", "builds"}, true},
+		{"TenantPods", `{"placement":{}}`, []string{"placement"}, false},
+		{"TenantPods", `{"enabled":false,"placement":{}}`, []string{"placement"}, false},
+		{"TenantPods", "{\"enabled\":true,\n\"placement\":{}}", []string{"placement"}, false},
+		{"TenantPods", `{"enabled":true,"resources":{}}`, []string{"placement"}, false},
+		{"TenantQuotas", `not json`, []string{"zones", "builds"}, false},
+	} {
+		if err := validateTenancyCarry(c.name, c.v, c.keys...); (err == nil) != c.ok {
+			t.Errorf("validateTenancyCarry(%s, %q) = %v, want ok %v", c.name, c.v, err, c.ok)
 		}
 	}
 }
