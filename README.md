@@ -1141,6 +1141,15 @@ from one of the org's zones: DNS and the internet answer, every platform
 service is refused, and two orgs' zones refuse each other both ways. It runs
 against a cluster, never from CI.
 
+`scripts/runner-egress-check.sh <context> <org>` checks runners' egress by name
+(the Infrared chart's `runner.networkPolicy.egressByName`; ADR 0066 D7), which
+the operator writes, not this template: from a probe labelled and placed as one
+of the org's agent steps, the model API and the namespace's other hosts answer
+over HTTPS; a host no GKE FQDNNetworkPolicy names, port 80, the registry,
+infrared-mcp, cloud metadata, and names that resolve to the cluster's own
+addresses are refused. It runs against a GKE cluster after one of the org's
+steps, never from CI.
+
 ### The stores' own security
 
 With `.StoresSecurity` (the Infrared chart's `tenancy.storesSecurity.enabled`;
