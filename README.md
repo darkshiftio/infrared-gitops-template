@@ -558,7 +558,9 @@ and changes nothing without the stores.
 
 S3 answers at `http://seaweedfs-s3.stores.svc:8333`. The chart's bucket hook
 makes the buckets `ate-snapshots` (Agent Substrate's snapshots) and `registry`
-(the registry's images and charts) after each sync, with `weed shell`. Each
+(the registry's images and charts) after each sync, with `weed shell` (under
+the stores' own mutual TLS, the PostSync Job `seaweedfs-buckets` instead: see
+"The stores' own security"). Each
 bucket has an S3 identity that reaches it alone (Read, Write, List and Tagging
 on that bucket; no identity is an administrator), in
 `components/seaweedfs/identities.yaml`, which holds no key: each key is an
@@ -1076,6 +1078,19 @@ and `randAlphaNum`, new at every render under Argo CD, so its security config
 holds only the certificates' paths (`make verify` renders the chart twice and
 compares). The hook also waits for cert-manager's CRDs and webhook. Without
 cert-manager (`.Disabled`) only the tokens hold, and gRPC stays plain.
+
+The buckets are made by a Job of the template's own under mutual TLS. The
+SeaweedFS chart's bucket hook (4.48.0) mounts its security config but not the
+CA or the client certificate that config names, so its `weed shell` waits for
+the master for ever and makes no bucket, and the registry, with no bucket
+`registry`, never starts (fixed upstream after 4.48, seaweedfs#11589). With
+cert-manager the chart's hook is left out (no `s3.createBuckets`), and the
+`seaweedfs` Application's PostSync Job `seaweedfs-buckets`
+(`components/seaweedfs/prepare.yaml`) makes `ate-snapshots` and `registry`
+after each sync: `weed shell` in SeaweedFS's own image, with the security
+config, the CA's certificate (never its key) and the client certificate.
+Without cert-manager the chart's hook needs no certificate and makes them as
+before. The Job can go once the chart is 4.49 or later.
 
 Zot, Agent Substrate, the copies and the restore speak S3 with their
 identities, and change nothing. To rotate the keys, delete
