@@ -1,0 +1,15 @@
+# The proof Product of scripts/bedrock-proof.sh (infrared-docs-internal ADR 0069 T11; workspace TODO 514): one
+# private repo on the install's own forge, whose starter the proof zips beside this file as hello-bedrock.zip (one
+# page and a README), and no build: a build needs a registry on the nodes, which an EKS install has not, and the
+# proof's run stops at triage anyway. Modelled on localred's stack/products/hello/infrared.yaml without its zones,
+# which need a build to deliver to. The proof copies this file next to the zip and runs ir product create -f on it;
+# with --product it renames the Product and its repo. A Product that exists already is left as it is.
+products:
+  - name: hello-bedrock
+    displayName: Hello Bedrock
+    description: A one-page site whose first agent step proves the org's model calls run on Amazon Bedrock
+    repos:
+      - name: hello-bedrock
+        visibility: private
+        starterZip: ./hello-bedrock.zip
+    build: false
