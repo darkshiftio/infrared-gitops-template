@@ -1,4 +1,5 @@
 [[- $on := true ]][[ range .Disabled ]][[ if eq . "victoria-metrics-k8s-stack" ]][[ $on = false ]][[ end ]][[ end ]]
+[[- $platform := default .ClusterName .Telemetry.Platform ]]
 [[- if $on -]]
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -47,6 +48,21 @@ spec:
                 memory: 512Mi
               limits:
                 memory: 2Gi
+            # Caps against a runaway writer (infrared-docs-internal ADR 0069,
+            # T3), the same on every install: the home takes every install's
+            # series through the API's write path, and a Mac's stack or a
+            # broken exporter must not fill the store. VictoriaMetrics
+            # v1.153.0's own flags, which the operator passes as -<key>=<value>:
+            # at most 40 labels on a series (its default, said here so that a
+            # change is a change here), and at most 2,000,000 new series an
+            # hour and 5,000,000 a day, logged and dropped past that. The home
+            # held about 89,000 active series on 2026-10-13, and a Mac's stack
+            # sends about 1,400 after the keep lists (ADR 0044): tens of
+            # installs fit under both.
+            extraArgs:
+              maxLabelsPerTimeseries: "40"
+              storage.maxHourlySeries: "2000000"
+              storage.maxDailySeries: "5000000"
 [[- if and (eq .ClusterFlavor "k3s") .Stores (ne .Cloud "gcp") ]]
             # With the stores the cluster is several servers, each with its own
             # disk, and is built to lose one: SeaweedFS keeps every file on two
@@ -85,18 +101,96 @@ spec:
                   storage: 10Gi
 [[- end ]]
         vmagent:
+[[- if .Telemetry.URL ]]
+          # This install's own series to the telemetry plane (infrared-docs-
+          # internal ADR 0069 T8, extending ADR 0044): the Installation's
+          # spec.observability.telemetry names the plane's write path and this
+          # install's platform, and whoever set them (ir install's
+          # registration, ir telemetry connect, or Settings) wrote the token to
+          # the Secret monitoring/telemetry-token, key token, which this repo
+          # never holds; the VictoriaMetrics operator waits for it. A second
+          # remote write beside VMSingle's own, which the chart keeps. What
+          # leaves is the telemetry component's keep list and nothing else
+          # (ADR 0069 T4): this vmagent scrapes far more than a Mac's (the
+          # kubelet, kube-state-metrics, node exporter, Argo CD, the stack's
+          # own components), so the write relabeling marks what is wanted and
+          # keeps only that: Infrared's own series; the operator's and the
+          # API's reconcile, workqueue, process and Go figures, by their jobs
+          # alone, since every Go component here exports the same families;
+          # up and the scrape figures of every target; this vmagent's own
+          # write path, by its job; and the kubelet's memory working set and
+          # CPU seconds of ir-org-* containers. The marker label is dropped
+          # after the keep, the kubelet's id, name and image labels go from
+          # the container series as the component drops them, and the
+          # identity labels Claude Code puts on what it exports never leave
+          # (localred finding K1). The buffer for this URL alone is up to
+          # 800 MiB on the pod's own disk, so a plane that is away for a while
+          # gets the backlog when it is back; a pod restart loses what is
+          # buffered. No hourly series cap here: vmagent's is global, and would
+          # cap VMSingle's own path too; the plane's VMSingle caps what it
+          # takes (above). Without a URL nothing of this renders.
+          additionalRemoteWrites:
+            - url: [[ .Telemetry.URL ]]
+              bearerTokenSecret:
+                name: telemetry-token
+                key: token
+              maxDiskUsage: 800MiB
+              inlineUrlRelabelConfig:
+                - sourceLabels: [__name__]
+                  regex: infrared_.*
+                  targetLabel: __tmp_plane
+                  replacement: keep
+                - sourceLabels: [job, __name__]
+                  regex: (infrared|infrared-operator|infrared-api);(controller_runtime_reconcile_total|controller_runtime_reconcile_errors_total|controller_runtime_reconcile_time_seconds.*|workqueue_depth|workqueue_adds_total|process_resident_memory_bytes|process_cpu_seconds_total|go_memstats_heap_inuse_bytes|go_goroutines)
+                  targetLabel: __tmp_plane
+                  replacement: keep
+                - sourceLabels: [__name__]
+                  regex: up|scrape_samples_scraped|scrape_duration_seconds
+                  targetLabel: __tmp_plane
+                  replacement: keep
+                - sourceLabels: [job, __name__]
+                  regex: vmagent-.*;(vmagent_remotewrite_requests_total|vmagent_remotewrite_pending_data_bytes|vmagent_remotewrite_rows_pushed_total|vmagent_remotewrite_rows_pushed_after_relabel_total|vmagent_remotewrite_packets_dropped_total|vmagent_remotewrite_retries_count_total|vm_persistentqueue_bytes_pending|vm_persistentqueue_blocks_dropped_total|vmagent_rows_inserted_total|vm_rows_inserted_total|vm_app_version|process_resident_memory_bytes)
+                  targetLabel: __tmp_plane
+                  replacement: keep
+                - sourceLabels: [__name__, namespace, container]
+                  regex: (container_memory_working_set_bytes|container_cpu_usage_seconds_total);ir-org-.+;.+
+                  targetLabel: __tmp_plane
+                  replacement: keep
+                - sourceLabels: [__tmp_plane]
+                  action: keep
+                  regex: keep
+                - action: labeldrop
+                  regex: __tmp_plane
+                - if: '{__name__=~"container_.*"}'
+                  action: labeldrop
+                  regex: id|name|image
+                - action: labeldrop
+                  regex: "user\\.email|user\\.id|organization\\.id|user_email|user_id|organization_id"
+[[- end ]]
           spec:
             # Both labels name this install. A Mac's stack writes platform and
             # cluster with the same value, <login>-<stack> (ADR 0044, the
             # telemetry component), so the Fleet dashboard groups by platform
             # for every install, this one's own series included (localred
-            # finding T4). vmagent adds them to every series it scrapes; a
-            # series that already has a platform label keeps it only under
-            # honorLabels (the API's infrared_telemetry_writes_total, below),
-            # and elsewhere is renamed exported_platform.
+            # finding T4). With the Installation's telemetry set, platform is
+            # the name the install registered under, install-<id> (ADR 0069
+            # T2), which the plane's token sets on what arrives there too, so
+            # the install's own Grafana and the home's show it under one name;
+            # cluster stays the cluster's. vmagent adds them to every series it
+            # scrapes; a series that already has a platform label keeps it only
+            # under honorLabels (the API's infrared_telemetry_writes_total,
+            # below), and elsewhere is renamed exported_platform.
             externalLabels:
               cluster: [[ .ClusterName ]]
-              platform: [[ .ClusterName ]]
+              platform: [[ $platform ]]
+[[- if .Telemetry.URL ]]
+            # vmagent's own write series (vmagent_remotewrite_*) name each
+            # URL rather than 1:secret-url: the URL carries no secret (the
+            # token is a header), and the API's GET /v1/telemetry reads the
+            # plane's last accepted write by it, as ir telemetry status does.
+            remoteWriteSettings:
+              showURL: true
+[[- end ]]
             resources:
               requests:
                 cpu: 50m
@@ -115,6 +209,40 @@ spec:
               requests:
                 cpu: 10m
                 memory: 32Mi
+            # The platform receiver's token (config, below): the operator
+            # writes it to the Secret monitoring/infrared-alert-webhook, key
+            # token, as it writes each org's, and this repo never holds it.
+            # Mounted the way VMAlertmanager mounts every Secret it is given,
+            # at /etc/vm/secrets/<name>/; the pod waits for it.
+            secrets:
+              - infrared-alert-webhook
+          # The root route (infrared-docs-internal ADR 0069 T9; workspace TODO
+          # 429). Each org's alerts take the org's own route first: the
+          # VMAlertmanagerConfig the operator writes in the org's namespace,
+          # which the VictoriaMetrics operator merges in here as a sub-route
+          # with a matcher on that namespace. Every other alert, the install's
+          # own (the chart's Kubernetes rules, the metrics' copy's, the API's,
+          # the operator's, the store's and the writes to the plane, the VMRule
+          # infrared-platform below), goes to the API's platform receiver,
+          # which opens an Incident on the platform org's own Product, or an
+          # install-wide one where the install holds none. The chart's default
+          # sent everything unrouted to a blackhole.
+          config:
+            route:
+              receiver: infrared-platform
+              group_by: [alertname, severity]
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 4h
+            receivers:
+              - name: infrared-platform
+                webhook_configs:
+                  - url: http://infrared-api.[[ .InfraredNamespace ]].svc:8080/v1/webhooks/alertmanager/_platform
+                    send_resolved: true
+                    http_config:
+                      authorization:
+                        type: Bearer
+                        credentials_file: /etc/vm/secrets/infrared-alert-webhook/token
         grafana:
           enabled: true
           # Access is by port-forward: svc/victoria-metrics-k8s-stack-grafana 80.
@@ -283,6 +411,68 @@ spec:
                   # operator or the API has a label that clashes with a
                   # target's (job, instance, namespace, service, pod).
                   honorLabels: true
+          # The install's own alerts (infrared-docs-internal ADR 0069 T9): the
+          # API's and the operator's metrics targets down for 3 minutes, the
+          # operator failing reconciles for 15 minutes, the store's own target
+          # down[[ if .Telemetry.URL ]], and a remote write of this vmagent (the plane's, or
+          # VMSingle's own) refused for 15 minutes[[ end ]]. Each carries severity and
+          # infrared_platform, as the metrics' copy's alerts do, and no
+          # infrared_product, so the root route above takes it to the API's
+          # platform receiver. The platform label keeps every rule to this
+          # install's own series: on the plane, VMSingle holds every install's.
+          # The chart's own ServiceDown and TargetDown rules fire beside these
+          # for the stack's components, and take the same route.
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMRule
+            metadata:
+              name: infrared-platform
+              namespace: monitoring
+            spec:
+              groups:
+                - name: infrared-platform
+                  rules:
+                    - alert: InfraredAPIDown
+                      expr: max(up{job="infrared-api", platform="[[ $platform ]]"}) == 0 or absent(up{job="infrared-api", platform="[[ $platform ]]"})
+                      for: 3m
+                      labels:
+                        severity: critical
+                        infrared_platform: "true"
+                      annotations:
+                        summary: Infrared's API has not answered its metrics scrape for 3 minutes.
+                    - alert: InfraredOperatorDown
+                      expr: max(up{job="infrared-operator", platform="[[ $platform ]]"}) == 0 or absent(up{job="infrared-operator", platform="[[ $platform ]]"})
+                      for: 3m
+                      labels:
+                        severity: critical
+                        infrared_platform: "true"
+                      annotations:
+                        summary: Infrared's operator has not answered its metrics scrape for 3 minutes.
+                    - alert: InfraredOperatorReconcileErrors
+                      expr: sum by (controller) (rate(controller_runtime_reconcile_total{job="infrared-operator", platform="[[ $platform ]]", result="error"}[5m])) > 0
+                      for: 15m
+                      labels:
+                        severity: warning
+                        infrared_platform: "true"
+                      annotations:
+                        summary: "Infrared's operator has failed reconciles of {{ `{{ $labels.controller }}` }} for 15 minutes."
+                    - alert: InfraredMetricsStoreDown
+                      expr: max(up{job=~"vmsingle-.*", platform="[[ $platform ]]"}) == 0 or absent(up{job=~"vmsingle-.*", platform="[[ $platform ]]"})
+                      for: 3m
+                      labels:
+                        severity: critical
+                        infrared_platform: "true"
+                      annotations:
+                        summary: VMSingle, the install's metrics store, has not answered its scrape for 3 minutes.
+[[- if .Telemetry.URL ]]
+                    - alert: InfraredTelemetryWritesFailing
+                      expr: sum by (url) (rate(vmagent_remotewrite_requests_total{job=~"vmagent-.*", platform="[[ $platform ]]", status_code!~"2.*"}[5m])) > 0
+                      for: 15m
+                      labels:
+                        severity: warning
+                        infrared_platform: "true"
+                      annotations:
+                        summary: "A remote write of this install's vmagent ({{ `{{ $labels.url }}` }}) has been refused for 15 minutes: the plane's token, or the store."
+[[- end ]]
           # The Fleet dashboard (infrared-docs-internal ADR 0044, P10): every
           # platform's numbers side by side, hosted's own and each Mac's stack
           # that pushes to this store through infrared-api's write path, by the
@@ -319,7 +509,7 @@ spec:
                   ],
                   "editable": true,
                   "schemaVersion": 39,
-                  "version": 5,
+                  "version": 6,
                   "time": {
                     "from": "now-6h",
                     "to": "now"
@@ -327,7 +517,7 @@ spec:
                   "timezone": "browser",
                   "refresh": "1m",
                   "graphTooltip": 1,
-                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Fifth cut, 2026-10-14: grouped by the platform label, which hosted's own series carry now too. Fourth cut, from the first proof: a change run and a builder session on a Mac, beside hosted.",
+                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Sixth cut, 2026-11-05: the agent steps split by model provider, and the model calls the runner forwards, by provider, status, error and latency (ADR 0069). Fifth cut, 2026-10-14: grouped by the platform label, which hosted's own series carry now too. Fourth cut, from the first proof: a change run and a builder session on a Mac, beside hosted.",
                   "templating": {
                     "list": [
                       {
@@ -1011,7 +1201,7 @@ spec:
                     {
                       "id": 19,
                       "type": "timeseries",
-                      "title": "Attempts per hour, by platform and outcome",
+                      "title": "Attempts per hour, by platform, provider and outcome",
                       "description": "",
                       "gridPos": {
                         "x": 0,
@@ -1021,8 +1211,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, outcome) (increase_pure(infrared_step_attempts_total{platform=~\"$platform\"}[1h]))",
-                          "legendFormat": "{{ `{{platform}}` }} {{ `{{outcome}}` }}",
+                          "expr": "sum by (platform, provider, outcome) (increase_pure(infrared_step_attempts_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }} {{ `{{outcome}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1099,7 +1289,7 @@ spec:
                     {
                       "id": 20,
                       "type": "timeseries",
-                      "title": "Cost per hour, by platform and model (USD)",
+                      "title": "Cost per hour, by platform, provider and model (USD)",
                       "description": "",
                       "gridPos": {
                         "x": 16,
@@ -1109,8 +1299,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, model) (increase_pure(infrared_step_cost_usd_total{platform=~\"$platform\"}[1h]))",
-                          "legendFormat": "{{ `{{platform}}` }} {{ `{{model}}` }}",
+                          "expr": "sum by (platform, provider, model) (increase_pure(infrared_step_cost_usd_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }} {{ `{{model}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1192,7 +1382,7 @@ spec:
                     {
                       "id": 22,
                       "type": "timeseries",
-                      "title": "Tokens per hour, by platform and kind",
+                      "title": "Tokens per hour, by platform, provider and kind",
                       "description": "",
                       "gridPos": {
                         "x": 12,
@@ -1202,8 +1392,8 @@ spec:
                       },
                       "targets": [
                         {
-                          "expr": "sum by (platform, kind) (increase_pure(infrared_step_tokens_total{platform=~\"$platform\"}[1h]))",
-                          "legendFormat": "{{ `{{platform}}` }} {{ `{{kind}}` }}",
+                          "expr": "sum by (platform, provider, kind) (increase_pure(infrared_step_tokens_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }} {{ `{{kind}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -1234,13 +1424,158 @@ spec:
                       }
                     },
                     {
+                      "id": 48,
+                      "type": "row",
+                      "title": "Model calls: every call the runner's proxy forwarded, by provider (the operator's model-call series, ADR 0069)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 55,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 49,
+                      "type": "timeseries",
+                      "title": "Calls per hour, by platform, provider and status",
+                      "description": "Every model call a step's runner forwarded, by the answer's status: 2xx is answered; 429 is Bedrock throttling (ThrottlingException), 403 a refused call (AccessDeniedException), 5xx the provider.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 56,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, provider, status) (increase_pure(infrared_model_calls_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }} {{ `{{status}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 50,
+                      "type": "timeseries",
+                      "title": "Errors per hour, by platform, provider and error",
+                      "description": "Calls that failed, by the provider's error name (ThrottlingException, AccessDeniedException, ...): a step retries some of these on its own.",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 56,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, provider, error) (increase_pure(infrared_model_calls_total{platform=~\"$platform\", error!=\"\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }} {{ `{{error}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 51,
+                      "type": "timeseries",
+                      "title": "Average call latency over the last hour, by platform and provider",
+                      "description": "Seconds a forwarded call took, summed, over the calls: the hour's average per provider. Bedrock and the Anthropic API side by side where an install runs both.",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 56,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, provider) (rate(infrared_model_call_seconds_total{platform=~\"$platform\"}[1h])) / sum by (platform, provider) (rate(infrared_model_calls_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
                       "id": 23,
                       "type": "row",
                       "title": "Step containers: what a runner Job really uses (ir-org-* pods, from the kubelet)",
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 55,
+                        "y": 64,
                         "w": 24,
                         "h": 1
                       },
@@ -1253,7 +1588,7 @@ spec:
                       "description": "The number phase 2's templates are sized from.",
                       "gridPos": {
                         "x": 0,
-                        "y": 56,
+                        "y": 65,
                         "w": 12,
                         "h": 8
                       },
@@ -1297,7 +1632,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 12,
-                        "y": 56,
+                        "y": 65,
                         "w": 12,
                         "h": 8
                       },
@@ -1342,7 +1677,7 @@ spec:
                       "title": "Runner pools: agent steps in VMs on the Macs (the operator's AgentVM series)",
                       "gridPos": {
                         "x": 0,
-                        "y": 64,
+                        "y": 73,
                         "w": 24,
                         "h": 1
                       }
@@ -1354,7 +1689,7 @@ spec:
                       "description": "Each step a pool takes is one AgentVM: Pending until a pool leases it, Leased, Running, then Succeeded, Failed or Lost.",
                       "gridPos": {
                         "x": 0,
-                        "y": 65,
+                        "y": 74,
                         "w": 12,
                         "h": 8
                       },
@@ -1398,7 +1733,7 @@ spec:
                       "description": "A lease lapses when its Mac stops answering for the time to live, or the node agent gives it back; the step runs again.",
                       "gridPos": {
                         "x": 12,
-                        "y": 65,
+                        "y": 74,
                         "w": 12,
                         "h": 8
                       },
@@ -1442,7 +1777,7 @@ spec:
                       "description": "What the templates' memory is sized from (the reviewer's 1 GiB, the builder step's 6 GiB).",
                       "gridPos": {
                         "x": 0,
-                        "y": 73,
+                        "y": 82,
                         "w": 12,
                         "h": 8
                       },
@@ -1491,7 +1826,7 @@ spec:
                       "description": "CPU seconds a VM used from start to exit, as Apple's runtime counts them.",
                       "gridPos": {
                         "x": 12,
-                        "y": 73,
+                        "y": 82,
                         "w": 12,
                         "h": 8
                       },
@@ -1540,7 +1875,7 @@ spec:
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 81,
+                        "y": 90,
                         "w": 24,
                         "h": 1
                       },
@@ -1553,7 +1888,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 0,
-                        "y": 82,
+                        "y": 91,
                         "w": 8,
                         "h": 8
                       },
@@ -1602,7 +1937,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 8,
-                        "y": 82,
+                        "y": 91,
                         "w": 8,
                         "h": 8
                       },
@@ -1646,7 +1981,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 16,
-                        "y": 82,
+                        "y": 91,
                         "w": 8,
                         "h": 8
                       },
@@ -1690,7 +2025,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 0,
-                        "y": 90,
+                        "y": 99,
                         "w": 12,
                         "h": 7
                       },
@@ -1739,7 +2074,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 12,
-                        "y": 90,
+                        "y": 99,
                         "w": 12,
                         "h": 7
                       },
@@ -1788,7 +2123,7 @@ spec:
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 97,
+                        "y": 106,
                         "w": 24,
                         "h": 1
                       },
@@ -1801,7 +2136,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 0,
-                        "y": 98,
+                        "y": 107,
                         "w": 6,
                         "h": 8
                       },
@@ -1845,7 +2180,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 6,
-                        "y": 98,
+                        "y": 107,
                         "w": 6,
                         "h": 8
                       },
@@ -1889,7 +2224,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 12,
-                        "y": 98,
+                        "y": 107,
                         "w": 6,
                         "h": 8
                       },
@@ -1933,7 +2268,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 18,
-                        "y": 98,
+                        "y": 107,
                         "w": 6,
                         "h": 8
                       },
@@ -1977,7 +2312,7 @@ spec:
                       "collapsed": false,
                       "gridPos": {
                         "x": 0,
-                        "y": 106,
+                        "y": 115,
                         "w": 24,
                         "h": 1
                       },
@@ -1990,7 +2325,7 @@ spec:
                       "description": "promremotewrite is what the Macs' stacks write through infrared-api; the rest is hosted's own scraping.",
                       "gridPos": {
                         "x": 0,
-                        "y": 107,
+                        "y": 116,
                         "w": 8,
                         "h": 7
                       },
@@ -2034,7 +2369,7 @@ spec:
                       "description": "Read against the store's memory limit: 89,000 on 2026-10-13 before any Mac pushed (TODO 288).",
                       "gridPos": {
                         "x": 8,
-                        "y": 107,
+                        "y": 116,
                         "w": 8,
                         "h": 7
                       },
@@ -2078,7 +2413,7 @@ spec:
                       "description": "",
                       "gridPos": {
                         "x": 16,
-                        "y": 107,
+                        "y": 116,
                         "w": 8,
                         "h": 7
                       },
@@ -2127,7 +2462,7 @@ spec:
                       "description": "infrared_telemetry_writes_total from hosted's own API, once a Release carries the chart's metrics ports and hosted scrapes itself.",
                       "gridPos": {
                         "x": 0,
-                        "y": 114,
+                        "y": 123,
                         "w": 24,
                         "h": 7
                       },
@@ -2135,6 +2470,1071 @@ spec:
                         {
                           "expr": "sum by (platform, status) (rate(infrared_telemetry_writes_total[5m])) * 60",
                           "legendFormat": "{{ `{{platform}}` }} {{ `{{status}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    }
+                  ]
+                }
+          # The installs dashboard (infrared-docs-internal ADR 0069, T10):
+          # every install that registered with the plane, from ir install to
+          # its first model call on Bedrock, by the platform label as the
+          # Fleet dashboard. The series are the operator's install series
+          # (infrared_install_info and the Installation's readiness and age;
+          # counts of orgs, Products and people; cloud accounts by state; each
+          # org's model provider; open Incidents), the API's request counter
+          # for the sign-ins, and the step and model-call series by provider.
+          # On the install's own Grafana it shows that install alone; on the
+          # home every platform that writes. Counters use increase_pure over
+          # the dashboard's range, so a new install's first hour counts from
+          # its first sample; the table reads a week back, so an install that
+          # went quiet stays listed with its last write's age.
+          - apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: infrared-installs-dashboard
+              namespace: monitoring
+              labels:
+                # Grafana's sidecar loads every ConfigMap so labelled in monitoring.
+                grafana_dashboard: "1"
+            data:
+              infrared-installs.json: |
+                {
+                  "uid": "infrared-installs",
+                  "title": "New installs: install to first Bedrock run",
+                  "tags": [
+                    "infrared"
+                  ],
+                  "editable": true,
+                  "schemaVersion": 39,
+                  "version": 1,
+                  "time": {
+                    "from": "now-7d",
+                    "to": "now"
+                  },
+                  "timezone": "browser",
+                  "refresh": "1m",
+                  "graphTooltip": 1,
+                  "description": "Every install that registered with the plane, from ir install to its first model call on Bedrock (infrared-docs-internal ADR 0069 T10). First cut, 2026-11-05: the installs by release, cloud and provider; the funnel from Ready to the first sign-in, org, Product, cloud account, run and Bedrock call; Bedrock's calls, throttles, refusals, latency, tokens and cost; the open platform Incidents. On an install's own Grafana it shows that install alone; on the home every platform.",
+                  "templating": {
+                    "list": [
+                      {
+                        "name": "platform",
+                        "label": "Platform",
+                        "type": "query",
+                        "query": {
+                          "query": "label_values(up, platform)",
+                          "refId": "var"
+                        },
+                        "definition": "label_values(up, platform)",
+                        "multi": true,
+                        "includeAll": true,
+                        "allValue": ".*",
+                        "current": {
+                          "text": "All",
+                          "value": "$__all"
+                        },
+                        "refresh": 2,
+                        "sort": 1
+                      }
+                    ]
+                  },
+                  "panels": [
+                    {
+                      "id": 1,
+                      "type": "row",
+                      "title": "Installs: every platform that registered, by release, cloud and provider (the operator's install series)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 0,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 2,
+                      "type": "table",
+                      "title": "Installs that wrote in the last 7 days",
+                      "description": "One row per platform: the cluster's name, the platform release it runs, its cloud and edge, whether Bedrock is on, whether its Installation is Ready, its age since the Installation was made, and how long since its last series arrived here (its own scrape on the install's own Grafana; the plane's write path on the home).",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 1,
+                        "w": 24,
+                        "h": 10
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform, cluster, version, cloud, edge, bedrock) (last_over_time(infrared_install_info{platform=~\"$platform\"}[7d]))",
+                          "legendFormat": "",
+                          "refId": "A",
+                          "format": "table",
+                          "instant": true,
+                          "range": false
+                        },
+                        {
+                          "expr": "max by (platform) (last_over_time(infrared_installation_ready{platform=~\"$platform\"}[7d]))",
+                          "legendFormat": "",
+                          "refId": "B",
+                          "format": "table",
+                          "instant": true,
+                          "range": false
+                        },
+                        {
+                          "expr": "max by (platform) (time() - last_over_time(infrared_installation_created_timestamp_seconds{platform=~\"$platform\"}[7d]))",
+                          "legendFormat": "",
+                          "refId": "C",
+                          "format": "table",
+                          "instant": true,
+                          "range": false
+                        },
+                        {
+                          "expr": "max by (platform) (time() - timestamp(infrared_install_info{platform=~\"$platform\"}[7d]))",
+                          "legendFormat": "",
+                          "refId": "D",
+                          "format": "table",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "transformations": [
+                        {
+                          "id": "joinByField",
+                          "options": {
+                            "byField": "platform",
+                            "mode": "outer"
+                          }
+                        },
+                        {
+                          "id": "filterFieldsByName",
+                          "options": {
+                            "include": {
+                              "pattern": "^(platform|cluster|version|cloud|edge|bedrock|Value #[B-D])$"
+                            }
+                          }
+                        },
+                        {
+                          "id": "organize",
+                          "options": {
+                            "excludeByName": {},
+                            "indexByName": {
+                              "platform": 0,
+                              "cluster": 1,
+                              "version": 2,
+                              "cloud": 3,
+                              "edge": 4,
+                              "bedrock": 5,
+                              "Value #B": 6,
+                              "Value #C": 7,
+                              "Value #D": 8
+                            },
+                            "renameByName": {
+                              "platform": "Platform",
+                              "cluster": "Cluster",
+                              "version": "Release",
+                              "cloud": "Cloud",
+                              "edge": "Edge",
+                              "bedrock": "Bedrock",
+                              "Value #B": "Ready",
+                              "Value #C": "Age",
+                              "Value #D": "Last write"
+                            }
+                          }
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "align": "auto",
+                            "filterable": true
+                          }
+                        },
+                        "overrides": [
+                          {
+                            "matcher": {
+                              "id": "byName",
+                              "options": "Age"
+                            },
+                            "properties": [
+                              {
+                                "id": "unit",
+                                "value": "dtdurations"
+                              }
+                            ]
+                          },
+                          {
+                            "matcher": {
+                              "id": "byName",
+                              "options": "Last write"
+                            },
+                            "properties": [
+                              {
+                                "id": "unit",
+                                "value": "dtdurations"
+                              }
+                            ]
+                          },
+                          {
+                            "matcher": {
+                              "id": "byName",
+                              "options": "Ready"
+                            },
+                            "properties": [
+                              {
+                                "id": "mappings",
+                                "value": [
+                                  {
+                                    "type": "value",
+                                    "options": {
+                                      "0": {
+                                        "text": "not ready"
+                                      },
+                                      "1": {
+                                        "text": "Ready"
+                                      }
+                                    }
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      "options": {
+                        "showHeader": true,
+                        "cellHeight": "sm",
+                        "footer": {
+                          "show": false,
+                          "reducer": [
+                            "sum"
+                          ],
+                          "fields": ""
+                        },
+                        "sortBy": [
+                          {
+                            "displayName": "Age",
+                            "desc": false
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "id": 3,
+                      "type": "row",
+                      "title": "The funnel: from Ready to the first Bedrock call, per platform",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 11,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 4,
+                      "type": "stat",
+                      "title": "Ready",
+                      "description": "The Installation's Ready condition (infrared_installation_ready).",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 12,
+                        "w": 4,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform) (infrared_installation_ready{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "mappings": [
+                            {
+                              "type": "value",
+                              "options": {
+                                "0": {
+                                  "text": "not ready"
+                                },
+                                "1": {
+                                  "text": "Ready"
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 5,
+                      "type": "stat",
+                      "title": "Sign-ins over the range",
+                      "description": "Completed sign-in round trips (the password sign-in's 200; Google's, GitHub's and a sign-in link's 302 back into the UI) over the dashboard's time range, from the API's request counter. A refused Google or GitHub sign-in answers 302 too, so this counts round trips, not successes.",
+                      "gridPos": {
+                        "x": 4,
+                        "y": 12,
+                        "w": 4,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (increase_pure(infrared_api_requests_total{platform=~\"$platform\", op=~\"login|complete-google-login|complete-github-login|redeem-sign-in-link\", status=~\"2..|3..\"}[$__range]))",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 6,
+                      "type": "stat",
+                      "title": "Orgs",
+                      "description": "Organizations on the install, by count alone (infrared_orgs_total).",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 12,
+                        "w": 4,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform) (infrared_orgs_total{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 7,
+                      "type": "stat",
+                      "title": "Products",
+                      "description": "Products on the install, by count alone (infrared_products_total).",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 12,
+                        "w": 4,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform) (infrared_products_total{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 8,
+                      "type": "stat",
+                      "title": "People",
+                      "description": "People on the install, by count alone (infrared_humans_total).",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 12,
+                        "w": 4,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "max by (platform) (infrared_humans_total{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 9,
+                      "type": "stat",
+                      "title": "Cloud accounts Verified",
+                      "description": "CloudAccounts in state Verified, across the install's orgs (infrared_cloud_accounts).",
+                      "gridPos": {
+                        "x": 20,
+                        "y": 12,
+                        "w": 4,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (infrared_cloud_accounts{platform=~\"$platform\", state=\"Verified\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 10,
+                      "type": "stat",
+                      "title": "Orgs on Bedrock",
+                      "description": "Orgs whose model provider is Amazon Bedrock (infrared_org_model_provider).",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 17,
+                        "w": 8,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (infrared_org_model_provider{platform=~\"$platform\", provider=\"bedrock\"})",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 11,
+                      "type": "stat",
+                      "title": "Step attempts over the range",
+                      "description": "Agent step attempts over the dashboard's time range, every provider (infrared_step_attempts_total).",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 17,
+                        "w": 8,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (increase_pure(infrared_step_attempts_total{platform=~\"$platform\"}[$__range]))",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 12,
+                      "type": "stat",
+                      "title": "Bedrock calls over the range",
+                      "description": "Model calls forwarded to Bedrock over the dashboard's time range (infrared_model_calls_total): the first one is the funnel's end.",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 17,
+                        "w": 8,
+                        "h": 5
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (increase_pure(infrared_model_calls_total{platform=~\"$platform\", provider=\"bedrock\"}[$__range]))",
+                          "legendFormat": "{{ `{{platform}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 13,
+                      "type": "row",
+                      "title": "Bedrock: calls, throttles, refusals, latency, tokens and cost (the runner's model calls, by the operator)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 22,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 14,
+                      "type": "timeseries",
+                      "title": "Bedrock calls per hour, by platform and status",
+                      "description": "Every call the runner's proxy forwarded to Bedrock, by the answer's status.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 23,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, status) (increase_pure(infrared_model_calls_total{platform=~\"$platform\", provider=\"bedrock\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{status}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 15,
+                      "type": "timeseries",
+                      "title": "Bedrock errors per hour, by platform and error",
+                      "description": "Calls Bedrock refused or failed, by its error name.",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 23,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, error) (increase_pure(infrared_model_calls_total{platform=~\"$platform\", provider=\"bedrock\", error!=\"\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{error}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 16,
+                      "type": "timeseries",
+                      "title": "Throttles (429) and refusals (403) per hour, by platform",
+                      "description": "429 is ThrottlingException, the account's Bedrock quota for the model (the 5.5 quotas start at 0); 403 is AccessDeniedException, the role, the region or a model not enabled.",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 23,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform) (increase_pure(infrared_model_calls_total{platform=~\"$platform\", provider=\"bedrock\", status=\"429\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} throttled (429)",
+                          "refId": "A"
+                        },
+                        {
+                          "expr": "sum by (platform) (increase_pure(infrared_model_calls_total{platform=~\"$platform\", provider=\"bedrock\", status=\"403\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} refused (403)",
+                          "refId": "B"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 17,
+                      "type": "timeseries",
+                      "title": "Average Bedrock call latency over the last hour, by platform and model",
+                      "description": "Seconds the forwarded calls took, summed, over the calls, per model.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 31,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, model) (rate(infrared_model_call_seconds_total{platform=~\"$platform\", provider=\"bedrock\"}[1h])) / sum by (platform, model) (rate(infrared_model_calls_total{platform=~\"$platform\", provider=\"bedrock\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{model}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "s",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 18,
+                      "type": "timeseries",
+                      "title": "Bedrock tokens per hour, by platform, model and kind",
+                      "description": "Input, output and cache tokens of the steps that ran on Bedrock (infrared_step_tokens_total).",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 31,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, model, kind) (increase_pure(infrared_step_tokens_total{platform=~\"$platform\", provider=\"bedrock\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{model}}` }} {{ `{{kind}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 19,
+                      "type": "timeseries",
+                      "title": "Bedrock cost per hour, by platform and model (USD)",
+                      "description": "The steps' cost on Bedrock at list price, as the runner estimates it (infrared_step_cost_usd_total).",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 39,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, model) (increase_pure(infrared_step_cost_usd_total{platform=~\"$platform\", provider=\"bedrock\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{model}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "currencyUSD",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 20,
+                      "type": "timeseries",
+                      "title": "Delivered and failed step attempts per hour, by platform and provider",
+                      "description": "Where the funnel ends for a run: step attempts by outcome and provider, Bedrock beside the Anthropic API.",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 39,
+                        "w": 12,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, provider, outcome) (increase_pure(infrared_step_attempts_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{provider}}` }} {{ `{{outcome}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "normal"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 21,
+                      "type": "row",
+                      "title": "Open platform incidents: the install's own alerts as Incidents (ADR 0069 T9)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 47,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 22,
+                      "type": "stat",
+                      "title": "Open incidents now, by platform and severity",
+                      "description": "Incidents open on each install, by severity, the platform's own among them (infrared_incidents_open).",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 48,
+                        "w": 8,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, severity) (infrared_incidents_open{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{severity}}` }}",
+                          "refId": "A",
+                          "instant": true,
+                          "range": false
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short"
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "reduceOptions": {
+                          "calcs": [
+                            "lastNotNull"
+                          ],
+                          "fields": "",
+                          "values": false
+                        },
+                        "textMode": "value_and_name",
+                        "colorMode": "none",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "orientation": "auto"
+                      }
+                    },
+                    {
+                      "id": 23,
+                      "type": "timeseries",
+                      "title": "Open incidents, by platform and org",
+                      "description": "Incidents open over time, by the org they are on: the platform org's are the install's own.",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 48,
+                        "w": 16,
+                        "h": 7
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, org) (infrared_incidents_open{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{org}}` }}",
                           "refId": "A"
                         }
                       ],
@@ -2448,6 +3848,7 @@ spec:
                       for: 2h
                       labels:
                         severity: warning
+                        infrared_platform: "true"
                       annotations:
                         summary: The metrics have not been copied to the backup bucket for over a day.
                     - alert: MetricsBackupNeverRan
@@ -2455,6 +3856,7 @@ spec:
                       for: 26h
                       labels:
                         severity: warning
+                        infrared_platform: "true"
                       annotations:
                         summary: The metrics have never been copied to the backup bucket.
 [[- end ]]

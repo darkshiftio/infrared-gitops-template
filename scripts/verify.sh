@@ -138,6 +138,25 @@
 #     external labels cluster and platform (the install's name), keeps the
 #     platform the API sets on its own telemetry writes, and the Fleet
 #     dashboard groups by platform; the chart passes all of it through its tpl
+#   - install telemetry (infrared-docs-internal ADR 0069): with the stack on
+#     and a telemetry URL, the stack's own vmagent gets a second remote write
+#     to that URL with the token of the Secret telemetry-token, a disk buffer
+#     and write relabeling that keeps exactly the telemetry component's keep
+#     list by job (and nothing of the kubelet's, kube-state-metrics' or the
+#     stack's own families), its own write series name the URLs, and its
+#     platform label is the install's
+#     registered name; without a URL nothing of it renders and the stack is
+#     the same but for that, byte for byte. On every install: VMSingle's caps
+#     on labels a series and new series an hour and a day; the Alertmanager's
+#     root route to the API's platform receiver with the operator's token
+#     mounted, which the org routes merge into; the VMRule infrared-platform
+#     (the API, the operator, the store, and with a URL the writes), every
+#     rule with severity and infrared_platform and none with
+#     infrared_product, the metrics' copy's alerts labelled the same; the
+#     Fleet dashboard split by provider with its model-call row, and the
+#     installs dashboard; the keep lists (the component's and the stack's
+#     write relabeling) keep every series every dashboard names; the chart
+#     passes all of it through its tpl
 #   - backups, with a backup bucket: the buckets copied hourly, kept 7 days,
 #     with the platform's backup keys, under the install's name or
 #     .Backup.Prefix; with .PostgresArchive.Enabled as well, Postgres's WAL
@@ -577,11 +596,83 @@ for v in "${variants[@]}"; do
     # platform the API sets itself (infrared_telemetry_writes_total) is kept,
     # not renamed exported_platform; and the Fleet dashboard groups by platform.
     fleet_json="$(sel "$vm_app" '.spec.source.helm.valuesObject.extraObjects[] | select(.metadata.name == "infrared-fleet-dashboard") | .data["infrared-fleet.json"]')"
-    if [ "$(sel "$vm_app" '.spec.source.helm.valuesObject.vmagent.spec.externalLabels | .cluster + "," + .platform')" = "$cluster,$cluster" ] \
+    # With the Installation's telemetry set, platform is the name the install
+    # registered under (ADR 0069 T2); cluster stays the cluster's.
+    want_platform="${tele_platform:-$cluster}"
+    if [ "$(sel "$vm_app" '.spec.source.helm.valuesObject.vmagent.spec.externalLabels | .cluster + "," + .platform')" = "$cluster,$want_platform" ] \
       && [ "$(sel "$vm_app" '.spec.source.helm.valuesObject.extraObjects[] | select(.kind == "VMServiceScrape" and .metadata.name == "infrared-metrics") | .spec.endpoints[0].honorLabels')" = true ]; then
-      ok "$variant: the metrics stack labels its series cluster and platform $cluster, and keeps the platform the API sets"
+      ok "$variant: the metrics stack labels its series cluster $cluster and platform $want_platform, and keeps the platform the API sets"
     else
-      bad "$variant: the metrics stack does not label its series with cluster and platform $cluster, or renames the API's platform"
+      bad "$variant: the metrics stack does not label its series with cluster $cluster and platform $want_platform, or renames the API's platform"
+    fi
+    # Every install (ADR 0069): VMSingle's caps against a runaway writer; the
+    # Alertmanager's root route to the API's platform receiver, with the
+    # operator's token mounted the way VMAlertmanager mounts Secrets; the
+    # platform VMRule, every rule with severity and infrared_platform and
+    # none with infrared_product, each on this install's own platform; the
+    # installs dashboard; the Fleet dashboard's provider split and model-call
+    # row; and the stack's own remote write to the plane with a URL alone.
+    vo='.spec.source.helm.valuesObject'
+    [ "$(sel "$vm_app" "$vo.vmsingle.spec.extraArgs | [.maxLabelsPerTimeseries, .[\"storage.maxHourlySeries\"], .[\"storage.maxDailySeries\"]] | join(\" \")")" = "40 2000000 5000000" ] \
+      && ok "$variant: VMSingle takes at most 40 labels a series, 2,000,000 new series an hour and 5,000,000 a day" \
+      || bad "$variant: VMSingle's caps are missing or wrong: $(sel "$vm_app" "$vo.vmsingle.spec.extraArgs | tojson")"
+    if [ "$(sel "$vm_app" "$vo.alertmanager | .config.route.receiver + \" \" + .config.receivers[0].name + \" \" + .config.receivers[0].webhook_configs[0].url + \" \" + (.config.receivers[0].webhook_configs[0].send_resolved | tostring) + \" \" + .config.receivers[0].webhook_configs[0].http_config.authorization.type + \" \" + .config.receivers[0].webhook_configs[0].http_config.authorization.credentials_file + \" \" + (.spec.secrets | join(\",\"))")" \
+        = "infrared-platform infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform true Bearer /etc/vm/secrets/infrared-alert-webhook/token infrared-alert-webhook" ] \
+      && [ "$(sel "$vm_app" "$vo.alertmanager.config | (.route.group_by | join(\",\")) + \" \" + .route.group_wait + \" \" + .route.group_interval + \" \" + .route.repeat_interval + \" \" + (.receivers | length | tostring) + \" \" + ((.route.routes // []) | length | tostring)")" = "alertname,severity 30s 5m 4h 1 0" ]; then
+      ok "$variant: the Alertmanager's root route takes the install's own alerts to the API's platform receiver, the operator's token mounted, no sub-route of its own"
+    else
+      bad "$variant: the Alertmanager's root route or its receiver is wrong: $(sel "$vm_app" "$vo.alertmanager | tojson")"
+    fi
+    vmrule_json="$(sel "$vm_app" "$vo.extraObjects[] | select(.kind == \"VMRule\" and .metadata.name == \"infrared-platform\") | tojson")"
+    want_rules="InfraredAPIDown:critical InfraredOperatorDown:critical InfraredOperatorReconcileErrors:warning InfraredMetricsStoreDown:critical"
+    [ -n "$tele_url" ] && want_rules="$want_rules InfraredTelemetryWritesFailing:warning"
+    if [ "$(jq -r '[.spec.groups[0].rules[] | .alert + ":" + .labels.severity] | join(" ")' <<<"$vmrule_json")" = "$want_rules" ] \
+      && jq -e '[.spec.groups[0].rules[] | select(.labels.infrared_platform != "true" or has("labels") and (.labels | has("infrared_product")))] | length == 0' <<<"$vmrule_json" >/dev/null \
+      && jq -e --arg p "$want_platform" '[.spec.groups[0].rules[].expr | select(contains("platform=\"" + $p + "\"") | not)] | length == 0' <<<"$vmrule_json" >/dev/null \
+      && jq -e '[.spec.groups[0].rules[] | select(.alert | test("Down$")) | .for] | unique == ["3m"]' <<<"$vmrule_json" >/dev/null \
+      && jq -e '[.spec.groups[0].rules[] | select(.alert | test("ReconcileErrors|WritesFailing")) | .for] | unique == ["15m"]' <<<"$vmrule_json" >/dev/null \
+      && [ "$(jq -r '.metadata.namespace' <<<"$vmrule_json")" = monitoring ]; then
+      ok "$variant: the platform VMRule carries the API's, the operator's and the store's alerts$([ -n "$tele_url" ] && echo ", and the writes to the plane,") on platform $want_platform, each with severity and infrared_platform and no infrared_product"
+    else
+      bad "$variant: the platform VMRule is wrong: $(jq -c '[.spec.groups[0].rules[] | {alert, for, labels, expr}]' <<<"$vmrule_json")"
+    fi
+    installs_json="$(sel "$vm_app" "$vo.extraObjects[] | select(.kind == \"ConfigMap\" and .metadata.name == \"infrared-installs-dashboard\") | .data[\"infrared-installs.json\"]")"
+    if [ "$(sel "$vm_app" "$vo.extraObjects[] | select(.kind == \"ConfigMap\" and .metadata.name == \"infrared-installs-dashboard\") | .metadata.namespace + \" \" + .metadata.labels.grafana_dashboard")" = "monitoring 1" ] \
+      && jq -e '.uid == "infrared-installs" and .title == "New installs: install to first Bedrock run"' <<<"$installs_json" >/dev/null \
+      && jq -e '.templating.list[0] | .name == "platform" and .multi == true and .includeAll == true and .current.value == "$__all"' <<<"$installs_json" >/dev/null \
+      && jq -e '[.panels[].targets[]?.expr | select(contains("platform=~\"$platform\"") | not)] | length == 0' <<<"$installs_json" >/dev/null \
+      && jq -e '[.panels[] | select(.type == "row") | .title | ascii_downcase | split(":")[0]] == ["installs", "the funnel", "bedrock", "open platform incidents"]' <<<"$installs_json" >/dev/null \
+      && jq -e '([.panels[] | select(.type == "table")] | length) == 1 and ([.panels[] | select(.type == "stat")] | length) >= 9' <<<"$installs_json" >/dev/null \
+      && jq -e '[.panels[].targets[]?.expr] | map(select(test("infrared_(install_info|installation_ready|installation_created_timestamp_seconds|orgs_total|products_total|humans_total|cloud_accounts|org_model_provider|step_attempts_total|model_calls_total|model_call_seconds_total|step_tokens_total|step_cost_usd_total|incidents_open|api_requests_total)"))) | length == length' <<<"$installs_json" >/dev/null \
+      && jq -e '[.panels[].targets[]?.expr | select(contains("op=~\"login|complete-google-login|complete-github-login|redeem-sign-in-link\""))] | length == 1' <<<"$installs_json" >/dev/null \
+      && jq -e '[.panels[].targets[]?.expr | select(contains("provider=\"bedrock\""))] | length >= 8' <<<"$installs_json" >/dev/null \
+      && jq -e '[.panels[] | select(.type != "row") | .gridPos | (.x + .w) <= 24] | all' <<<"$installs_json" >/dev/null; then
+      ok "$variant: the installs dashboard, from Ready to the first Bedrock call, by platform"
+    else
+      bad "$variant: the installs dashboard is missing or wrong"
+    fi
+    if jq -e '[.panels[] | select(.id == 19 or .id == 20 or .id == 22) | .targets[0] | select((.expr | contains("provider")) and (.legendFormat | contains("provider")))] | length == 3' <<<"$fleet_json" >/dev/null \
+      && jq -e '[.panels[] | select(.type == "row" and (.title | startswith("Model calls")))] | length == 1' <<<"$fleet_json" >/dev/null \
+      && jq -e '([.panels[].targets[]?.expr | select(contains("infrared_model_calls_total"))] | length) == 3 and ([.panels[].targets[]?.expr | select(contains("infrared_model_call_seconds_total"))] | length) == 1' <<<"$fleet_json" >/dev/null \
+      && jq -e '[.panels[] | select(.type != "row") | .gridPos | (.x + .w) <= 24] | all' <<<"$fleet_json" >/dev/null \
+      && jq -e '[.panels[].id] | length == (unique | length)' <<<"$fleet_json" >/dev/null; then
+      ok "$variant: the Fleet dashboard splits the agent steps by provider and shows the model calls"
+    else
+      bad "$variant: the Fleet dashboard lacks the provider split or the model-call row"
+    fi
+    rw_count="$(sel "$vm_app" "$vo.vmagent.additionalRemoteWrites // [] | length")"
+    if [ -n "$tele_url" ]; then
+      if [ "$rw_count" = 1 ] \
+        && [ "$(sel "$vm_app" "$vo.vmagent.additionalRemoteWrites[0] | .url + \" \" + .bearerTokenSecret.name + \"/\" + .bearerTokenSecret.key + \" \" + .maxDiskUsage + \" \" + (.inlineUrlRelabelConfig | length | tostring)")" = "$tele_url telemetry-token/token 800MiB 9" ] \
+        && [ "$(sel "$vm_app" "$vo.vmagent.spec.remoteWriteSettings.showURL")" = true ]; then
+        ok "$variant: the metrics stack's own vmagent writes to $tele_url as platform $want_platform, with the token of telemetry-token and a disk buffer, and names the URL on its write series"
+      else
+        bad "$variant: the metrics stack's vmagent does not write to $tele_url with the token, the buffer and showURL: $(sel "$vm_app" "$vo.vmagent | tojson")"
+      fi
+    elif [ "$rw_count" = 0 ] && [ "$(sel "$vm_app" "$vo.vmagent.spec | has(\"remoteWriteSettings\")")" = false ]; then
+      ok "$variant: the metrics stack's vmagent writes to no plane without a telemetry URL, and its settings are the chart's"
+    else
+      bad "$variant: the metrics stack's vmagent has a remote write or write settings without a telemetry URL"
     fi
     if jq -e '.templating.list[0] | .name == "platform" and .query.query == "label_values(up, platform)"' <<<"$fleet_json" >/dev/null \
       && jq -e '[.panels[].targets[]?.expr | select(contains("platform=~\"$platform\""))] | length > 0' <<<"$fleet_json" >/dev/null \
@@ -596,6 +687,7 @@ for v in "${variants[@]}"; do
   if [ -n "$tele_url" ] && [ "$tele_metrics" = false ]; then
     if grep -q '^kind: Application' "$tele_app" && grep -q -- "-remoteWrite.url=$tele_url" "$tele_vm" \
       && grep -q -- "-remoteWrite.label=platform=$tele_platform" "$tele_vm" && grep -q '^kind: Deployment' "$tele_vm" \
+      && grep -q -- '^            - -remoteWrite.showURL=true$' "$tele_vm" \
       && grep -q 'secretName: telemetry-token' "$tele_vm" && grep -q 'user_email' "$tele_vm" \
       && grep -q 'infrared.darkshift.io/layer: observability' "$tele_app" && grep -q -- '- vmagent.yaml' "$tele_kust"; then
       ok "$variant: telemetry renders a vmagent writing to $tele_url as platform $tele_platform"
@@ -3044,12 +3136,20 @@ if [ "$(sel "$tele_scrape" '.global.scrape_interval')" = 30s ] \
 else
   bad "telemetry: the scrape intervals are not 10 s for kubelet-cadvisor and 30 s for every other job"
 fi
+# Every dashboard the stack carries (the ConfigMaps labelled grafana_dashboard:
+# the Fleet and installs dashboards everywhere, the zones' on a Gateway edge),
+# and every series name their queries hold.
 fleet_names="$work/fleet-names.txt"
-if sel "$work/telemetry-metrics/registry/clusters/demo-te/components/victoria-metrics-k8s-stack.yaml" \
-    '.spec.source.helm.valuesObject.extraObjects[] | select(.metadata.name == "infrared-fleet-dashboard") | .data["infrared-fleet.json"]' \
+tele_stack="$work/telemetry-metrics/registry/clusters/demo-te/components/victoria-metrics-k8s-stack.yaml"
+dashboards() { sel "$1" '.spec.source.helm.valuesObject.extraObjects[] | select(.kind == "ConfigMap" and .metadata.labels.grafana_dashboard == "1") | .data[]'; }
+dashboard_uids="$({ dashboards "$tele_stack"; dashboards "$work/gateway/registry/clusters/demo-gw/components/victoria-metrics-k8s-stack.yaml"; } | jq -r '.uid' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+if [ "$dashboard_uids" = "infrared-edge-zones infrared-fleet infrared-installs" ] \
+  && { dashboards "$tele_stack"; dashboards "$work/gateway/registry/clusters/demo-gw/components/victoria-metrics-k8s-stack.yaml"; } \
     | jq -r '.panels[].targets[]?.expr' | grep -oE '[a-zA-Z_:][a-zA-Z0-9_:]*' | sort -u >"$fleet_names" \
   && grep -qx infrared_step_cost_usd_total "$fleet_names" && grep -qx workqueue_depth "$fleet_names" \
-  && grep -qx vmagent_remotewrite_requests_total "$fleet_names"; then
+  && grep -qx vmagent_remotewrite_requests_total "$fleet_names" && grep -qx infrared_model_calls_total "$fleet_names" \
+  && grep -qx infrared_install_info "$fleet_names"; then
+  ok "dashboards: three, $dashboard_uids, and their queries read"
   missing=""
   while read -r name; do
     case "$name" in
@@ -3059,12 +3159,87 @@ if sel "$work/telemetry-metrics/registry/clusters/demo-te/components/victoria-me
     esac
   done <"$fleet_names"
   if [ -z "$missing" ]; then
-    ok "telemetry: the keep lists of the jobs infrared and vmagent keep every series the Fleet dashboard names for them"
+    ok "telemetry: the keep lists of the jobs infrared and vmagent keep every series every dashboard names for them"
   else
-    bad "telemetry: the Fleet dashboard names series that the keep lists drop:$missing"
+    bad "telemetry: a dashboard names series that the keep lists drop:$missing"
   fi
+  # The stack's own write to the plane (ADR 0069 T8) keeps the same list, by
+  # job: its rules mark a series to keep, then keep the marked alone. Each
+  # family's regex is the rule's, after the job's part.
+  plane_rules="$(sel "$tele_stack" '.spec.source.helm.valuesObject.vmagent.additionalRemoteWrites[0].inlineUrlRelabelConfig | tojson')"
+  plane_re() { jq -r --argjson i "$1" '.[$i].regex' <<<"$plane_rules"; }
+  plane_family() { plane_re "$1" | sed -E 's/^[^;]*;//'; }
+  plane_infrared="$(plane_re 0)|$(plane_family 1)"
+  plane_up="$(plane_re 2)"
+  plane_vmagent="$(plane_family 3)"
+  plane_container="$(plane_re 4 | sed -E 's/;.*$//')"
+  missing=""
+  while read -r name; do
+    case "$name" in
+      infrared_*|controller_runtime_*|workqueue_*|process_*|go_*) kept "$plane_infrared" "$name" || missing="$missing $name" ;;
+      vmagent_*|vm_persistentqueue_*) kept "$plane_vmagent" "$name" || missing="$missing $name" ;;
+      up|scrape_*) kept "$plane_up" "$name" || missing="$missing $name" ;;
+      container_memory_working_set_bytes|container_cpu_usage_seconds_total) kept "$plane_container" "$name" || missing="$missing $name" ;;
+    esac
+  done <"$fleet_names"
+  if [ -z "$missing" ] \
+    && [ "$(jq -r '[.[0].sourceLabels, .[1].sourceLabels, .[2].sourceLabels, .[3].sourceLabels, .[4].sourceLabels] | map(join(",")) | join(" ")' <<<"$plane_rules")" = "__name__ job,__name__ __name__ job,__name__ __name__,namespace,container" ] \
+    && [ "$(jq -r '[.[0], .[1], .[2], .[3], .[4]] | map(.targetLabel + "=" + .replacement) | unique | join(" ")' <<<"$plane_rules")" = "__tmp_plane=keep" ] \
+    && [ "$(jq -r '.[5] | .action + " " + (.sourceLabels | join(",")) + " " + .regex' <<<"$plane_rules")" = "keep __tmp_plane keep" ] \
+    && [ "$(jq -r '.[6] | .action + " " + .regex' <<<"$plane_rules")" = "labeldrop __tmp_plane" ] \
+    && [ "$(jq -r '.[7] | .action + " " + .if + " " + .regex' <<<"$plane_rules")" = 'labeldrop {__name__=~"container_.*"} id|name|image' ] \
+    && [ "$(jq -r '.[8] | .action + " " + .regex' <<<"$plane_rules")" = 'labeldrop user\.email|user\.id|organization\.id|user_email|user_id|organization_id' ]; then
+    ok "telemetry-metrics: the stack's write to the plane keeps every series every dashboard names, marks then keeps, drops the marker, the container labels and the identity labels"
+  else
+    bad "telemetry-metrics: the stack's write to the plane drops a series a dashboard names ($missing), or its rules are wrong: $plane_rules"
+  fi
+  # ...and nothing the stack scrapes beside: the operator's and the API's
+  # families by their jobs alone, the container families for ir-org-*
+  # containers alone, and none of the kubelet's, kube-state-metrics', the
+  # node exporter's or Argo CD's.
+  leaked=""
+  for pair in "kube-state-metrics;process_resident_memory_bytes" "node-exporter;go_goroutines" "argocd-server;controller_runtime_reconcile_total" \
+      "victoria-metrics-k8s-stack-grafana;process_cpu_seconds_total" "vmsingle-victoria-metrics-k8s-stack;vm_app_version"; do
+    ! kept "$(plane_re 1)" "$pair" && ! kept "$(plane_re 3)" "$pair" || leaked="$leaked $pair"
+  done
+  for name in kube_pod_info node_cpu_seconds_total argocd_app_info kubelet_running_pods vm_cache_entries container_network_receive_bytes_total; do
+    ! kept "$plane_infrared" "$name" && ! kept "$plane_up" "$name" && ! kept "$plane_vmagent" "$name" && ! kept "$plane_container" "$name" || leaked="$leaked $name"
+  done
+  for triple in "container_memory_working_set_bytes;argocd;app" "container_cpu_usage_seconds_total;ir-org-acme;" "container_memory_working_set_bytes;monitoring;vmsingle"; do
+    ! kept "$(plane_re 4)" "$triple" || leaked="$leaked $triple"
+  done
+  kept "$(plane_re 1)" "infrared-api;process_resident_memory_bytes" && kept "$(plane_re 1)" "infrared-operator;controller_runtime_reconcile_errors_total" \
+    && kept "$(plane_re 3)" "vmagent-victoria-metrics-k8s-stack;vmagent_remotewrite_requests_total" \
+    && kept "$(plane_re 4)" "container_cpu_usage_seconds_total;ir-org-acme;step" || leaked="$leaked (lost) infrared-api;process_resident_memory_bytes"
+  [ -z "$leaked" ] \
+    && ok "telemetry-metrics: the stack's write to the plane leaves the rest of what it scrapes behind" \
+    || bad "telemetry-metrics: the stack's write to the plane would leak, or lose:$leaked"
 else
-  bad "telemetry: could not read the Fleet dashboard's queries from the metrics stack's render"
+  bad "dashboards: could not read every dashboard's queries from the metrics stack's renders (uids: $dashboard_uids)"
+fi
+# With a telemetry URL and without one, the same Data otherwise (ADR 0069 T8):
+# the stack differs in the remote write (its URL shown on vmagent's own
+# series), the platform name (vmagent's label and the platform rules'
+# selectors) and the writes-failing rule alone. Text
+# first, comments aside: the five lines that go are the label and the four
+# rules' expressions, each the platform; then the values as JSON with those
+# taken out or put back, equal.
+"$work/render" -out "$work/plane-on" -cluster demo-pn -flavor k3s -build-registry "" -data "$work/telemetry-metrics.json" >/dev/null
+"$work/render" -out "$work/plane-off" -cluster demo-pn -flavor k3s -build-registry "" -data "$work/stores.json" >/dev/null
+plane_app="registry/clusters/demo-pn/components/victoria-metrics-k8s-stack.yaml"
+plane_gone="$({ diff <(grep -v '^ *#' "$work/plane-off/$plane_app") <(grep -v '^ *#' "$work/plane-on/$plane_app") || true; } | { grep '^<' || true; })"
+if [ "$(d3_diff "$work/plane-off" "$work/plane-on")" = "README.md $plane_app" ] \
+  && [ "$(grep -c . <<<"$plane_gone")" = 5 ] \
+  && [ "$(grep -vcE '^< +(platform: demo-pn|expr: .*platform="demo-pn".*)$' <<<"$plane_gone")" = 0 ] \
+  && [ "$(yq -o json -I0 '.spec.source.helm.valuesObject' "$work/plane-on/$plane_app" \
+        | jq -c -S 'del(.vmagent.additionalRemoteWrites, .vmagent.spec.remoteWriteSettings) | .vmagent.spec.externalLabels.platform = "demo-pn"
+          | .extraObjects |= map(if .kind == "VMRule" and .metadata.name == "infrared-platform"
+              then .spec.groups[0].rules |= (map(select(.alert != "InfraredTelemetryWritesFailing")) | map(.expr |= gsub("platform=\"demo-mac\""; "platform=\"demo-pn\"")))
+              else . end)')" = "$(yq -o json -I0 '.spec.source.helm.valuesObject' "$work/plane-off/$plane_app" | jq -c -S .)" ] \
+  && [ "$(sel "$work/plane-off/$plane_app" '.spec.source.helm.valuesObject.vmagent | has("additionalRemoteWrites")')" = false ]; then
+  ok "plane-off: without a telemetry URL the stack is the one with it, but for the remote write, the platform name and the writes-failing rule"
+else
+  bad "plane-off: the stack without a telemetry URL differs from the one with it beyond the remote write, the platform name and the writes-failing rule: $(d3_diff "$work/plane-off" "$work/plane-on"); $(head -6 <<<"$plane_gone")"
 fi
 trimmed=""
 for name in workqueue_queue_duration_seconds_bucket workqueue_retries_total controller_runtime_active_workers \
@@ -3169,6 +3344,50 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
       || bad "oidc: Grafana's container lacks GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET from infrared-oidc-grafana"
   else
     bad "oidc: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-oidc.err")"
+  fi
+  # Install telemetry (ADR 0069, variant telemetry-metrics) through the chart's
+  # tpl: vmagent gets VMSingle's write and the plane's, with the token;
+  # Alertmanager mounts the operator's token and its config Secret holds the
+  # root route; VMSingle gets the caps beside the chart's own argument; the
+  # platform rules' label templates and the installs dashboard's legends
+  # survive.
+  yq '.spec.source.helm.valuesObject' "$tele_stack" >"$work/vmks-plane-values.yaml"
+  if helm template victoria-metrics-k8s-stack "$work/vmks-chart/victoria-metrics-k8s-stack" -n monitoring \
+      -f "$work/vmks-plane-values.yaml" >"$work/vmks-plane.yaml" 2>"$work/vmks-plane.err"; then
+    [ "$(yq -N -o json -I0 'select(.kind == "VMAgent") | .spec.remoteWrite' "$work/vmks-plane.yaml" \
+        | jq -r '[.[] | .url + (if .bearerTokenSecret then " token=" + .bearerTokenSecret.name + "/" + .bearerTokenSecret.key + " buffer=" + .maxDiskUsage + " relabels=" + (.inlineUrlRelabelConfig | length | tostring) else "" end)] | sort | join(" ")')" \
+        = "http://vmsingle-victoria-metrics-k8s-stack.monitoring.svc.cluster.local.:8428/api/v1/write https://infrared.example.com/api/v1/telemetry/write token=telemetry-token/token buffer=800MiB relabels=9" ] \
+      && [ "$(yq -N -r 'select(.kind == "VMAgent") | .spec.externalLabels | .cluster + "," + .platform' "$work/vmks-plane.yaml")" = demo-te,demo-mac ] \
+      && [ "$(yq -N -r 'select(.kind == "VMAgent") | .spec.remoteWriteSettings.showURL' "$work/vmks-plane.yaml")" = true ] \
+      && ok "telemetry-metrics: the monitoring chart gives vmagent VMSingle's write and the plane's, with the token, the buffer and the relabeling, as platform demo-mac, the URLs shown" \
+      || bad "telemetry-metrics: the monitoring chart's VMAgent lacks the plane's write beside VMSingle's: $(yq -N -o json -I0 'select(.kind == "VMAgent") | .spec.remoteWrite' "$work/vmks-plane.yaml")"
+    am_cfg="$(yq -N -r 'select(.kind == "Secret" and .metadata.name == "vmalertmanager-victoria-metrics-k8s-stack") | .stringData["alertmanager.yaml"]' "$work/vmks-plane.yaml")"
+    [ "$(yq -r '.route.receiver + " " + .receivers[0].webhook_configs[0].url + " " + .receivers[0].webhook_configs[0].http_config.authorization.credentials_file + " " + (.receivers | length | tostring)' <<<"$am_cfg")" \
+        = "infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform /etc/vm/secrets/infrared-alert-webhook/token 1" ] \
+      && [ "$(yq -N -r 'select(.kind == "VMAlertmanager") | (.spec.secrets | join(",")) + " " + .spec.configSecret' "$work/vmks-plane.yaml")" = "infrared-alert-webhook vmalertmanager-victoria-metrics-k8s-stack" ] \
+      && ok "telemetry-metrics: the monitoring chart writes the root route into Alertmanager's config Secret, and mounts the operator's token" \
+      || bad "telemetry-metrics: Alertmanager's config from the chart lacks the platform receiver, or the token's Secret is not mounted"
+    [ "$(yq -N -o json -I0 'select(.kind == "VMSingle") | .spec.extraArgs' "$work/vmks-plane.yaml" \
+        | jq -r '[.maxLabelsPerTimeseries, .["storage.maxHourlySeries"], .["storage.maxDailySeries"], ((.["vmalert.proxyURL"] | length) > 0 | tostring)] | join(" ")')" = "40 2000000 5000000 true" ] \
+      && ok "telemetry-metrics: VMSingle gets the caps beside the chart's own vmalert argument" \
+      || bad "telemetry-metrics: VMSingle's caps are lost or replace the chart's own argument after tpl"
+    [ "$(yq -N -o json -I0 'select(.kind == "VMRule" and .metadata.name == "infrared-platform") | .spec.groups[0].rules' "$work/vmks-plane.yaml" \
+        | jq '[.[].annotations.summary | select(contains("{{ $labels."))] | length')" = 2 ] \
+      && ok "telemetry-metrics: the platform rules' label templates survive the chart's tpl" \
+      || bad "telemetry-metrics: the platform rules' label templates are wrong after tpl"
+    installs_legends="$(yq -N -r 'select(.metadata.name == "infrared-installs-dashboard") | .data["infrared-installs.json"]' "$work/vmks-plane.yaml" \
+      | jq -r '[.panels[].targets[]?.legendFormat // empty] | unique | join("|")')"
+    case "$installs_legends" in
+      *'{{platform}} {{model}} {{kind}}'*) ;;
+      *) installs_legends="" ;;
+    esac
+    if [ -n "$installs_legends" ] && ! grep -q '`' <<<"$installs_legends" && ! grep -q '{{ ' <<<"$installs_legends"; then
+      ok "telemetry-metrics: the installs dashboard's legends survive the chart's tpl"
+    else
+      bad "telemetry-metrics: the installs dashboard's legends are wrong after tpl: $installs_legends"
+    fi
+  else
+    bad "telemetry-metrics: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-plane.err")"
   fi
 else
   echo "skip: victoria-metrics-k8s-stack $vmks_version could not be fetched; its render is not checked"
