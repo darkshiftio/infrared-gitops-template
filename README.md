@@ -1552,6 +1552,120 @@ Substrate: copy the new `substrate-images.json` over
 ActorTemplate in `components/substrate-actors/templates.yaml` a new version in
 its name.
 
+### Checks on a running install
+
+Two scripts check an install's monitoring end to end and its first agent run
+on Amazon Bedrock (infrared-docs-internal ADR 0069 T11), against a named
+cluster and never from CI, the way the fence, stores, tenancy and Product
+checks above run. Each prints its numbered checks as `ok`, `FAIL`, `WARN` or
+`SKIP` with the reason, and exits with the number of FAILs. They read the
+store, vmalert and Alertmanager through the API server's proxy, Grafana
+through a port-forward as its admin, and Infrared's API with the bearer token
+in a file of one line, mode 600; no password or token is printed.
+
+```bash
+scripts/observability-check.sh <context> [--api <url>] [--token-file <file>] [--plane <home context> --platform <name>] [--alert-path] [--opt-out-test] [--only <n,...>]
+scripts/bedrock-proof.sh <context> <api url> <org> [--token-file <file>] [--cloud-account <name> --account-id <id> --role-arn <arn> --region <r>] [--tiers <frontier>,<balanced>,<fast>] [--product <name>] [--kubectl-fallback] [--cloudwatch] [--plane <home context> --platform <name>] [--config <ir config>]
+```
+
+`observability-check.sh`'s thirteen checks:
+
+1. **stack up**: VMSingle, vmagent, vmalert, Alertmanager and Grafana are
+   Ready; VMSingle answers `/health`; retention is `30d`; the data is on a
+   claim (an emptyDir is WARN on k3s, FAIL on a cloud).
+2. **targets**: `up` is 1 for the API and the operator through the scrape
+   `infrared-metrics`, by the job label the series carry.
+3. **series present**: every metric name the panels of every
+   `grafana_dashboard` ConfigMap read (a name followed by a selector or a
+   range, as `verify.sh` reads the Fleet dashboard) has a sample in the last
+   10 minutes. On the template's own dashboards (`infrared-*`): lane A's new
+   series SKIP until the operator release that brings them; series only a
+   connected Mac, a runner pool, an agent run or a writer to this plane
+   produces WARN; any other absence FAILs. The chart's own dashboards'
+   absences are one WARN, since the template does not own them.
+4. **label hygiene**: over the series that leave the install (the telemetry
+   keep-list's names: `infrared_*`, `controller_runtime_*`, `workqueue_*`,
+   `process_*`, `go_*`, `up`, `scrape_*`, `vmagent_*`, the two container
+   series, `claude_code_*`, `localred_*`, by a `match[]` selector), not the
+   stack's own series, no label value matches a token (`sk-ant-`, `irt_`,
+   `ghp_`, `gho_`, `AKIA`, `xox[abp]-`), an email, or a path (`/Users/`,
+   `/home/` but GKE's own `/home/kubernetes/`, `/private/`): ADR 0044's sweep
+   as code. A match names the label, never the value.
+5. **alert path** (`--alert-path`, with `--api` and `--token-file`): a
+   synthetic alert for the platform org's first Product opens an Incident
+   through the API within 90 seconds, and the same alert with an `endsAt`
+   resolves it within the route's `group_interval`.
+6. **platform route**: Alertmanager's root receiver is `infrared-platform`,
+   a webhook to the API's `/v1/webhooks/alertmanager/_platform` (the name and
+   the webhook from Alertmanager's status, the path from the metrics stack
+   Application's rendered values, since Alertmanager redacts a webhook's
+   URL). FAILs on today's installs until the install telemetry template lands.
+7. **rules loaded**: vmalert lists every group of every VMRule, the
+   operator's per-Product `infrared-slo-<product>` among them, and the
+   platform VMRule `monitoring/infrared-platform` (SKIP until it lands).
+8. **dashboards**: Grafana lists every dashboard ConfigMap by its uid,
+   `infrared-fleet` among them, and each loads.
+9. **Grafana's sign-in**: with Grafana's OAuth on, `/login/generic_oauth`
+   answers 302 to the install's `/api/v1/oidc/authorize` (SKIP when off).
+10. **telemetry out**: the Installation names a plane
+    (`spec.observability.telemetry`), the Secret `monitoring/telemetry-token`
+    is there, and the vmagent's accepted writes grow over 60 seconds, read
+    from its own `/metrics` so the stack's vmagent and the `telemetry`
+    component's both count; with `--plane` and `--platform`, the plane's
+    store holds a sample of this install's under 2 minutes old
+    (`infrared_install_info`, or `up` until lane A lands). SKIP when the
+    Installation names no plane.
+11. **opt-out** (`--opt-out-test`, with `--api`, `--token-file`, `--plane`
+    and `--platform`): `PUT /v1/telemetry` off, then over 10 minutes the
+    Secret stays gone and the plane's count of this install's writes stays
+    flat; then on again, and a first accepted write within 3 minutes.
+    Telemetry pauses for those 10 minutes, which it says first. SKIP while
+    `GET /v1/telemetry` answers 404 (the rollout flag `installTelemetry` off,
+    or an API from before it).
+12. **backup**: on Google Cloud, the CronJob `metrics-backup`'s last success
+    is under 26 hours old; SKIP where the copy does not render.
+13. **Bedrock**: with `INFRARED_BEDROCK` on the operator,
+    `infrared_model_calls_total{provider="bedrock"}` and
+    `infrared_step_cost_usd_total{provider="bedrock"}` are above zero; SKIP
+    when Bedrock is off, or until the series exist.
+
+`bedrock-proof.sh`, on an install with Bedrock on (the Infrared chart's
+`runner.bedrock.enabled`), in order: (1) adds the org's AWS CloudAccount
+through the API when `--account-id` and `--role-arn` are given, skipped when it
+exists, and waits up to 2 minutes for it to be Verified; (2) sets the org's
+model tiers to `us.anthropic.claude-opus-4-6-v1`,
+`us.anthropic.claude-sonnet-4-6` and
+`us.anthropic.claude-haiku-4-5-20251001-v1:0` unless `--tiers` names others;
+(3) sets the org's model provider with `ir org model-provider set --bedrock
+--cloud-account <name> --region <r>`, and when this `ir` does not know the
+command, prints the `kubectl patch organization` line and runs it only with
+`--kubectl-fallback`; (4) creates the Product `hello-bedrock` with `ir product
+create -f` from `scripts/testdata/hello-bedrock.yaml` and its starter beside
+it, `hello-bedrock.zip` (one page and a README), one private repo on the
+install's own forge and no build (a build needs a registry on the nodes,
+which an EKS install has not), skipped when it exists;
+(5) opens an issue on it with `ir issue create`, which starts the change-quick
+run; (6) waits up to 15 minutes for its hydrate step to end; (7) asserts the
+step's model is `us.anthropic.*`, its usage has output tokens and a cost, and,
+from an operator that records them, its attempt's provider is `bedrock` with
+forwarded model calls (SKIP on an older one), and that the install's store,
+and the plane with `--plane` and `--platform`, count
+`infrared_model_calls_total{provider="bedrock"}` (SKIP until the series
+exist); (8) with `--cloudwatch`, reads `AWS/Bedrock` `OutputTokenCount` for
+the step's model over the run's window, read-only with `--profile
+darkshift-preprod`, and prints it beside the step's output tokens; (9) prints
+the figures. The run then waits at triage: approving it on an EKS install
+without a registry on the nodes fails at the build step. Without
+`--token-file`, steps 1 and 2 are skipped and the rest goes through `ir`'s own
+login at `<api url>` (`--config` passes a config file through). It spends one
+agent step on the org's Bedrock account.
+
+Until the install telemetry work lands (ADR 0069, lanes A to D), on today's
+installs check 3 SKIPs lane A's series, check 6 FAILs (the gap it names),
+check 7 SKIPs the platform VMRule, check 10 SKIPs on a full-stack install
+(its Installation names no plane), check 11 SKIPs on the 404, and check 13
+SKIPs the series.
+
 ## Cutting a version
 
 1. Merge to `main` with `make verify` green.
