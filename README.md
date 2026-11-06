@@ -1501,9 +1501,10 @@ model tiers to `us.anthropic.claude-opus-4-6-v1`,
 --cloud-account <name> --region <r>`, and when this `ir` does not know the
 command, prints the `kubectl patch organization` line and runs it only with
 `--kubectl-fallback`; (4) creates the Product `hello-bedrock` with `ir product
-create -f` from `scripts/testdata/hello-bedrock.yaml`, one private repo on the
-install's own forge with a one-page starter and no build (a build needs a
-registry on the nodes, which an EKS install has not), skipped when it exists;
+create -f` from `scripts/testdata/hello-bedrock.yaml` and its starter beside
+it, `hello-bedrock.zip` (one page and a README), one private repo on the
+install's own forge and no build (a build needs a registry on the nodes,
+which an EKS install has not), skipped when it exists;
 (5) opens an issue on it with `ir issue create`, which starts the change-quick
 run; (6) waits up to 15 minutes for its hydrate step to end; (7) asserts the
 step's model is `us.anthropic.*`, its usage has output tokens and a cost, and,

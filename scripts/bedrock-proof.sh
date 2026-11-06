@@ -20,10 +20,11 @@
 #      the kubectl patch of the Organization and runs it only with
 #      --kubectl-fallback;
 #   4. creates the Product (--product, hello-bedrock) with ir product create
-#      -f from scripts/testdata/hello-bedrock.yaml: one private repo on the
-#      install's own forge with a one-page starter, no build (a build needs
-#      a registry on the nodes, which an EKS install has not: workspace TODO
-#      514), so no zone; skipped when it exists;
+#      -f from scripts/testdata/hello-bedrock.yaml and its starter beside it,
+#      hello-bedrock.zip: one private repo on the install's own forge with a
+#      one-page site, no build (a build needs a registry on the nodes, which
+#      an EKS install has not: workspace TODO 514), so no zone; skipped when
+#      it exists;
 #   5. opens an issue on it with ir issue create, which starts the
 #      change-quick run, whose first step, hydrate, is the architect's;
 #   6. waits up to 15 minutes for that step to end;
@@ -47,7 +48,7 @@
 # url> (--config passes a config file through). No token is printed. The
 # exit status is the number of failed assertions. Spends: one agent step on
 # the org's Bedrock account. Runs against a cluster, never from CI.
-# Needs: kubectl, jq, curl, zip, ir; aws with --cloudwatch.
+# Needs: kubectl, jq, curl, ir; aws with --cloudwatch.
 # =============================================================================
 set -euo pipefail
 usage='usage: scripts/bedrock-proof.sh <kube context> <api url> <org> [--token-file <file>]
@@ -132,7 +133,8 @@ op_env() {
     jq -r --arg n "$1" '.spec.template.spec.containers[] | select(.name == "operator") | .env[]? | select(.name == $n) | .value // empty'
 }
 
-for t in kubectl jq curl zip ir; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+for t in kubectl jq curl ir; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+[ -s "$HERE/testdata/hello-bedrock.zip" ] || die "no starter at $HERE/testdata/hello-bedrock.zip"
 [ -z "$CLOUDWATCH" ] || command -v aws >/dev/null || die "missing tool: aws (--cloudwatch)"
 if [ -n "$TOKEN_FILE" ]; then
   [ -s "$TOKEN_FILE" ] || die "no token in $TOKEN_FILE"
@@ -231,28 +233,14 @@ fi
 # --- 4. the Product -----------------------------------------------------------------
 log "4. The Product $PRODUCT exists, with its repo on the install's own forge"
 if k -n "$NS" get products.infrared.darkshift.io "$PRODUCT" >/dev/null 2>&1; then pass "Product $PRODUCT exists: left as it is"; else
-  mkdir -p "$work/starter"
-  cat >"$work/starter/index.html" <<EOF
-<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><title>Hello Bedrock</title></head>
-  <body>
-    <h1>Hello Bedrock</h1>
-    <p>A one-page site made by infrared-gitops-template's scripts/bedrock-proof.sh on $(utc "$t_start") to prove that the org's agent steps run on Amazon Bedrock.</p>
-  </body>
-</html>
-EOF
-  cat >"$work/starter/README.md" <<EOF
-# Hello Bedrock
-
-A one-page static site: \`index.html\` at the root, nothing to build. Made by infrared-gitops-template's
-\`scripts/bedrock-proof.sh\` to prove that this org's agent steps run on Amazon Bedrock. Safe to delete.
-EOF
-  (cd "$work/starter" && zip -X -q -r "$work/hello-bedrock.zip" index.html README.md)
-  sed "s/hello-bedrock/$PRODUCT/g" "$HERE/testdata/hello-bedrock.yaml" >"$work/hello-bedrock.yaml"
+  # The manifest and its starter, copied together: ir reads the starter from
+  # the manifest's directory. --product renames the Product and its repo (the
+  # two name fields), not the starter.
+  cp "$HERE/testdata/hello-bedrock.zip" "$work/hello-bedrock.zip"
+  sed -E "s/^( +(- )?name: )hello-bedrock\$/\\1$PRODUCT/" "$HERE/testdata/hello-bedrock.yaml" >"$work/hello-bedrock.yaml"
   "${IR[@]}" product create -f "$work/hello-bedrock.yaml" | sed 's/^/        /'
   k -n "$NS" get products.infrared.darkshift.io "$PRODUCT" >/dev/null 2>&1 || die "Product $PRODUCT is not on $CTX after ir product create"
-  pass "Product $PRODUCT created from scripts/testdata/hello-bedrock.yaml, its repo started from a one-page starter"
+  pass "Product $PRODUCT created from scripts/testdata/hello-bedrock.yaml, its repo started from the one-page starter hello-bedrock.zip"
 fi
 
 # --- 5. the issue and its run ---------------------------------------------------------
