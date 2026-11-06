@@ -20,10 +20,14 @@
 #      connected Mac, a runner pool, an agent run or a writer to this plane
 #      produces WARNs; any other absence FAILs. The chart's own dashboards'
 #      absences are one WARN, since the template does not own them;
-#   4. label hygiene: no label value in the store matches a token (sk-ant-,
-#      irt_, ghp_, gho_, AKIA, xox[abp]-), an email, or a path (/Users/,
-#      /home/ but GKE's own /home/kubernetes/, /private/): ADR 0044's sweep
-#      as code. A match names the label, never the value;
+#   4. label hygiene: over the series that leave the install (the telemetry
+#      keep-list's names: infrared_*, controller_runtime_*, workqueue_*,
+#      process_*, go_*, up, scrape_*, vmagent_*, the two container series,
+#      claude_code_*, localred_*), not the stack's own series, no label
+#      value matches a token (sk-ant-, irt_, ghp_, gho_, AKIA, xox[abp]-),
+#      an email, or a path (/Users/, /home/ but GKE's own /home/kubernetes/,
+#      /private/): ADR 0044's sweep as code. A match names the label, never
+#      the value;
 #   5. alert path (--alert-path, with --api and --token-file): a synthetic
 #      alert for the platform org's first Product opens an Incident through
 #      the API within 90 seconds, and the same alert with an endsAt resolves
@@ -96,6 +100,13 @@ GRAFANA=victoria-metrics-k8s-stack-grafana
 # until the release that carries them, so check 3 and 13 SKIP, never FAIL.
 LANE_A_SERIES="infrared_install_info infrared_installation_ready infrared_installation_created_timestamp_seconds infrared_orgs_total infrared_products_total infrared_humans_total infrared_cloud_accounts infrared_org_model_provider infrared_incidents_open infrared_model_calls_total infrared_model_call_seconds_total"
 LANE_A_NOTE="comes with infrared-operator's release that carries the install and model-call series (ADR 0069 T7, lane A)"
+# The series that leave an install: the telemetry keep-list's names (the
+# telemetry component's vmagent, template/components/telemetry/vmagent.yaml.tmpl,
+# and the stack's own vmagent once the install telemetry template lands).
+# Check 4 sweeps these alone, what the plane receives, not the stack's own
+# series: node-exporter's mountpoints and VictoriaMetrics' source locations
+# are paths by nature and never leave.
+LEAVES='{__name__=~"infrared_.*|controller_runtime_.*|workqueue_.*|process_.*|go_.*|up|scrape_.*|vmagent_.*|container_memory_working_set_bytes|container_cpu_usage_seconds_total|claude_code_.*|localred_.*"}'
 
 k() { kubectl --context "$CTX" "$@"; }
 kp() { kubectl --context "$PLANE" "$@"; }
@@ -315,11 +326,11 @@ if runs 2; then
   if [ -z "$stack" ]; then skip "$no_stack"; else
     ups="$(vm "/api/v1/query?query=$(enc "up{namespace=\"$INFRARED_NS\"}")" | jq -c '[.data.result[]? | {job: .metric.job, service: (.metric.service // ""), pod: (.metric.pod // ""), up: .value[1]}]' 2>/dev/null || echo '[]')"
     for what in api operator; do
-      hit="$(jq -r --arg w "$what" '[.[] | select((.service + " " + .pod + " " + .job) | test("infrared-" + $w))] | first // empty | "\(.up) \(.job) \(.service)"' <<<"$ups")"
+      hit="$(jq -r --arg w "$what" '[.[] | select((.service + " " + .pod + " " + .job) | test("infrared-" + $w))] | first // empty | "\(.up) job \(.job), service \(.service)"' <<<"$ups")"
       case "$hit" in
         "") fail "no up series for the $what in $INFRARED_NS: the scrape infrared-metrics finds no Service port named metrics for it" ;;
-        1\ *) pass "the $what is up through job ${hit#1 } (up=1)" ;;
-        *) fail "the $what's target is down: up=${hit%% *} through job ${hit#* }" ;;
+        1\ *) pass "the $what is up (up=1, ${hit#1 })" ;;
+        *) fail "the $what's target is down (up=${hit%% *}, ${hit#* })" ;;
       esac
     done
   fi
@@ -374,16 +385,19 @@ if runs 3; then
 fi
 
 # --- 4. label hygiene -----------------------------------------------------------
-log "4. No label value looks like a token, an email or a path"
+log "4. No label value of the series that leave the install looks like a token, an email or a path"
 if runs 4; then
   if [ -z "$stack" ]; then skip "$no_stack"; else
-    labels="$(vm /api/v1/labels | jq -r '.data[]?' 2>/dev/null || true)"
-    if [ -z "$labels" ]; then fail "the store lists no labels"; else
+    # match[] (as match%5B%5D) scopes the label names and their values to the
+    # series the selector names; VictoriaMetrics honours it on both.
+    sel="match%5B%5D=$(enc "$LEAVES")"
+    labels="$(vm "/api/v1/labels?$sel" | jq -r '.data[]?' 2>/dev/null || true)"
+    if [ -z "$labels" ]; then fail "the store lists no labels for the series that leave the install"; else
       n=0 hits=0
       while read -r label; do
         [ -n "$label" ] || continue
         n=$((n + 1))
-        vm "/api/v1/label/$(enc "$label")/values" | jq -r '.data[]?' 2>/dev/null >"$work/values.txt" || true
+        vm "/api/v1/label/$(enc "$label")/values?$sel" | jq -r '.data[]?' 2>/dev/null >"$work/values.txt" || true
         tokens="$(grep -cE 'sk-ant-|irt_|ghp_|gho_|AKIA|xox[abp]-' "$work/values.txt" || true)"
         emails="$(grep -cE '[^@ ]+@[^@ ]+\.[a-z]+' "$work/values.txt" || true)"
         paths="$( { grep -E '/Users/|/private/' "$work/values.txt" || true; { grep -E '/home/' "$work/values.txt" || true; } | { grep -Ev '/home/kubernetes/' || true; }; } | sort -u | wc -l | tr -d ' ')"
@@ -391,7 +405,7 @@ if runs 4; then
           [ "${kind#* }" = 0 ] || { fail "label $label: ${kind#* } value(s) look like a ${kind% *}"; hits=$((hits + 1)); }
         done
       done <<<"$labels"
-      [ "$hits" != 0 ] || pass "$n labels, no value matches a token, an email or a path"
+      [ "$hits" != 0 ] || pass "$n labels over the series that leave the install, no value matches a token, an email or a path"
     fi
   fi
 fi

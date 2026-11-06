@@ -1448,10 +1448,14 @@ scripts/bedrock-proof.sh <context> <api url> <org> [--token-file <file>] [--clou
    connected Mac, a runner pool, an agent run or a writer to this plane
    produces WARN; any other absence FAILs. The chart's own dashboards'
    absences are one WARN, since the template does not own them.
-4. **label hygiene**: no value of any label in the store matches a token
-   (`sk-ant-`, `irt_`, `ghp_`, `gho_`, `AKIA`, `xox[abp]-`), an email, or a
-   path (`/Users/`, `/home/` but GKE's own `/home/kubernetes/`, `/private/`):
-   ADR 0044's sweep as code. A match names the label, never the value.
+4. **label hygiene**: over the series that leave the install (the telemetry
+   keep-list's names: `infrared_*`, `controller_runtime_*`, `workqueue_*`,
+   `process_*`, `go_*`, `up`, `scrape_*`, `vmagent_*`, the two container
+   series, `claude_code_*`, `localred_*`, by a `match[]` selector), not the
+   stack's own series, no label value matches a token (`sk-ant-`, `irt_`,
+   `ghp_`, `gho_`, `AKIA`, `xox[abp]-`), an email, or a path (`/Users/`,
+   `/home/` but GKE's own `/home/kubernetes/`, `/private/`): ADR 0044's sweep
+   as code. A match names the label, never the value.
 5. **alert path** (`--alert-path`, with `--api` and `--token-file`): a
    synthetic alert for the platform org's first Product opens an Incident
    through the API within 90 seconds, and the same alert with an `endsAt`
