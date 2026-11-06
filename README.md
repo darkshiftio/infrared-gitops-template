@@ -1034,24 +1034,65 @@ data directory, with VMSingle stopped. Elsewhere nothing of this renders.
 ### The telemetry plane
 
 Every install is a platform of one telemetry plane (infrared-docs-internal ADR
-0044): its series carry the label `platform`, and the Fleet dashboard (the
-ConfigMap `infrared-fleet-dashboard`, in the metrics stack's values) groups by
-it. Two shapes of install feed it.
+0044; every install writes, ADR 0069): its series carry the label `platform`,
+and the Fleet and installs dashboards (the ConfigMaps
+`infrared-fleet-dashboard` and `infrared-installs-dashboard`, in the metrics
+stack's values; see "The dashboards") group by it. Three shapes of install feed
+it.
 
 - **With the metrics stack,** vmagent sets `cluster` and `platform` on every
-  series it scrapes, both to `.ClusterName` (`infrared-cp-google` for hosted),
-  as a Mac's stack writes them. The scrape of Infrared's own metrics ports (a
-  VMServiceScrape for every Service port named `metrics` in
-  `.InfraredNamespace`) sets `honorLabels`, because infrared-api labels
-  `infrared_telemetry_writes_total` with the platform that wrote, and vmagent
-  would otherwise rename that label `exported_platform` and set `platform` to
-  this install's name. Any other scraped series that has a `platform` label is
-  renamed so (the kubelet's `kubernetes_build_info`, `linux/amd64`).
+  series it scrapes: `cluster` to `.ClusterName`, and `platform` to
+  `.Telemetry.Platform` when the Installation's telemetry is set (the name the
+  install registered under, `install-<id>`, ADR 0069 T2) and to `.ClusterName`
+  otherwise (`infrared-cp-google` for hosted), as a Mac's stack writes them.
+  The scrape of Infrared's own metrics ports (a VMServiceScrape for every
+  Service port named `metrics` in `.InfraredNamespace`) sets `honorLabels`,
+  because infrared-api labels `infrared_telemetry_writes_total` with the
+  platform that wrote, and vmagent would otherwise rename that label
+  `exported_platform` and set `platform` to this install's name. Any other
+  scraped series that has a `platform` label is renamed so (the kubelet's
+  `kubernetes_build_info`, `linux/amd64`).
+- **With the metrics stack and `.Telemetry.URL`** (an install that registered
+  with the plane, ADR 0069 T8), the stack's own vmagent gains a second remote
+  write beside VMSingle's (`vmagent.additionalRemoteWrites`): to that URL,
+  with the bearer token from the Secret `monitoring/telemetry-token`, key
+  `token`, which `ir install`'s registration, `ir telemetry connect` or
+  Settings writes and this repo never holds (the VictoriaMetrics operator
+  waits for it), and a disk buffer of up to 800 MiB for that URL alone on the
+  pod's own disk (`maxDiskUsage`; a pod restart loses what is buffered). Its
+  own write series (`vmagent_remotewrite_*`) name each URL rather than
+  `1:secret-url` (`remoteWriteSettings.showURL`), since a URL carries no
+  secret (the token is a header): the API's `GET /v1/telemetry` reads the
+  plane's last accepted write by it. Its
+  write relabeling (`inlineUrlRelabelConfig`) keeps exactly the telemetry
+  component's keep list and nothing of the rest this vmagent scrapes: it
+  marks a series to keep, then keeps the marked alone. Marked are
+  `infrared_.*`; for the jobs `infrared`, `infrared-operator` and
+  `infrared-api` alone, `controller_runtime_reconcile_total`,
+  `controller_runtime_reconcile_errors_total`,
+  `controller_runtime_reconcile_time_seconds.*`, `workqueue_depth`,
+  `workqueue_adds_total`, `process_resident_memory_bytes`,
+  `process_cpu_seconds_total`, `go_memstats_heap_inuse_bytes` and
+  `go_goroutines` (every Go component of the stack exports the same
+  families); `up`, `scrape_samples_scraped` and `scrape_duration_seconds` of
+  every target; for the job `vmagent-.*` alone, `vmagent_remotewrite_*`,
+  `vm_persistentqueue_*`, `vmagent_rows_inserted_total`,
+  `vm_rows_inserted_total`, `vm_app_version` and
+  `process_resident_memory_bytes`; and `container_memory_working_set_bytes`
+  and `container_cpu_usage_seconds_total` for `ir-org-*` namespaces with a
+  container name. Then the marker goes, the container series lose `id`, `name`
+  and `image`, and `user.email`, `user.id` and `organization.id` (both
+  spellings) never leave, as from a Mac's stack. No hourly series cap on this
+  vmagent: vmagent's is global and would cap VMSingle's own path; the plane's
+  VMSingle caps what it takes (see "VMSingle's limits"). Without a URL
+  nothing of this renders, and the stack is the one of the first shape, byte
+  for byte but for the platform label (`make verify` proves it).
 - **Without it, and with `.Telemetry.URL` and `.Telemetry.Platform`,** the
   `telemetry` Application (wave 30, layer `observability`) runs one vmagent in
   `monitoring` that remote-writes everything to that URL as that platform,
   with the bearer token from the Secret `telemetry-token`, which this repo
-  never holds, and a disk buffer. It scrapes Infrared's metrics ports every
+  never holds, and a disk buffer; its own write series name the URL
+  (`-remoteWrite.showURL`). It scrapes Infrared's metrics ports every
   30 s and keeps the series the Fleet dashboard names and a few beside them
   (the operator's reconcile and workqueue totals, process memory and CPU,
   Infrared's own `infrared_` series), not the rest of controller-runtime's, the
@@ -1090,6 +1131,97 @@ a ConfigMap and refuses secrets in (`assertNoLeakedSecrets`). The reference is
 not optional: Grafana waits for the API to write the Secret. Nothing in these
 values holds `{{`, since the grafana chart passes `grafana.ini`'s strings through
 `tpl`.
+
+### An install's own alerts
+
+Every alert without an org's route is the install's own (infrared-docs-internal
+ADR 0069 T9; workspace TODO 429): the chart's Kubernetes rules, the metrics'
+nightly copy's, and Infrared's API, operator and store. The metrics stack's
+Alertmanager gets a root configuration (`alertmanager.config`, which the chart
+writes into the Secret `vmalertmanager-victoria-metrics-k8s-stack`, its
+`configSecret`) whose default receiver is `infrared-platform`: a webhook to
+`http://infrared-api.<InfraredNamespace>.svc:8080/v1/webhooks/alertmanager/_platform`,
+`send_resolved`, with the bearer token read from the file
+`/etc/vm/secrets/infrared-alert-webhook/token`, the Secret
+`monitoring/infrared-alert-webhook` (key `token`) that infrared-operator writes
+as it writes each org's, mounted through `alertmanager.spec.secrets` the way
+VMAlertmanager mounts every Secret it is given (the pod waits for it); grouped
+by `alertname` and `severity`, `group_wait` 30s, `group_interval` 5m,
+`repeat_interval` 4h. The API opens an Incident on the platform org's own
+Product (the chart's `observability.platformProduct`), or an install-wide one
+where the install holds none. Each org's alerts keep their own route first: the
+VMAlertmanagerConfig `infrared-incidents` the operator writes in the org's
+namespace, which the VictoriaMetrics operator merges in as a sub-route with a
+matcher on that namespace, so an alert that matches it never reaches the root's
+receiver. Before this the chart's default sent everything unrouted to a
+blackhole.
+
+The rules are the VMRule `monitoring/infrared-platform`, each on this install's
+own platform label (on the plane VMSingle holds every install's series), with
+`severity` and `infrared_platform: "true"` and never `infrared_product`; the
+metrics' copy's `MetricsBackupStale` and `MetricsBackupNeverRan` carry
+`infrared_platform` too:
+
+| Alert | When | Severity |
+|---|---|---|
+| `InfraredAPIDown` | `up` of the job `infrared-api` (the scrape `infrared-metrics`) is 0 or absent for 3 minutes | critical |
+| `InfraredOperatorDown` | the same for the job `infrared-operator` | critical |
+| `InfraredOperatorReconcileErrors` | the operator's `controller_runtime_reconcile_total{result="error"}` rate is above 0 for 15 minutes, by controller | warning |
+| `InfraredMetricsStoreDown` | `up` of VMSingle's own scrape (`vmsingle-*`) is 0 or absent for 3 minutes | critical |
+| `InfraredTelemetryWritesFailing` | with `.Telemetry.URL` only: a remote write of this vmagent (the plane's, or VMSingle's own) answers other than 2xx (`vmagent_remotewrite_requests_total`, by `url`) for 15 minutes | warning |
+
+The chart's own `ServiceDown` and `TargetDown` fire beside these for the
+stack's components, and take the same route.
+
+### VMSingle's limits
+
+Every install's VMSingle takes `extraArgs` against a runaway writer (ADR 0069
+T3): the home takes every install's series through the API's write path, and
+a Mac's stack or a broken exporter must not fill the store. VictoriaMetrics
+v1.153.0's own flags, which the VictoriaMetrics operator passes as
+`-<key>=<value>`: `maxLabelsPerTimeseries` 40 (its default, said so that a
+change is a change here; a series with more is ignored and counted in
+`vm_rows_ignored_total{reason="too_many_labels"}`), `storage.maxHourlySeries`
+2,000,000 and `storage.maxDailySeries` 5,000,000 (new series past them are
+logged and dropped). The home held about 89,000 active series on 2026-10-13
+and a Mac's stack sends about 1,400: tens of installs fit under both.
+
+### The dashboards
+
+Grafana's sidecar loads every ConfigMap in `monitoring` labelled
+`grafana_dashboard: "1"`; `make verify` checks that the keep lists (the
+telemetry component's and the stack's write relabeling) keep every series every
+dashboard names, so a panel for a family the lists drop fails there and not as
+an empty panel.
+
+- **`infrared-fleet`** (`infrared-fleet-dashboard`, "Infrared fleet: every
+  platform as one unit", ADR 0044 P10): every platform's numbers side by side.
+  Its sixth cut (2026-11-05) splits the agent steps' attempts, cost and tokens
+  by `provider` (`anthropic`, `bedrock`, `claude-code`) and adds the row "Model
+  calls": calls per hour by provider and status, errors by provider and error
+  name, and the average latency (`rate(infrared_model_call_seconds_total)` over
+  `rate(infrared_model_calls_total)`).
+- **`infrared-installs`** (`infrared-installs-dashboard`, "New installs:
+  install to first Bedrock run", ADR 0069 T10): a `platform` variable (multi,
+  all by default) and four rows. Installs: a table, one row per platform that
+  wrote in the last 7 days, with its cluster, release, cloud, edge, Bedrock on,
+  Ready, age since `infrared_installation_created_timestamp_seconds` and the
+  age of its last write (`time() - timestamp(infrared_install_info[7d])`,
+  MetricsQL). The funnel, stat panels per platform: Ready; sign-ins over the
+  range (`infrared_api_requests_total` for the operations `login`,
+  `complete-google-login`, `complete-github-login` and `redeem-sign-in-link`,
+  status 2xx or 3xx, since the callbacks answer 302, so a refused one counts
+  too); orgs, Products and people (`infrared_orgs_total`,
+  `infrared_products_total`, `infrared_humans_total`); cloud accounts Verified
+  (`infrared_cloud_accounts{state="Verified"}`); orgs on Bedrock
+  (`infrared_org_model_provider{provider="bedrock"}`); step attempts and
+  Bedrock calls over the range. Bedrock: calls per hour by status, errors by
+  name, throttles (status 429) and refusals (403), average latency by model,
+  tokens by model and kind, cost by model (`infrared_step_tokens_total` and
+  `infrared_step_cost_usd_total` with `provider="bedrock"`), and step attempts
+  by provider and outcome. Open platform incidents: `infrared_incidents_open`
+  now by severity, and over time by org. On an install's own Grafana it shows
+  that install alone; on the home every platform.
 
 ### The network fence
 
@@ -1407,7 +1539,10 @@ without, Agent Substrate with `.Stores`, `.Registry` and `.SubstrateCapable`
 (its four Applications and their layer label, every image by digest from the
 pins, no PodMonitoring, its records and snapshots through `infrared-stores`,
 atelet's image settings, the pull secret wherever it pulls, the
-NetworkPolicies, the hooks and the ActorTemplates) and none of it without, and
+NetworkPolicies, the hooks and the ActorTemplates) and none of it without, the
+metrics stack's remote write to the plane with `.Telemetry.URL` (and nothing of
+it without, the rest byte for byte), its platform route and rules, VMSingle's
+caps, the keep lists against every dashboard, and
 kubeconform (`-strict`, Argo CD kinds against the public CRDs-catalog).
 
 Bump upstream with `scripts/vendor-argocd.sh` / `scripts/vendor-kpack.sh`

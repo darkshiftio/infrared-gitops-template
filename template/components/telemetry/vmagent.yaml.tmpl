@@ -24,7 +24,10 @@
 #             which `ir local telemetry connect` writes and this repo never
 #             holds; the labels platform and cluster on every series; a disk
 #             buffer of up to 800 MiB on a 1 Gi claim, so a Mac shut for a
-#             while flushes when it wakes; at most 50,000 new series an hour
+#             while flushes when it wakes; at most 50,000 new series an hour;
+#             its own write series name the URL (-remoteWrite.showURL), which
+#             carries no secret, so ir telemetry status and the API's
+#             GET /v1/telemetry read the last accepted write by it
 #
 # The series budget (localred finding O7). Before the keep lists a Mac's
 # stack sent about 4,100 series: 4,105 in the first proof, 2026-10-14, of
@@ -246,6 +249,7 @@ spec:
             - -promscrape.config=/etc/vmagent/scrape.yaml
             - -promscrape.configCheckInterval=1m
             - -remoteWrite.url=[[ .Telemetry.URL ]]
+            - -remoteWrite.showURL=true
             - -remoteWrite.bearerTokenFile=/etc/telemetry/token
             - -remoteWrite.label=platform=[[ .Telemetry.Platform ]]
             - -remoteWrite.label=cluster=[[ .Telemetry.Platform ]]
