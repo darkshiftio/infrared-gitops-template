@@ -5,7 +5,9 @@
 # It renders the template for both cluster flavors, each with and without a
 # build registry, with hack/render (the same contract the operator implements)
 # and asserts, on the rendered trees:
-#   - the render tool builds, is gofmt-clean, vets and passes its tests
+#   - the render tool builds, is gofmt-clean, vets and passes its tests, and
+#     calls no known vulnerability (govulncheck, pinned below), in a module or
+#     in the standard library of the Go that go.mod's toolchain line names
 #   - no template syntax or __cluster__ segment survives rendering
 #   - aws-load-balancer-controller exists on eks and not on k3s
 #   - every file parses as YAML
@@ -217,7 +219,7 @@
 #     and kinds neither has are skipped)
 #
 # Needs: go, kubectl, kubeconform, yq (mikefarah v4). Network for kubeconform's
-# schemas.
+# schemas, and for govulncheck and its vulnerability database.
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -238,6 +240,17 @@ unformatted="$(gofmt -l hack)"
 [ -z "$unformatted" ] && ok "gofmt" || bad "gofmt: $unformatted"
 go vet ./... && ok "go vet" || bad "go vet"
 go test ./... >/dev/null && ok "go test" || bad "go test"
+# govulncheck exits 3 when the render tool calls a known vulnerable function;
+# a finding in a package or module it does not call passes. To fix one, move
+# go.mod's toolchain line to the Go release that fixes it (CI's setup-go
+# installs that line), or go get the module at its fixed version.
+govulncheck_version=v1.9.0
+if go run "golang.org/x/vuln/cmd/govulncheck@$govulncheck_version" ./... >"$work/govulncheck.txt" 2>&1; then
+  ok "govulncheck $govulncheck_version"
+else
+  cat "$work/govulncheck.txt" >&2
+  bad "govulncheck $govulncheck_version: a known vulnerability the render tool calls, or the scan could not run (above)"
+fi
 go build -o "$work/render" ./hack/render
 
 # --- render ----------------------------------------------------------------------
