@@ -121,6 +121,37 @@ spec:
             statusCode: 301
 [[- end ]]
 [[- if .InfraredHost ]]
+[[- if .EdgeProofSecret ]]
+---
+# The edge's proof (workspace TODO 473, F4; infrared-docs-internal ADR 0066
+# D2): Envoy stamps every request it takes for Infrared's API with
+# X-Infrared-Edge-Proof, the value of the key credential of the Secret
+# [[ .InfraredNamespace ]]/[[ .EdgeProofSecret ]], over any copy a client sent, and
+# infrared-api believes the client-address header (CF-Connecting-IP) only on a
+# request that carries it. The operator makes the Secret before it renders
+# this file, and so does the API at its start. While the Secret or its key is
+# missing, Envoy answers 500 on the API's paths: to rotate the proof, replace
+# its value in place, with no trailing newline, and never delete the Secret.
+# Wave -1, before the route that names it; pruned last, after the route that
+# stops naming it, since a route that names a missing filter answers 500 too.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: infrared-edge-proof
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: PruneLast=true
+spec:
+  credentialInjection:
+    header: X-Infrared-Edge-Proof
+    overwrite: true
+    credential:
+      valueRef:
+        group: ""
+        kind: Secret
+        name: [[ .EdgeProofSecret | quote ]]
+[[- end ]]
 ---
 # Infrared at https://[[ .InfraredHost ]]: the UI's Service, which serves the UI
 # and proxies /api to the API and /mcp to the MCP server. The chart names it
@@ -140,6 +171,35 @@ spec:
   hostnames:
     - [[ .InfraredHost | quote ]]
   rules:
+[[- if .EdgeProofSecret ]]
+    # The paths the UI's nginx sends to the API carry the edge's proof, and
+    # only those: /mcp and the extensions' /ext/ go elsewhere and never see
+    # it. No filter on this rule may remove the header: a route's own header
+    # removal runs after the injection (the ClientTrafficPolicy edge strips a
+    # client's copy before routing instead).
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+        - path:
+            type: Exact
+            value: /.well-known/oauth-authorization-server/api/v1/oidc
+        - path:
+            type: Exact
+            value: /.well-known/openid-configuration/api/v1/oidc
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: gateway.envoyproxy.io
+            kind: HTTPRouteFilter
+            name: infrared-edge-proof
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: infrared
+          port: 80
+          weight: 1
+[[- end ]]
     - matches:
         - path:
             type: PathPrefix

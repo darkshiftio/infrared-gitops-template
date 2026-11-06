@@ -59,6 +59,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.DomainTokenKey` | absent or ``, `cloudflare-domain-api-token` | the Installation's `spec.previews.domainTokenKey`, in gateway mode with a `.PlatformDomain` only: the key of the Secret `infrared-platform-tokens` that holds a Cloudflare token for `.PlatformDomain`'s zone, which is not `.InfraredHost`'s (a hosted plane's tenants' domain, infrared-docs-internal ADR 0063). The edge then serves `*.<PlatformDomain>` with a certificate, an issuer and an external-dns of their own on that token (see "The platform domain on a token of its own"); empty, one token serves every name, as before |
 | `.TunnelID` | absent or ``, `6ff42ae2-765d-4adf-8112-31c55c1551ef` | the Installation's `spec.tunnel.id`, in gateway mode only: the UUID, lower case, of the Cloudflare Tunnel the edge is reached through (infrared-docs-internal ADR 0064). The edge then binds no node's ports, runs cloudflared beside Envoy, gives the Gateway a certificate from a certificate authority inside the cluster, and leaves external-dns, external-dns-domain and Cloudflare's origin issuer out, so `.DomainTokenKey` is not read (see "Behind a Cloudflare Tunnel"); empty, the edge is on the nodes' own ports, as before |
 | `.TunnelCredentialsKey` | absent or ``, `cloudflare-tunnel-credentials` | the Installation's `spec.tunnel.credentialsKey`, with `.TunnelID`: the key of the Secret `infrared-platform-tokens` that holds the tunnel's credentials file, which cloudflared runs it with; empty is `cloudflare-tunnel-credentials` |
+| `.EdgeProofSecret` | absent or ``, `infrared-edge-proof` | the operator's `INFRARED_EDGE_PROOF_SECRET`, the Infrared chart's `api.clientAddressProof.enabled`, in gateway mode with an `.InfraredHost` only: the Secret in `.InfraredNamespace` whose key `credential` the edge stamps on every request for Infrared's API, as `X-Infrared-Edge-Proof`, so the API believes the client-address header (`CF-Connecting-IP`) only on a request that came through the edge (workspace TODO 473, F4; infrared-docs-internal ADR 0066 D2). The `infrared` route then has a first rule for the API's paths through the HTTPRouteFilter `infrared-edge-proof`, and the ClientTrafficPolicy `edge` strips a client's copy (see "The edge's proof"); the operator makes the Secret before it renders them. Empty, no stamp, as before |
 | `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
 | `.Images` | `{"api": {"Tag": "v0.1.0", "Digest": "sha256:…"}, …}` | each component's pin (`INFRARED_IMAGES`), keyed `operator`, `api`, `ui`, `mcp`, `runner`, and `code-index`, which the chart hands on only with `codeIndex.enabled` (see "The code index"); empty keeps the chart's. Read an entry with `index .Images "api"` (a missing key is the zero pin; `.Images.api` would fail the render), and test its `.Tag` or `.Digest`: `with` on an entry always runs |
 | `.Cloud` | `` \| `aws` \| `linode` | the cloud of the nodes, from their providerID; `` is any other, or none |
@@ -104,8 +105,9 @@ array, exactly as the operator's environment carries them, `-forge` with
 `-postgres-server-name`; `-oidc` with `-grafana-url`; `-domain-token-key`
 (with `-edge gateway` and `-platform-domain`); `-tunnel-id` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
-`cloudflare-tunnel-credentials`); `-network-policies`; and `-registry-pulls`
-and `-stores-security`.
+`cloudflare-tunnel-credentials`); `-edge-proof-secret` (with `-edge gateway`
+and `-infrared-host`); `-network-policies`; and `-registry-pulls` and
+`-stores-security`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -114,8 +116,8 @@ backup bucket turned on by itself before (the Barman Cloud plugin and its
 certificates, the Cluster's WAL archiver, `postgres/backup.yaml`, and the
 waits for them); with it `true`, those files render as they did. Only `.Edge`, `.Stores`, `.Disabled`,
 `.Forge`, `.Registry`, `.SubstrateCapable`, on a gateway edge with a
-`.PlatformDomain` `.DomainTokenKey`, and on a gateway edge `.TunnelID` turn
-anything on or off: a Traefik
+`.PlatformDomain` `.DomainTokenKey`, on a gateway edge `.TunnelID`, and on a
+gateway edge with an `.InfraredHost` `.EdgeProofSecret` turn anything on or off: a Traefik
 cluster that carries `spec.previews` by hand, on any cloud, renders the same
 files as one without (`make verify` checks it). A `.Backup` without the stores
 changes only what the `infrared` Application carries (see "The install's
@@ -454,7 +456,7 @@ it renders to a comment only otherwise.
 | `origin-ca-issuer` | Cloudflare's origin issuer and its CRDs. Left out behind a tunnel. |
 | `external-dns` | Cloudflare, every record proxied, TXT owner `.ClusterName` (prefix `_edns.`). It publishes only HTTPRoutes labelled `infrared.darkshift.io/dns=edge` on the Gateway `edge`, and changes or deletes only records it owns. No domain filter: Cloudflare would match it against zone names and hide the zone; the label, the listener hostnames and the token's zones bound what it writes. Its token: ExternalSecret `external-dns/cloudflare-api-token`. Left out behind a tunnel. |
 | `external-dns-domain` | Only with `.DomainTokenKey`. The same chart, version and values as `external-dns` on the platform domain's own token: release `external-dns-domain` in the namespace `external-dns`, its token from the ExternalSecret `external-dns/cloudflare-domain-api-token` (wave -1, after a PreSync wait for the store). See "The platform domain on a token of its own". Left out with `external-dns`, or by its own name. |
-| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect`, HTTPRoute `edge-name` (with `.PlatformDomain`) and HTTPRoute `.InfraredNamespace`/`infrared`. Envoy's Service is named `edge`. With `.DomainTokenKey` also the ExternalSecret `envoy-gateway-system/cloudflare-domain-api-token`, the OriginIssuer `cloudflare-origin-domain` and the Certificate `edge-domain` (Secret `edge-domain-tls`), and `edge` then holds `.InfraredHost` alone. In waves: the tokens' copies (-5), the issuers (-4), the certificates (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. Behind a tunnel, the objects and waves of "Behind a Cloudflare Tunnel" below. |
+| `edge` | Needs `.PlatformDomain` or `.InfraredHost`. GatewayClass and EnvoyProxy `edge`, Gateway `edge` (namespace `envoy-gateway-system`), OriginIssuer `cloudflare-origin` with its token (ExternalSecret `envoy-gateway-system/cloudflare-api-token`), Certificate `edge` (Secret `edge-tls`), BackendTrafficPolicy `edge` (no request timeout), HTTPRoute `https-redirect`, HTTPRoute `edge-name` (with `.PlatformDomain`) and HTTPRoute `.InfraredNamespace`/`infrared`. Envoy's Service is named `edge`. With `.DomainTokenKey` also the ExternalSecret `envoy-gateway-system/cloudflare-domain-api-token`, the OriginIssuer `cloudflare-origin-domain` and the Certificate `edge-domain` (Secret `edge-domain-tls`), and `edge` then holds `.InfraredHost` alone. In waves: the tokens' copies (-5), the issuers (-4), the certificates (-3), EnvoyProxy (-2), GatewayClass (-1), then the rest. Behind a tunnel, the objects and waves of "Behind a Cloudflare Tunnel" below. With `.EdgeProofSecret`, also the HTTPRouteFilter `.InfraredNamespace`/`infrared-edge-proof` and the ClientTrafficPolicy `edge` (wave -1 each), and the route `infrared` has a first rule; see "The edge's proof". |
 
 All that read or make a token wait first, in a PreSync hook (see "Order on
 a fresh cluster"): `platform-tokens` for External Secrets' webhook,
@@ -587,6 +589,66 @@ address under a managed root, and cert-manager's HTTP-01 challenge for a custom
 hostname arrives through cloudflared at Envoy's HTTPS port, never `http-any`.
 A plane behind a tunnel serves its zones under `.PlatformDomain` alone until
 that changes.
+
+#### The edge's proof
+
+Behind Cloudflare, infrared-api counts sign-in failures by the address in the
+client-address header the install names (`api.clientAddressHeader`,
+`CF-Connecting-IP`), and any caller that reaches the UI's nginx or the API
+inside the cluster could send that header too. With `.EdgeProofSecret` (the
+operator's `INFRARED_EDGE_PROOF_SECRET`, which the Infrared chart sets from
+`api.clientAddressProof.enabled`, on a gateway edge with an `.InfraredHost`),
+the edge stamps every request it takes for Infrared's API with
+`X-Infrared-Edge-Proof`, the value of that Secret's key `credential`, and the
+API believes the client-address header only on a request that carries it
+(workspace TODO 473, F4; infrared-docs-internal ADR 0066 D2). The API arms the
+check on the first request that carries the proof; until then it counts as it
+did without one.
+
+| Object | What |
+|---|---|
+| HTTPRouteFilter `.InfraredNamespace`/`infrared-edge-proof` | Envoy Gateway's credential injection: header `X-Infrared-Edge-Proof`, `overwrite: true`, the value from the Secret `.EdgeProofSecret`'s key `credential`, in the route's namespace. Wave -1, before the route that names it, and `PruneLast=true`, after the route that stops naming it: a rule that names a missing filter answers 500 |
+| HTTPRoute `.InfraredNamespace`/`infrared`, first rule | `PathPrefix /api`, `Exact /.well-known/oauth-authorization-server/api/v1/oidc` and `Exact /.well-known/openid-configuration/api/v1/oidc`, the paths the UI's nginx sends to the API and no others, through the filter, to the Service `infrared:80`. `/mcp`, `/.well-known/oauth-protected-resource/` and the extensions' `/ext/` stay on the second rule, `/` as before, and never see the proof. No filter on the first rule may remove the header: a route's own header removal runs after the injection |
+| ClientTrafficPolicy `envoy-gateway-system`/`edge` | targets the Gateway `edge`, every listener: `headers.earlyRequestHeaders.remove: [X-Infrared-Edge-Proof]`, which runs before routing and any filter, so a client's own copy never reaches anything. Wave -1. It holds this removal alone, its other settings at the listeners' defaults (Envoy Gateway v1.9.2 sets TLS 1.2 to 1.3 on a TLS listener a policy reaches, which is Envoy's own default) |
+
+The edge's PreSync wait asks for the CRDs of both kinds too. The template
+renders no Secret and nothing in the `infrared` Application: the operator
+makes the Secret in `.InfraredNamespace` before it renders these files (on
+every pass of the platform's gitops repo, so a deleted one is back within its
+resync), and infrared-api makes it at its start, each with 32 random bytes,
+base64url, and neither ever changes a value that is there. Envoy Gateway reads
+the Secret again on every change to it, and infrared-api within 15 seconds,
+accepting the previous value for 2 minutes after a change.
+
+What to know before turning it on, or off:
+
+- **The Secret.** While it, or its key `credential`, is missing, the rule
+  answers 500 on every API path and Envoy Gateway marks the route
+  `Accepted=False` (UnsupportedValue), which Argo CD shows as a Degraded
+  `edge`; `/` still serves the UI, so sign-in through the edge is down while
+  a port-forward still works. It heals once the Secret is back. To rotate the
+  proof, replace its value in place, with no trailing newline; never delete
+  the Secret.
+- **Turning it off.** Turn the chart's value off first: the API restarts
+  without the proof, and the operator hydrates the edge without it, the filter
+  pruned after the route. Never move the template back to a version without
+  the proof while the value is on: the API, once armed, would count every
+  visitor by the UI pod's address, and ten failed sign-ins by anyone would
+  refuse sign-in to everyone for 15 minutes.
+- **Other ClientTrafficPolicies.** Envoy Gateway takes one for the Gateway as
+  a whole, and one that names a listener takes that listener over: any later
+  policy for the edge keeps this removal. A policy it cannot translate makes
+  every route on its listeners answer 500, so `edge` holds the removal alone.
+- **Who reaches Envoy.** On a hosted plane behind its tunnel and the fence,
+  only cloudflared, the operator and vmagent do; Infrared's name is the
+  listener `infrared-https`, which only `.InfraredNamespace` may attach to,
+  and a tenant's org cannot reference the Secret (a ReferenceGrant its project
+  refuses).
+
+`scripts/edge-proof-check.sh` checks it on an install: the route, the filter,
+the policy and the Secret read-only, and on request the probes that prove it
+through the edge; and, on a throwaway kind cluster with Envoy Gateway v1.9.2, the
+behaviour itself with an echo server standing in for Infrared.
 
 ### The stores
 

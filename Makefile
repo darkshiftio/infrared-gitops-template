@@ -27,6 +27,11 @@ DOMAIN_TOKEN_KEY ?=
 #   TUNNEL_ID=6ff42ae2-765d-4adf-8112-31c55c1551ef
 TUNNEL_ID              ?=
 TUNNEL_CREDENTIALS_KEY ?= cloudflare-tunnel-credentials
+# EDGE_PROOF_SECRET: with EDGE=gateway and an INFRARED_HOST, the Secret whose
+# key credential the edge stamps on every request for Infrared's API (as
+# INFRARED_EDGE_PROOF_SECRET; workspace TODO 473, F4). E.g.
+# make render EDGE=gateway INFRARED_HOST=infrared.example.com EDGE_PROOF_SECRET=infrared-edge-proof
+EDGE_PROOF_SECRET ?=
 # STORES: true renders CloudNativePG, one Postgres Cluster and SeaweedFS; BACKUP
 # (JSON, as INFRARED_BACKUP) copies them to a bucket outside the cluster;
 # DISABLED (a JSON array, as INFRARED_DISABLED_COMPONENTS) leaves components out.
@@ -106,7 +111,7 @@ render:
 	rm -rf $(OUT)
 	go run ./hack/render -template template -out $(OUT) -cluster $(CLUSTER) -flavor $(FLAVOR) -region $(REGION) -build-registry "$(BUILD_REGISTRY)" \
 		-edge "$(EDGE)" -platform-domain "$(PLATFORM_DOMAIN)" -infrared-host "$(INFRARED_HOST)" -domain-token-key "$(DOMAIN_TOKEN_KEY)" \
-		-tunnel-id "$(TUNNEL_ID)" -tunnel-credentials-key "$(TUNNEL_CREDENTIALS_KEY)" \
+		-tunnel-id "$(TUNNEL_ID)" -tunnel-credentials-key "$(TUNNEL_CREDENTIALS_KEY)" -edge-proof-secret "$(EDGE_PROOF_SECRET)" \
 		-stores=$(STORES) -stores-single-node=$(STORES_SINGLE_NODE) -backup '$(BACKUP)' -disabled '$(DISABLED)' -cloud "$(CLOUD)" \
 		-forge "$(FORGE)" -forge-url "$(FORGE_URL)" -registry "$(REGISTRY)" \
 		-substrate-capable=$(SUBSTRATE_CAPABLE) -pull-secret "$(PULL_SECRET)" \
