@@ -1271,7 +1271,11 @@ policies add up, so nothing here changes for it.
 `scripts/fence-check.sh <context> <org> [another org]` checks a running install
 from one of the org's zones: DNS and the internet answer, every platform
 service is refused, and two orgs' zones refuse each other both ways. It runs
-against a cluster, never from CI.
+against a cluster, never from CI. Its probe pods, like `registry-pulls-check.sh`'s,
+carry the tenants' placement the install's admission policy demands
+(`tenancy.tenantPods.placement`, read from the operator), so they run on a
+hosted plane as a zone's pod does; `tenancy-check.sh` and
+`runner-egress-check.sh` read theirs the same way.
 
 `scripts/runner-egress-check.sh <context> <org>` checks runners' egress by name
 (the Infrared chart's `runner.networkPolicy.egressByName`; ADR 0066 D7), which

@@ -29,7 +29,10 @@
 # port-forward, and are never printed. Its pods are removed unless KEEP=1.
 # Runs against a cluster, never from CI: the hosted plane after the install,
 # before a tenant, with the owner's go-ahead.
-# Needs: kubectl, jq, curl. Applies pods in the two orgs' zones only.
+# Needs: kubectl, jq, curl. Applies pods in the two orgs' zones only, on the
+# tenants' placement (nodeSelector, tolerations, runtimeClassName) where the
+# install's admission policy infrared-tenancy-pods demands it (ADR 0066 D5),
+# read from the operator's INFRARED_TENANT_PODS; none on an install without.
 # =============================================================================
 set -euo pipefail
 CTX="${1:?usage: scripts/registry-pulls-check.sh <kube context> <org> <another org>}"
@@ -38,6 +41,16 @@ OTHER="${3:?usage: scripts/registry-pulls-check.sh <kube context> <org> <another
 ACCEPT='application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json'
 
 k() { kubectl --context "$CTX" "$@"; }
+
+# The tenants' placement (tenancy.tenantPods.placement, read from the operator's INFRARED_TENANT_PODS): where the
+# admission policy infrared-tenancy-pods demands it (ADR 0066 D5), a probe pod carries it, as a zone's pod does.
+# Empty on an install without one (kind).
+placement_yaml() {
+  k -n "${INFRARED_NS:-infrared}" get deployment infrared-operator -o json 2>/dev/null |
+    jq -r '.spec.template.spec.containers[0].env[]? | select(.name == "INFRARED_TENANT_PODS") | .value // empty' |
+    jq -r 'try (.placement // {}) catch {} | [(if .nodeSelector then "  nodeSelector: " + (.nodeSelector | tojson) else empty end), (if .tolerations then "  tolerations: " + (.tolerations | tojson) else empty end), (if .runtimeClassName then "  runtimeClassName: " + .runtimeClassName else empty end)] | join("\n")' 2>/dev/null || true
+}
+PLACEMENT_YAML="$(placement_yaml)"
 log() { printf '\n== %s\n' "$*"; }
 die() {
   echo "registry-pulls-check: $*" >&2
@@ -154,6 +167,7 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+$PLACEMENT_YAML
   ${on:+nodeName: $on}
   securityContext:
     runAsNonRoot: true
