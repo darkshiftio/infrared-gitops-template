@@ -260,17 +260,23 @@ kind_checks() {
   eg_image="$(k -n envoy-gateway-system get deployment envoy-gateway -o jsonpath='{.spec.template.spec.containers[0].image}')"
   case "$eg_image" in *:v1.9.2*) ;; *) info "Envoy Gateway runs $eg_image, not v1.9.2: the template pins v1.9.2" ;; esac
 
-  local ns="edge-proof-check-$stamp" class="" made_class="" host=infrared.edge-proof.test
+  # Not local: the EXIT trap's cleanup reads ns and made_class after this function has returned.
+  ns="edge-proof-check-$stamp" class="" made_class="" host=infrared.edge-proof.test
   out="$(mktemp -d)"
+  # The EXIT trap: best effort, and the checks' exit status is the script's (macOS's bash 3.2 can
+  # leave a trap on a failed command despite "|| true" under set -e, and exit 1 after a pass).
   cleanup() {
+    local rc=$?
+    set +e
     stop_forwards
-    rm -r -- "$out" 2>/dev/null || true
+    rm -r -- "$out" 2>/dev/null
     if [ "${KEEP:-}" = 1 ]; then
       echo "KEEP=1: left the namespace $ns${made_class:+ and the GatewayClass $made_class} on $CTX"
-      return
+      exit "$rc"
     fi
-    k delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    [ -z "$made_class" ] || k delete gatewayclass "$made_class" --ignore-not-found >/dev/null 2>&1 || true
+    k delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1
+    [ -z "$made_class" ] || k delete gatewayclass "$made_class" --ignore-not-found >/dev/null 2>&1
+    exit "$rc"
   }
   trap cleanup EXIT
 
@@ -342,6 +348,10 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        # The image's user is the name nonroot, which the kubelet cannot check against
+        # runAsNonRoot; 65532 is the same user by number.
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
