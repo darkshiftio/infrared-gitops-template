@@ -660,8 +660,10 @@ for v in "${variants[@]}"; do
       || bad "$variant: VMSingle's caps are missing or wrong: $(sel "$vm_app" "$vo.vmsingle.spec.extraArgs | tojson")"
     if [ "$(sel "$vm_app" "$vo.alertmanager | .config.route.receiver + \" \" + .config.receivers[0].name + \" \" + .config.receivers[0].webhook_configs[0].url + \" \" + (.config.receivers[0].webhook_configs[0].send_resolved | tostring) + \" \" + .config.receivers[0].webhook_configs[0].http_config.authorization.type + \" \" + .config.receivers[0].webhook_configs[0].http_config.authorization.credentials_file + \" \" + (.spec.secrets | join(\",\"))")" \
         = "infrared-platform infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform true Bearer /etc/vm/secrets/infrared-alert-webhook/token infrared-alert-webhook" ] \
-      && [ "$(sel "$vm_app" "$vo.alertmanager.config | (.route.group_by | join(\",\")) + \" \" + .route.group_wait + \" \" + .route.group_interval + \" \" + .route.repeat_interval + \" \" + (.receivers | length | tostring) + \" \" + ((.route.routes // []) | length | tostring)")" = "alertname,severity 30s 5m 4h 1 0" ]; then
-      ok "$variant: the Alertmanager's root route takes the install's own alerts to the API's platform receiver, the operator's token mounted, no sub-route of its own"
+      && [ "$(sel "$vm_app" "$vo.alertmanager.config | (.route.group_by | join(\",\")) + \" \" + .route.group_wait + \" \" + .route.group_interval + \" \" + .route.repeat_interval + \" \" + (.receivers | length | tostring) + \" \" + ((.route.routes // []) | length | tostring)")" = "alertname,severity 30s 5m 4h 2 2" ] \
+      && [ "$(sel "$vm_app" "$vo.alertmanager.config | [.route.routes[] | .receiver + \" \" + (.matchers | join(\",\"))] + [.receivers[1].name + \" \" + (.receivers[1] | length | tostring)] | join(\";\")")" \
+        = 'none alertname=~"Watchdog|InfoInhibitor";none severity=~"info|none";none 1' ]; then
+      ok "$variant: the Alertmanager's root route takes the install's own alerts to the API's platform receiver, the operator's token mounted, and Watchdog, InfoInhibitor and info alerts to none"
     else
       bad "$variant: the Alertmanager's root route or its receiver is wrong: $(sel "$vm_app" "$vo.alertmanager | tojson")"
     fi
@@ -3436,6 +3438,19 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     [ "$(yq -N -r 'select(.kind == "CronJob" and .metadata.name == "metrics-backup") | .spec.jobTemplate.spec.template.spec.containers[0].args[0]' "$work/vmks-gke.yaml" \
         | grep -cE '^(day=\$\(date -u \+%a|/vmbackup-prod .*-dst="\$base/latest"$|/vmbackup-prod .*-origin="\$base/latest" -dst="\$base/\$day"$)')" = 3 ] \
       && ok "gcs-gke: the metrics' nightly copy survives the chart's tpl" || bad "gcs-gke: the metrics' nightly copy is wrong after tpl"
+    # On GKE neither the API server (past vmagent's scrape limit) nor CoreDNS
+    # (GKE runs kube-dns) is scraped, and the chart's sync job turns off the
+    # rule groups that read the API server, so none fires or records no data
+    # for good (infrared-cp-google, 2026-11-06). The gateway variant, off
+    # Google Cloud, keeps both scrapes.
+    api_off() { yq -N -r 'select(.kind == "ConfigMap" and (.metadata.name | test("sync-job-config$"))) | .data["config.yaml"]' "$1" \
+      | yq -r '[.rules.groups["kube-apiserver-burnrate.rules", "kube-apiserver-availability.rules", "kube-apiserver-histogram.rules", "kube-apiserver-slos", "kubernetes-system-apiserver"].enabled] | map(. == false) | all'; }
+    [ "$(yq -N -r 'select(.kind == "VMServiceScrape") | .metadata.name' "$work/vmks-gke.yaml" | grep -cE 'kube-api-server|core-dns')" = 0 ] \
+      && [ "$(api_off "$work/vmks-gke.yaml")" = true ] \
+      && [ "$(yq -N -r 'select(.kind == "VMServiceScrape") | .metadata.name' "$work/vmks.yaml" | grep -cE 'kube-api-server|core-dns')" = 2 ] \
+      && [ "$(api_off "$work/vmks.yaml")" = false ] \
+      && ok "gcs-gke: no API server or CoreDNS scrape, and no API server rules, on GKE; both kept elsewhere" \
+      || bad "gcs-gke: GKE still scrapes the API server or CoreDNS or reads its rules, or another cloud lost them: $(yq -N -r 'select(.kind == "VMServiceScrape") | .metadata.name' "$work/vmks-gke.yaml" | tr '\n' ' ')"
   else
     bad "gcs-gke: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-gke.err")"
   fi
@@ -3480,7 +3495,10 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
       || bad "telemetry-metrics: the monitoring chart's VMAgent lacks the plane's write beside VMSingle's: $(yq -N -o json -I0 'select(.kind == "VMAgent") | .spec.remoteWrite' "$work/vmks-plane.yaml")"
     am_cfg="$(yq -N -r 'select(.kind == "Secret" and .metadata.name == "vmalertmanager-victoria-metrics-k8s-stack") | .stringData["alertmanager.yaml"]' "$work/vmks-plane.yaml")"
     [ "$(yq -r '.route.receiver + " " + .receivers[0].webhook_configs[0].url + " " + .receivers[0].webhook_configs[0].http_config.authorization.credentials_file + " " + (.receivers | length | tostring)' <<<"$am_cfg")" \
-        = "infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform /etc/vm/secrets/infrared-alert-webhook/token 1" ] \
+        = "infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform /etc/vm/secrets/infrared-alert-webhook/token 2" ] \
+      && [ "$(yq -o json -I0 '[.route.routes[] | .receiver + " " + (.matchers | join(","))]' <<<"$am_cfg")" \
+        = '["none alertname=~\"Watchdog|InfoInhibitor\"","none severity=~\"info|none\""]' ] \
+      && [ "$(yq -o json -I0 '.receivers[1]' <<<"$am_cfg")" = '{"name":"none"}' ] \
       && [ "$(yq -N -r 'select(.kind == "VMAlertmanager") | (.spec.secrets | join(",")) + " " + .spec.configSecret' "$work/vmks-plane.yaml")" = "infrared-alert-webhook vmalertmanager-victoria-metrics-k8s-stack" ] \
       && ok "telemetry-metrics: the monitoring chart writes the root route into Alertmanager's config Secret, and mounts the operator's token" \
       || bad "telemetry-metrics: Alertmanager's config from the chart lacks the platform receiver, or the token's Secret is not mounted"

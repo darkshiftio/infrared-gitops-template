@@ -227,6 +227,13 @@ spec:
           # which opens an Incident on the platform org's own Product, or an
           # install-wide one where the install holds none. The chart's default
           # sent everything unrouted to a blackhole.
+          #
+          # Noise goes to the receiver none, which sends nowhere: the chart's
+          # Watchdog, which always fires to prove the path works, InfoInhibitor,
+          # which only mutes info alerts, and every alert of severity info or
+          # none, such as a recording rule that produces no data. On
+          # infrared-cp-google on 2026-11-06 these were 20 of 29 open Incidents,
+          # none asking anything of a person. The API drops them too.
           config:
             route:
               receiver: infrared-platform
@@ -234,6 +241,13 @@ spec:
               group_wait: 30s
               group_interval: 5m
               repeat_interval: 4h
+              routes:
+                - receiver: none
+                  matchers:
+                    - alertname=~"Watchdog|InfoInhibitor"
+                - receiver: none
+                  matchers:
+                    - severity=~"info|none"
             receivers:
               - name: infrared-platform
                 webhook_configs:
@@ -243,6 +257,7 @@ spec:
                       authorization:
                         type: Bearer
                         credentials_file: /etc/vm/secrets/infrared-alert-webhook/token
+              - name: none
         grafana:
           enabled: true
           # Access is by port-forward: svc/victoria-metrics-k8s-stack-grafana 80.
@@ -344,6 +359,26 @@ spec:
                   - action: keep
                     sourceLabels: [__name__]
                     regex: (kubelet_.+|volume_manager_.+|storage_operation_.+|csi_operations_.+|plugin_manager_.+|kubernetes_build_info|go_.+|process_.+|rest_client_requests_total)
+[[- end ]]
+[[- if eq .Cloud "gcp" ]]
+        # GKE runs the API server for you, and its /metrics is past vmagent's
+        # 16 MiB scrape limit, so the target was never up: KubeAPIDown,
+        # TargetDown and vmagent's scrape errors fired for good, and the
+        # chart's API server recording rules produced no data
+        # (infrared-cp-google, 2026-11-06). Off, its scrape and the rule
+        # groups that read it go together. GKE's DNS is kube-dns, which serves
+        # no metrics on CoreDNS's port 9153, so that scrape is off too.
+        kubeApiServer:
+          enabled: false
+        coreDns:
+          enabled: false
+        # The chart turns off the API server's other rule groups with its
+        # scrape, but not this one.
+        defaultRules:
+          groups:
+            kube-apiserver-availability.rules:
+              enabled: false
+[[- else if eq .ClusterFlavor "k3s" ]]
         kubeApiServer:
           vmScrape:
             spec:
