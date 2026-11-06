@@ -238,6 +238,33 @@ spec:
   timeout:
     http:
       requestTimeout: 0s
+[[- if and .InfraredHost .EdgeProofSecret ]]
+---
+# The edge's proof (routes.yaml): before routing, on every listener, Envoy
+# drops any X-Infrared-Edge-Proof a client sent, so only the edge's own stamp
+# on the API's paths reaches Infrared, which the filter's overwrite ensures as
+# well. Its other settings stay at the listeners' defaults. Envoy Gateway takes
+# one ClientTrafficPolicy for the Gateway as a whole, and one that names a
+# listener takes that listener over: a later policy for the edge keeps this
+# removal. Envoy Gateway answers 500 on every route of a listener whose policy
+# it cannot translate, so it holds this removal and nothing else.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: edge
+  namespace: envoy-gateway-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+  headers:
+    earlyRequestHeaders:
+      remove:
+        - X-Infrared-Edge-Proof
+[[- end ]]
 [[- else -]]
 # The edge is not a Gateway with a name to serve: no Gateway.
 [[- end ]]

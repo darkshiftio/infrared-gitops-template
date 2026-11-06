@@ -108,9 +108,9 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 [[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
 [[- if $tunnel ]]
-| 13 | `edge` | Gateway `edge` behind the Cloudflare Tunnel `[[ .TunnelID ]]`: cloudflared, the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+| 13 | `edge` | Gateway `edge` behind the Cloudflare Tunnel `[[ .TunnelID ]]`: cloudflared, the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
 [[- else ]]
-| 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ end ]] |
+| 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
 [[- end ]]
 [[- end ]]
 [[- end ]]
@@ -192,6 +192,13 @@ Every Application here carries the label
 Infrared answers at **https://[[ .InfraredHost ]]**, through Cloudflare's
 proxy[[ if $tunnel ]] and the cluster's Cloudflare Tunnel[[ end ]].[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
 Everything else is reached by port-forward.
+[[- if .EdgeProofSecret ]]
+
+The edge stamps every request for Infrared's API with the value of the Secret
+`[[ .InfraredNamespace ]]/[[ .EdgeProofSecret ]]` (key `credential`), which Infrared makes. To
+rotate it, replace the value in place; never delete the Secret, or every API
+request through the edge answers 500 until Infrared makes it again.
+[[- end ]]
 [[- else ]]
 Everything is reached by port-forward; nothing is exposed.
 [[- end ]]

@@ -52,6 +52,19 @@
 #     those it leaves out, the store, the README and the infrared Application,
 #     which carries it; and hack/render refuses a tunnel without a gateway
 #     edge, an id that is no lower-case UUID, and a key no Secret takes
+#   - the edge's proof (EdgeProofSecret, workspace TODO 473, F4;
+#     infrared-docs-internal ADR 0066 D2), on the nodes' ports and behind a
+#     tunnel: the infrared route's first rule takes the API's paths alone
+#     (/api and the two OpenID discovery paths, never /mcp or /ext/) through
+#     the HTTPRouteFilter infrared-edge-proof, which stamps
+#     X-Infrared-Edge-Proof from the Secret's key credential over any copy, in
+#     wave -1 and pruned last; no filter on that rule removes the header; the
+#     rest goes to the UI as before; the ClientTrafficPolicy edge strips a
+#     client's copy before routing and holds nothing else; the edge's wait
+#     asks for both kinds' CRDs; the field changes only the edge's routes,
+#     gateway and wait and the README; without it no gateway variant has a
+#     filter, a policy or a second rule; and hack/render refuses it without a
+#     gateway edge or an Infrared host, and with a name no Secret takes
 #   - the stores: with Stores, CloudNativePG and one Postgres instance on one
 #     20Gi volume (Linode's Retain class on Linode), with a role and a database
 #     each for seaweedfs and substrate; SeaweedFS across the nodes with every
@@ -316,6 +329,13 @@ yq -p json -o json '. + {"TunnelID": "'"$tn_id"'", "TunnelCredentialsKey": "'"$t
 yq -p json -o json '. + {"TunnelID": "'"$tn_id"'", "TunnelCredentialsKey": "tunnel-saas2"}' "$work/gateway-split.json" >"$work/tunnel-split.json"
 yq -p json -o json '. + {"TunnelID": "'"$tn_id"'", "TunnelCredentialsKey": "'"$tn_key"'"}' "$work/gateway-nocloud.json" >"$work/tunnel-custom.json"
 
+# The edge's proof (workspace TODO 473, F4; ADR 0066 D2), with the Secret's
+# name as the Infrared chart names it: on the nodes' ports (the gateway's
+# Data), and on the hosted plane's shape behind its tunnel.
+proof_secret=infrared-edge-proof
+yq -p json -o json '. + {"EdgeProofSecret": "'"$proof_secret"'"}' "$work/gateway.json" >"$work/gateway-proof.json"
+yq -p json -o json '. + {"EdgeProofSecret": "'"$proof_secret"'"}' "$work/tunnel-split.json" >"$work/tunnel-proof.json"
+
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
 # the forge: the shape of a Linode install that runs Gitea.
@@ -437,6 +457,8 @@ variants=(
   "tunnel demo-tn k3s - -data $work/tunnel.json"
   "tunnel-split demo-ts k3s - -data $work/tunnel-split.json"
   "tunnel-custom demo-tc k3s - -data $work/tunnel-custom.json"
+  "gateway-proof demo-gp k3s - -data $work/gateway-proof.json"
+  "tunnel-proof demo-tp k3s - -data $work/tunnel-proof.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
@@ -505,6 +527,13 @@ line() { sel "$1" "$2" | { grep -v '^$' || true; } | tr '\n' ' ' | sed 's/ $//';
 sorted() { sel "$1" "$2" | { grep -v '^$' || true; } | sort | tr '\n' ' ' | sed 's/ $//'; }
 # words <words>: the words sorted the way sorted sorts them, on one line.
 words() { tr ' ' '\n' <<<"$1" | { grep -v '^$' || true; } | sort | tr '\n' ' ' | sed 's/ $//'; }
+# one_doc <file> <kind> <name>: that one object of the stream, empty when
+# there is none. yq's collect ([...]) answers once for every document even
+# after a select drops it, so an expression that collects reads one object.
+one_doc() { sel "$1" "select(.kind == \"$2\" and .metadata.name == \"$3\")"; }
+# of <object> <yq expression>: the expression on that one object, empty for
+# none.
+of() { [ -n "$1" ] && yq -N -r "$2" <<<"$1" 2>/dev/null || true; }
 
 # check_cloudflared <built edge> <label> <tunnel id> <credentials key> <host> <domain> <custom hostnames>:
 # behind a Cloudflare Tunnel (ADR 0064), cloudflared routes Infrared's name to
@@ -716,7 +745,7 @@ for v in "${variants[@]}"; do
   # out and forge, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" token_key="" disabled="[]"
-  tunnel_id="" tunnel_key="" custom=false
+  tunnel_id="" tunnel_key="" custom=false proof=""
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
@@ -742,6 +771,7 @@ for v in "${variants[@]}"; do
     tunnel_id="$(jq -r '.TunnelID // ""' "$data_file")"
     tunnel_key="$(jq -r '.TunnelCredentialsKey // ""' "$data_file")"
     custom="$(jq -r '.CustomHostnames // false' "$data_file")"
+    proof="$(jq -r '.EdgeProofSecret // ""' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
     forge="$(yq -p json -r '.Forge // ""' "$data_file")"
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
@@ -1292,6 +1322,44 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$e" 'select(.metadata.name == "https-redirect") | .spec.rules[0].filters[0].requestRedirect.scheme')" = https ] \
       && [ "$(line "$e" 'select(.kind == "HTTPRoute" and .metadata.name == "infrared") | .metadata.namespace + " " + .spec.hostnames[0] + " " + .spec.rules[0].backendRefs[0].name + ":" + (.spec.rules[0].backendRefs[0].port | tostring)')" = "infrared $host infrared:80" ] \
       && ok "$variant: the redirect from port 80, the edge's own name edge.$domain, and Infrared's route" || bad "$variant: the edge's routes are wrong"
+    # The edge's proof (workspace TODO 473, F4; ADR 0066 D2): with
+    # EdgeProofSecret, the infrared route's first rule takes the API's paths,
+    # the ones the UI's nginx sends to the API and nothing else, through the
+    # filter infrared-edge-proof, in wave -1 and pruned last, which stamps the
+    # header from the Secret's key credential over any copy; no filter removes
+    # it (a route's own removal runs after the injection); the rest goes to
+    # the UI as before; the ClientTrafficPolicy edge strips a client's copy
+    # before routing and holds nothing else; and the edge waits for both
+    # kinds' CRDs. Without it, none of them.
+    proof_route="$(one_doc "$e" HTTPRoute infrared)"
+    proof_filter="$(one_doc "$e" HTTPRouteFilter infrared-edge-proof)"
+    proof_policy="$(one_doc "$e" ClientTrafficPolicy edge)"
+    proof_waits="$(sel "$e" 'select(.kind == "Job" and .metadata.name == "edge-wait") | .spec.template.spec.containers[0].env[] | select(.name == "WAIT_CRDS") | .value')"
+    if [ -n "$proof" ]; then
+      [ "$(of "$proof_route" '.spec.rules[] | (([.matches[].path | .type + ":" + .value] | join(",")) + ">"
+          + ([(.filters // [])[] | .type + ":" + (.extensionRef.group // "") + "/" + (.extensionRef.kind // "") + "/" + (.extensionRef.name // "")] | join(","))
+          + ">" + ([.backendRefs[] | .group + "/" + .kind + "/" + .name + ":" + (.port | tostring) + "*" + (.weight | tostring)] | join(",")))' | tr '\n' ' ' | sed 's/ $//')" \
+          = "PathPrefix:/api,Exact:/.well-known/oauth-authorization-server/api/v1/oidc,Exact:/.well-known/openid-configuration/api/v1/oidc>ExtensionRef:gateway.envoyproxy.io/HTTPRouteFilter/infrared-edge-proof>/Service/infrared:80*1 PathPrefix:/>>/Service/infrared:80*1" ] \
+        && [ "$(of "$proof_route" '[.spec.rules[] | (.filters // [])[] | select(.type == "RequestHeaderModifier") | (.requestHeaderModifier.remove // [])[] | downcase | select(. == "x-infrared-edge-proof")] | length')" = 0 ] \
+        && [ "$(of "$proof_filter" '.metadata.namespace + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"] + " " + .metadata.annotations["argocd.argoproj.io/sync-options"]
+          + " " + .spec.credentialInjection.header + " " + (.spec.credentialInjection.overwrite | tostring)
+          + " " + (.spec.credentialInjection.credential.valueRef | .group + "/" + .kind + "/" + .name + "/" + (.namespace // "-"))
+          + " " + (.spec | keys | join(",")) + " " + (.spec.credentialInjection | keys | join(","))')" \
+          = "infrared -1 PruneLast=true X-Infrared-Edge-Proof true /Secret/$proof/- credentialInjection credential,header,overwrite" ] \
+        && [ "$(of "$proof_policy" '.metadata.namespace + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"]
+          + " " + ([.spec.targetRefs[] | .group + "/" + .kind + "/" + .name + "/" + (.sectionName // "-")] | join(","))
+          + " " + (.spec | keys | join(",")) + " " + (.spec.headers | keys | join(",")) + " " + (.spec.headers.earlyRequestHeaders | keys | join(","))
+          + " " + (.spec.headers.earlyRequestHeaders.remove | join(","))')" \
+          = "envoy-gateway-system -1 gateway.networking.k8s.io/Gateway/edge/- headers,targetRefs earlyRequestHeaders remove X-Infrared-Edge-Proof" ] \
+        && grep -qw -- clienttrafficpolicies.gateway.envoyproxy.io <<<"$proof_waits" && grep -qw -- httproutefilters.gateway.envoyproxy.io <<<"$proof_waits" \
+        && ok "$variant: the edge stamps its proof from $proof on the API's paths alone, strips a client's copy first, and waits for both kinds" \
+        || bad "$variant: the edge's proof is wrong: the route's rules, the filter infrared-edge-proof, the ClientTrafficPolicy edge or the wait"
+    else
+      [ -z "$proof_filter$proof_policy" ] && { [ -z "$host" ] || [ "$(of "$proof_route" '.spec.rules | length')" = 1 ]; } \
+        && ! grep -qw -- httproutefilters.gateway.envoyproxy.io <<<"$proof_waits" && ! grep -qw -- clienttrafficpolicies.gateway.envoyproxy.io <<<"$proof_waits" \
+        && ok "$variant: no edge proof: no filter, no ClientTrafficPolicy, one rule for Infrared" \
+        || bad "$variant: without EdgeProofSecret the edge has a filter, a ClientTrafficPolicy, a second rule or their wait"
+    fi
     if [ "$tunnel" = true ]; then
       check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$host" "$domain" "$custom"
       # The wait: the CRDs the edge uses behind a tunnel, never the origin issuer's.
@@ -3044,6 +3112,42 @@ for refused in "-tunnel-id $tn_id" \
   i=$((i + 1))
   # shellcheck disable=SC2086 # the flags split on purpose
   if "$work/render" -out "$work/tunnel-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
+    bad "hack/render $refused: rendered, want a refusal"
+  else
+    ok "hack/render $refused: refused"
+  fi
+done
+
+# --- The edge's proof (workspace TODO 473, F4; ADR 0066 D2) ------------------------
+# EdgeProofSecret changes only the edge's routes (the filter and the first
+# rule), its gateway (the ClientTrafficPolicy), its wait (the two kinds'
+# CRDs) and the repo's README, on the nodes' ports and behind the tunnel
+# alike: the infrared Application does not carry it, and nothing else renders
+# from it. Without it every gateway variant above renders as before (each
+# checks it has none of the three, and scripts/compare-render.sh origin/main
+# checks a tree byte for byte). hack/render refuses it without a gateway edge,
+# without an Infrared host, and with a name no Secret takes.
+for c in gateway:demo-pg tunnel-split:demo-pq; do
+  base="${c%%:*}" pc="${c#*:}"
+  "$work/render" -out "$work/proof-off-$base" -cluster "$pc" -flavor k3s -build-registry "" -data "$work/$base.json" >/dev/null
+  yq -p json -o json '. + {"EdgeProofSecret": "'"$proof_secret"'"}' "$work/$base.json" >"$work/proof-on-$base.json"
+  "$work/render" -out "$work/proof-on-$base" -cluster "$pc" -flavor k3s -build-registry "" -data "$work/proof-on-$base.json" >/dev/null
+  changed="$({ diff -rq "$work/proof-off-$base" "$work/proof-on-$base" || true; } \
+    | sed -E "s#^Files $work/proof-off-$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  want="$(words "README.md components/edge/gateway.yaml components/edge/routes.yaml components/edge/wait.yaml")"
+  [ "$changed" = "$want" ] \
+    && ok "$base: the edge's proof changes only the edge's routes, gateway and wait and the README" \
+    || bad "$base: the edge's proof changes '$changed', want '$want'"
+done
+i=0
+for refused in "-edge-proof-secret $proof_secret" \
+    "-edge traefik -infrared-host $split_host -edge-proof-secret $proof_secret" \
+    "-edge gateway -platform-domain $split_domain -edge-proof-secret $proof_secret" \
+    "-edge gateway -infrared-host $split_host -edge-proof-secret Infrared-Edge-Proof" \
+    "-edge gateway -infrared-host $split_host -edge-proof-secret infrared/edge-proof"; do
+  i=$((i + 1))
+  # shellcheck disable=SC2086 # the flags split on purpose
+  if "$work/render" -out "$work/proof-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
     bad "hack/render $refused: rendered, want a refusal"
   else
     ok "hack/render $refused: refused"

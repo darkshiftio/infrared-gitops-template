@@ -1081,6 +1081,54 @@ func TestTunnel(t *testing.T) {
 	}
 }
 
+// The edge's proof (workspace TODO 473, F4; ADR 0066 D2): EdgeProofSecret
+// loads from the operator's Data by its Go name, absent is none, as an
+// operator from before it leaves it out, and it is refused unless it is a
+// Secret's name on a gateway edge with an InfraredHost.
+func TestEdgeProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "InfraredHost": "saas2.darkshift.io", "EdgeProofSecret": "infrared-edge-proof"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil || d.EdgeProofSecret != "infrared-edge-proof" {
+		t.Errorf("loaded EdgeProofSecret %q, %v", d.EdgeProofSecret, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.EdgeProofSecret != "" {
+		t.Errorf("an operator's data without it loaded EdgeProofSecret %q, %v; want none", d.EdgeProofSecret, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct {
+		name               string
+		edge, host, secret string
+		wantValidated      bool
+	}{
+		{"none, any edge", "", "", "", true},
+		{"a gateway edge with Infrared's host", "gateway", "saas2.darkshift.io", "infrared-edge-proof", true},
+		{"a name with dots", "gateway", "saas2.darkshift.io", "infrared.edge-proof", true},
+		{"no gateway edge", "traefik", "saas2.darkshift.io", "infrared-edge-proof", false},
+		{"the default edge, Traefik", "", "saas2.darkshift.io", "infrared-edge-proof", false},
+		{"no Infrared host", "gateway", "", "infrared-edge-proof", false},
+		{"an upper-case name", "gateway", "saas2.darkshift.io", "Infrared-Edge-Proof", false},
+		{"a name with a slash", "gateway", "saas2.darkshift.io", "infrared/edge-proof", false},
+		{"a name with an underscore", "gateway", "saas2.darkshift.io", "infrared_edge_proof", false},
+		{"a name past 253 characters", "gateway", "saas2.darkshift.io", strings.Repeat("a", 254), false},
+	} {
+		d := base
+		d.Edge, d.PlatformDomain, d.InfraredHost, d.EdgeProofSecret = c.edge, "darkshift.cloud", c.host, c.secret
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}
+
 // The caps (workspace TODO 473): each loads from the operator's Data by its Go
 // name, absent is off, as an operator from before them leaves them out, and
 // each is refused unless it is one line of JSON the chart's block takes.

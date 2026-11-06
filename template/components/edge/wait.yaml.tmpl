@@ -105,7 +105,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: WAIT_CRDS
-              value: "externalsecrets.external-secrets.io [[ if $tunnel ]]issuers.cert-manager.io[[ else ]]originissuers.cert-manager.k8s.cloudflare.com[[ end ]] certificates.cert-manager.io envoyproxies.gateway.envoyproxy.io backendtrafficpolicies.gateway.envoyproxy.io gatewayclasses.gateway.networking.k8s.io gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io listenersets.gateway.networking.k8s.io"
+              value: "externalsecrets.external-secrets.io [[ if $tunnel ]]issuers.cert-manager.io[[ else ]]originissuers.cert-manager.k8s.cloudflare.com[[ end ]] certificates.cert-manager.io envoyproxies.gateway.envoyproxy.io backendtrafficpolicies.gateway.envoyproxy.io[[ if and .InfraredHost .EdgeProofSecret ]] clienttrafficpolicies.gateway.envoyproxy.io httproutefilters.gateway.envoyproxy.io[[ end ]] gatewayclasses.gateway.networking.k8s.io gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io listenersets.gateway.networking.k8s.io"
             - name: WAIT_SERVICES
               value: "cert-manager/cert-manager-webhook"
             - name: WAIT_STORES

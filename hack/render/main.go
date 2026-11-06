@@ -106,6 +106,17 @@ type Data struct {
 	// default, cloudflare-tunnel-credentials, and an operator leaves it out of
 	// the data without a tunnel.
 	TunnelCredentialsKey string `json:"TunnelCredentialsKey,omitempty"`
+	// EdgeProofSecret is the operator's INFRARED_EDGE_PROOF_SECRET (the
+	// Infrared chart's api.clientAddressProof.enabled) on a gateway edge with
+	// an InfraredHost: the Secret in InfraredNamespace whose key credential
+	// Envoy stamps on every request for Infrared's API, as the header
+	// X-Infrared-Edge-Proof, so the API believes the client-address header
+	// only on a request that came through the edge (workspace TODO 473, F4;
+	// infrared-docs-internal ADR 0066 D2). The infrared route then has a first
+	// rule for the API's paths with the HTTPRouteFilter infrared-edge-proof,
+	// and the ClientTrafficPolicy edge strips any copy a client sent. ""
+	// renders as before, and an operator leaves it out of the data.
+	EdgeProofSecret string `json:"EdgeProofSecret,omitempty"`
 	// ImageRegistry is the registry of Infrared's own images (the operator's
 	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
 	ImageRegistry string `json:"ImageRegistry"`
@@ -615,6 +626,8 @@ func main() {
 		"TunnelID: the UUID, lower case, of the Cloudflare Tunnel the edge is reached through; needs -edge gateway (empty: the edge on the nodes' own ports)")
 	flag.StringVar(&d.TunnelCredentialsKey, "tunnel-credentials-key", defaultTunnelCredentialsKey,
 		"TunnelCredentialsKey: the key of infrared-platform-tokens with the tunnel's credentials file, with -tunnel-id")
+	flag.StringVar(&d.EdgeProofSecret, "edge-proof-secret", "",
+		"EdgeProofSecret: the Secret in -namespace whose key credential the edge stamps on requests for Infrared's API (INFRARED_EDGE_PROOF_SECRET); needs -edge gateway and -infrared-host (empty: no stamp)")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
@@ -715,6 +728,7 @@ func mergeDataFile(d *Data, path string) error {
 		"domain-token-key":       func() { d.DomainTokenKey = explicit.DomainTokenKey },
 		"tunnel-id":              func() { d.TunnelID = explicit.TunnelID },
 		"tunnel-credentials-key": func() { d.TunnelCredentialsKey = explicit.TunnelCredentialsKey },
+		"edge-proof-secret":      func() { d.EdgeProofSecret = explicit.EdgeProofSecret },
 		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
 		"images":                 func() { d.Images = explicit.Images },
 		"cloud":                  func() { d.Cloud = explicit.Cloud },
@@ -788,6 +802,7 @@ func validate(d Data) error {
 	}
 	errs = append(errs, validateDomainTokenKey(d)...)
 	errs = append(errs, validateTunnel(d)...)
+	errs = append(errs, validateEdgeProof(d)...)
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
 			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
@@ -895,6 +910,23 @@ func validateTunnel(d Data) []error {
 	}
 	if k := d.TunnelCredentialsKey; k != "" && (!secretKey.MatchString(k) || k == "." || strings.HasPrefix(k, "..")) {
 		errs = append(errs, fmt.Errorf("TunnelCredentialsKey must be a Secret's key: letters, digits, '-', '_' and '.', at most 253, not . or .., got %q", k))
+	}
+	return errs
+}
+
+// validateEdgeProof checks EdgeProofSecret: empty, or a Secret's name, and
+// only on a gateway edge with an InfraredHost, the one edge whose route for
+// Infrared stamps the proof, as the operator hands it.
+func validateEdgeProof(d Data) []error {
+	if d.EdgeProofSecret == "" {
+		return nil
+	}
+	var errs []error
+	if len(d.EdgeProofSecret) > 253 || !dnsSubdomain.MatchString(d.EdgeProofSecret) {
+		errs = append(errs, fmt.Errorf("EdgeProofSecret must be a Secret's name: lowercase letters, digits, '-' and '.', at most 253, got %q", d.EdgeProofSecret))
+	}
+	if d.Edge != "gateway" || d.InfraredHost == "" {
+		errs = append(errs, errors.New("EdgeProofSecret needs Edge gateway and an InfraredHost: only the Gateway edge's route for Infrared stamps the proof"))
 	}
 	return errs
 }
@@ -1009,6 +1041,9 @@ var (
 	secretKey = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
 	// tunnelID is a Cloudflare Tunnel's UUID, lower case.
 	tunnelID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	// dnsSubdomain is an object's name, such as a Secret's: DNS labels joined
+	// by dots (at most 253 characters, checked apart).
+	dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 	// registryHost is a registry's DNS name, with a port or without.
 	registryHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	// registryPath is a registry host and a repository path under it.
