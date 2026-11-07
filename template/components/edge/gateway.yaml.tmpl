@@ -96,6 +96,17 @@ spec:
   logging:
     level:
       default: warn
+[[- if and .PlatformDomain .RouteLimits ]]
+  # Each tenant zone's limits (the BackendTrafficPolicy infrared-route-limits
+  # Infrared writes in the zone, infrared-docs-internal ADR 0068 D4) count a
+  # visitor's requests before Envoy asks Infrared whether the visitor is signed
+  # in, so a flood at a zone's name is answered 429 here and never reaches
+  # Infrared's API. Envoy Gateway runs ext auth first otherwise. A route with
+  # no limit of its own, Infrared's among them, is not limited.
+  filterOrder:
+    - name: envoy.filters.http.local_ratelimit
+      before: envoy.filters.http.ext_authz
+[[- end ]]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -225,6 +236,11 @@ spec:
 # which would cut Infrared's longer API calls and its MCP stream (the UI's nginx
 # allows 120 seconds and an hour) and any zone's long request. Traefik, the
 # other edge, sets none either.
+[[- if and .PlatformDomain .RouteLimits ]]
+# A tenant zone's routes take their own timeout and limits instead, from the
+# BackendTrafficPolicy infrared-route-limits in the zone, which Infrared writes
+# and which wins over this one there.
+[[- end ]]
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy
 metadata:
