@@ -70,7 +70,9 @@ else bad "INFRARED_RUNNER_PERMISSIONS is '$(operator_env INFRARED_RUNNER_PERMISS
 egress="$(operator_env INFRARED_RUNNER_EGRESS)"
 if [ -n "$egress" ]; then ok "the operator fences runners' egress by name: $(jq -c '.hosts' <<<"$egress")"
 else die "INFRARED_RUNNER_EGRESS is not set: the chart's runner.networkPolicy.egressByName is off"; fi
-if k api-resources --api-group=networking.gke.io -o name 2>/dev/null | grep -q '^fqdnnetworkpolicies'; then
+# grep reads the whole list: with grep -q it would stop at the first match, kubectl would write into a closed pipe,
+# and pipefail would fail the test while the kind is served (fqdnnetworkpolicies is listed first).
+if k api-resources --api-group=networking.gke.io -o name 2>/dev/null | grep '^fqdnnetworkpolicies' >/dev/null; then
   ok "the cluster serves FQDNNetworkPolicy"
 else die "the cluster serves no FQDNNetworkPolicy: turn on GKE's FQDN network policy (infrared-iac-modules fqdn_network_policy)"; fi
 placement="$(operator_env INFRARED_AGENT_STEP_PLACEMENT)"
@@ -97,9 +99,16 @@ esac
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 probe="runner-egress-check-$stamp"
 mine="runner-egress-check-$stamp"
+# The check's own FQDN policy is made and removed as the operator: an org's namespace holds the platform's FQDN
+# policies alone, and the admission policy infrared-tenancy-objects (ADR 0066 D6) refuses one from anyone else, a
+# cluster admin included.
+ins="${INFRARED_NS:-infrared}"
+op_sa="$(k -n "$ins" get deployment infrared-operator -o jsonpath='{.spec.template.spec.serviceAccountName}' 2>/dev/null || true)"
+as_op=(--as="system:serviceaccount:$ins:${op_sa:-infrared-operator}" --as-group="system:serviceaccounts:$ins"
+  --as-group=system:serviceaccounts --as-group=system:authenticated)
 cleanup() {
   k -n "$NS" delete pod "$probe" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  k -n "$NS" delete fqdnnetworkpolicy "$mine" --ignore-not-found >/dev/null 2>&1 || true
+  k "${as_op[@]}" -n "$NS" delete fqdnnetworkpolicy "$mine" --ignore-not-found >/dev/null 2>&1 || true
 }
 [ "${KEEP:-}" = 1 ] || trap cleanup EXIT
 
@@ -112,7 +121,7 @@ inside=()
 [ -n "$node_ip" ] && inside+=("${node_ip//./-}.sslip.io 10250 a node's kubelet by a public name")
 if [ "${#inside[@]}" -gt 0 ]; then
   matches="$(for i in "${inside[@]}"; do jq -n --arg n "${i%% *}" '{name: $n}'; done | jq -s -c .)"
-  k apply -f - >/dev/null <<EOF
+  k "${as_op[@]}" apply -f - >/dev/null <<EOF
 apiVersion: networking.gke.io/v1alpha1
 kind: FQDNNetworkPolicy
 metadata:
