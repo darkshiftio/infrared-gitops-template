@@ -1258,7 +1258,13 @@ an empty panel.
 
 - **`infrared-fleet`** (`infrared-fleet-dashboard`, "Infrared fleet: every
   platform as one unit", ADR 0044 P10): every platform's numbers side by side.
-  Its sixth cut (2026-11-05) splits the agent steps' attempts, cost and tokens
+  Its seventh cut (2026-11-09) adds the row "Sessions": a person's own Claude Code
+  as Infrared records it (ADR 0071), from the API's session series: sessions
+  started by platform, org and AgentRole (`infrared_sessions_total`), running now
+  (`infrared_sessions_active`), cost by who pays (`infrared_session_cost_usd_total`,
+  `paid_by` plan or api), commits conventional or not, tokens by kind, tool calls
+  by tool and the length of the sessions that ended; the keep-lists' `infrared_.*`
+  already carries the family. Its sixth cut (2026-11-05) splits the agent steps' attempts, cost and tokens
   by `provider` (`anthropic`, `bedrock`, `claude-code`) and adds the row "Model
   calls": calls per hour by provider and status, errors by provider and error
   name, and the average latency (`rate(infrared_model_call_seconds_total)` over

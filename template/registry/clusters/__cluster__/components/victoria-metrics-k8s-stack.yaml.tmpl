@@ -544,7 +544,7 @@ spec:
                   ],
                   "editable": true,
                   "schemaVersion": 39,
-                  "version": 6,
+                  "version": 7,
                   "time": {
                     "from": "now-6h",
                     "to": "now"
@@ -552,7 +552,7 @@ spec:
                   "timezone": "browser",
                   "refresh": "1m",
                   "graphTooltip": 1,
-                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Sixth cut, 2026-11-05: the agent steps split by model provider, and the model calls the runner forwards, by provider, status, error and latency (ADR 0069). Fifth cut, 2026-10-14: grouped by the platform label, which hosted's own series carry now too. Fourth cut, from the first proof: a change run and a builder session on a Mac, beside hosted.",
+                  "description": "Every platform of the telemetry plane as one unit (ADR 0044). Seventh cut, 2026-11-09: Sessions, a person's own Claude Code as Infrared records it, from the API's session series (ADR 0071). Sixth cut, 2026-11-05: the agent steps split by model provider, and the model calls the runner forwards, by provider, status, error and latency (ADR 0069). Fifth cut, 2026-10-14: grouped by the platform label, which hosted's own series carry now too. Fourth cut, from the first proof: a change run and a builder session on a Mac, beside hosted.",
                   "templating": {
                     "list": [
                       {
@@ -2511,6 +2511,327 @@ spec:
                       "fieldConfig": {
                         "defaults": {
                           "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 52,
+                      "type": "row",
+                      "title": "Sessions: a person's own Claude Code as Infrared records it (the API's session series, ADR 0071)",
+                      "collapsed": false,
+                      "gridPos": {
+                        "x": 0,
+                        "y": 131,
+                        "w": 24,
+                        "h": 1
+                      },
+                      "panels": []
+                    },
+                    {
+                      "id": 53,
+                      "type": "timeseries",
+                      "title": "Sessions started per hour, by platform, org and role",
+                      "description": "infrared_sessions_total: a Session made by create-session; role is the AgentRole ir local work started it as, empty for one started by hand.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 132,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, org, role) (increase_pure(infrared_sessions_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{org}}` }} {{ `{{role}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 54,
+                      "type": "timeseries",
+                      "title": "Running now, by platform and org",
+                      "description": "infrared_sessions_active: the Sessions in phase Running when the API's registry was read; an org whose telemetry switch is off counts none.",
+                      "gridPos": {
+                        "x": 6,
+                        "y": 132,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, org) (infrared_sessions_active{platform=~\"$platform\"})",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{org}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 55,
+                      "type": "timeseries",
+                      "title": "Cost per hour, by platform and who pays (USD)",
+                      "description": "infrared_session_cost_usd_total: Claude Code's own estimate at list prices, as the hooks read it from the transcript; paid_by is plan (the person's own Claude plan) or api.",
+                      "gridPos": {
+                        "x": 12,
+                        "y": 132,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, paid_by) (increase_pure(infrared_session_cost_usd_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{paid_by}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "currencyUSD",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 56,
+                      "type": "timeseries",
+                      "title": "Commits per hour, conventional or not",
+                      "description": "infrared_session_commits_total by conventional: whether each commit's subject is a conventional commit's, as the API judges it.",
+                      "gridPos": {
+                        "x": 18,
+                        "y": 132,
+                        "w": 6,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, conventional) (increase_pure(infrared_session_commits_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{conventional}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 57,
+                      "type": "timeseries",
+                      "title": "Tokens per hour, by kind",
+                      "description": "infrared_session_tokens_total: input, output, cache_read and cache_write, as read from the transcript.",
+                      "gridPos": {
+                        "x": 0,
+                        "y": 140,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, kind) (increase_pure(infrared_session_tokens_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{kind}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 58,
+                      "type": "timeseries",
+                      "title": "Tool calls per hour, by tool",
+                      "description": "infrared_session_tool_calls_total: each tool Claude Code called, by its name.",
+                      "gridPos": {
+                        "x": 8,
+                        "y": 140,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, tool) (increase_pure(infrared_session_tool_calls_total{platform=~\"$platform\"}[1h]))",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{tool}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "short",
+                          "custom": {
+                            "lineWidth": 1,
+                            "fillOpacity": 12,
+                            "showPoints": "never",
+                            "stacking": {
+                              "mode": "none"
+                            }
+                          }
+                        },
+                        "overrides": []
+                      },
+                      "options": {
+                        "legend": {
+                          "displayMode": "list",
+                          "placement": "bottom",
+                          "showLegend": true
+                        },
+                        "tooltip": {
+                          "mode": "multi",
+                          "sort": "desc"
+                        }
+                      }
+                    },
+                    {
+                      "id": 59,
+                      "type": "timeseries",
+                      "title": "Session length per hour, ended sessions (hours)",
+                      "description": "infrared_session_seconds_total with outcome ended: how long the sessions that ended ran, start to end, summed over the hour.",
+                      "gridPos": {
+                        "x": 16,
+                        "y": 140,
+                        "w": 8,
+                        "h": 8
+                      },
+                      "targets": [
+                        {
+                          "expr": "sum by (platform, org) (increase_pure(infrared_session_seconds_total{outcome=\"ended\", platform=~\"$platform\"}[1h])) / 3600",
+                          "legendFormat": "{{ `{{platform}}` }} {{ `{{org}}` }}",
+                          "refId": "A"
+                        }
+                      ],
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "h",
                           "custom": {
                             "lineWidth": 1,
                             "fillOpacity": 12,
