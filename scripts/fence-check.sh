@@ -15,7 +15,16 @@
 #      and Gitea, Argo CD's server, the registry, the Kubernetes API, Envoy's
 #      own listeners in the cluster, and cloud metadata;
 #   3. with [another org], the other org's zone refuses it, and a probe in the
-#      other org's zone is refused by <org>'s zone, both ways.
+#      other org's zone is refused by <org>'s zone, both ways;
+#   4. where the install names the TCP ports tenants' pods reach the internet
+#      on (the chart's tenancy.networkPolicies.egressPorts, read from the
+#      operator's INFRARED_TENANT_EGRESS_PORTS; infrared-docs-internal ADR 0068
+#      D3): ssh at github.com (TCP 22) and DNS at a public resolver (8.8.8.8,
+#      UDP and TCP 53) are refused, unless a platform admin opened that port to
+#      <org> (its spec.egress.ports), and HTTP answers on 80 when 80 is one of
+#      them. Not TCP 25: Google Cloud blocks it to outside addresses itself, so
+#      a refusal there would not tell the fence's. Without ports, the part says
+#      so and is skipped: a zone reaches the internet on every port.
 #
 # A refused call is a connection that never opens: the policy drops it, so it
 # times out in 5 seconds. Every probe pod is removed afterwards unless KEEP=1.
@@ -45,6 +54,13 @@ placement_yaml() {
     jq -r 'try (.placement // {}) catch {} | [(if .nodeSelector then "  nodeSelector: " + (.nodeSelector | tojson) else empty end), (if .tolerations then "  tolerations: " + (.tolerations | tojson) else empty end), (if .runtimeClassName then "  runtimeClassName: " + .runtimeClassName else empty end)] | join("\n")' 2>/dev/null || true
 }
 PLACEMENT_YAML="$(placement_yaml)"
+# The TCP ports tenants' pods reach the internet on (tenancy.networkPolicies.egressPorts, read from the operator's
+# INFRARED_TENANT_EGRESS_PORTS, ADR 0068 D3), comma-separated; empty on an install that keeps every port open.
+egress_ports() {
+  k -n "$INFRARED_NS" get deployment infrared-operator -o json 2>/dev/null |
+    jq -r '.spec.template.spec.containers[0].env[]? | select(.name == "INFRARED_TENANT_EGRESS_PORTS") | .value // empty' 2>/dev/null || true
+}
+EGRESS_PORTS="$(egress_ports)"
 log() { printf '\n== %s\n' "$*"; }
 die() {
   echo "fence-check: $*" >&2
@@ -208,6 +224,42 @@ exit \$rc" || fails=$((fails + 1))
 sleep 5
 refused $ip_here 8080 \"org $ORG's zone's pod\"
 exit \$rc" || fails=$((fails + 1))
+fi
+
+if [ -n "$EGRESS_PORTS" ]; then
+  # The ports a platform admin opened to the org, beside the install's: a probe of one of them is not a refusal.
+  org_ports="$(k get organization "$ORG" -o json 2>/dev/null | jq -r '(.spec.egress.ports // []) | map(tostring) | join(",")' 2>/dev/null || true)"
+  open=",$EGRESS_PORTS,${org_ports:+$org_ports,}"
+  own=""
+  [ -z "$org_ports" ] || own=" and org $ORG's own $org_ports"
+  log "4. the internet on TCP $EGRESS_PORTS$own alone, from org $ORG's zone $zone"
+  # shellcheck disable=SC2016 # expanded in the probe's shell, not here
+  ports_checks="$helpers"'
+sleep 5
+if timeout 15 nslookup example.com 8.8.8.8 >/dev/null 2>&1; then echo "  FAIL  DNS over UDP at a public resolver (8.8.8.8:53) answered"; rc=1
+else echo "  ok    DNS over UDP at a public resolver (8.8.8.8:53) refused"; fi
+'
+  case "$open" in
+  *,22,*) echo "  skip  ssh at github.com: TCP 22 is open to org $ORG" ;;
+  *) ports_checks="$ports_checks"'refused github.com 22 "ssh at github.com"
+' ;;
+  esac
+  case "$open" in
+  *,53,*) echo "  skip  DNS over TCP at a public resolver: TCP 53 is open to org $ORG" ;;
+  *) ports_checks="$ports_checks"'refused 8.8.8.8 53 "DNS over TCP at a public resolver"
+' ;;
+  esac
+  case "$open" in
+  *,80,*)
+    # shellcheck disable=SC2016 # expanded in the probe's shell, not here
+    ports_checks="$ports_checks"'code="$(curl -s -m 10 -o /dev/null -w "%{http_code}" http://www.google.com/ || true)"
+if [ "$code" != 000 ]; then echo "  ok    the internet answers over HTTP on 80 ($code)"; else echo "  FAIL  the internet does not answer on 80"; rc=1; fi
+'
+    ;;
+  esac
+  probe "$zone" ports "${ports_checks}exit \$rc" || fails=$((fails + 1))
+else
+  log "4. skipped: the operator names no ports for tenants' internet (tenancy.networkPolicies.egressPorts), so a zone reaches it on every port"
 fi
 
 if [ "$fails" -ne 0 ]; then

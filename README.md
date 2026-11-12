@@ -1338,8 +1338,13 @@ policies add up, so nothing here changes for it.
 
 `scripts/fence-check.sh <context> <org> [another org]` checks a running install
 from one of the org's zones: DNS and the internet answer, every platform
-service is refused, and two orgs' zones refuse each other both ways. It runs
-against a cluster, never from CI. Its probe pods, like `registry-pulls-check.sh`'s,
+service is refused, and two orgs' zones refuse each other both ways. Where the
+Infrared chart names the TCP ports tenants' pods reach the internet on
+(`tenancy.networkPolicies.egressPorts`, the operator's
+`INFRARED_TENANT_EGRESS_PORTS`; infrared-docs-internal ADR 0068 D3), it also
+finds ssh at github.com and DNS at a public resolver refused, each unless a
+platform admin opened its port to the org, and HTTP answering on 80 when 80 is
+one of them. It runs against a cluster, never from CI. Its probe pods, like `registry-pulls-check.sh`'s,
 carry the tenants' placement the install's admission policy demands
 (`tenancy.tenantPods.placement`, read from the operator), so they run on a
 hosted plane as a zone's pod does; `tenancy-check.sh` and
