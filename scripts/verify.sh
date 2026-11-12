@@ -65,6 +65,14 @@
 #     gateway and wait and the README; without it no gateway variant has a
 #     filter, a policy or a second rule; and hack/render refuses it without a
 #     gateway edge or an Infrared host, and with a name no Secret takes
+#   - each tenant zone's limits (RouteLimits, infrared-docs-internal ADR 0068
+#     D4), on the nodes' ports and behind a tunnel: the EnvoyProxy edge runs
+#     Envoy's local rate limit before ext auth, and no other filter order;
+#     with or without it, the BackendTrafficPolicy edge keeps the whole
+#     Gateway's one setting, no request timeout; the field changes only the
+#     edge's gateway and the README; without it no gateway variant has a
+#     filter order; and hack/render refuses it without a gateway edge or a
+#     platform domain
 #   - the stores: with Stores, CloudNativePG and one Postgres instance on one
 #     20Gi volume (Linode's Retain class on Linode), with a role and a database
 #     each for seaweedfs and substrate; SeaweedFS across the nodes with every
@@ -336,6 +344,12 @@ proof_secret=infrared-edge-proof
 yq -p json -o json '. + {"EdgeProofSecret": "'"$proof_secret"'"}' "$work/gateway.json" >"$work/gateway-proof.json"
 yq -p json -o json '. + {"EdgeProofSecret": "'"$proof_secret"'"}' "$work/tunnel-split.json" >"$work/tunnel-proof.json"
 
+# Each tenant zone's limits (ADR 0068 D4), as the operator hands them: on the
+# nodes' ports (the gateway's Data), and on the hosted plane's shape, its
+# tunnel and the edge's proof.
+yq -p json -o json '. + {"RouteLimits": true}' "$work/gateway.json" >"$work/gateway-limits.json"
+yq -p json -o json '. + {"RouteLimits": true}' "$work/tunnel-proof.json" >"$work/tunnel-limits.json"
+
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
 # the forge: the shape of a Linode install that runs Gitea.
@@ -459,6 +473,8 @@ variants=(
   "tunnel-custom demo-tc k3s - -data $work/tunnel-custom.json"
   "gateway-proof demo-gp k3s - -data $work/gateway-proof.json"
   "tunnel-proof demo-tp k3s - -data $work/tunnel-proof.json"
+  "gateway-limits demo-gl k3s - -data $work/gateway-limits.json"
+  "tunnel-limits demo-tl k3s - -data $work/tunnel-limits.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
@@ -747,7 +763,7 @@ for v in "${variants[@]}"; do
   # out and forge, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" token_key="" disabled="[]"
-  tunnel_id="" tunnel_key="" custom=false proof=""
+  tunnel_id="" tunnel_key="" custom=false proof="" limits=false
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
@@ -774,6 +790,7 @@ for v in "${variants[@]}"; do
     tunnel_key="$(jq -r '.TunnelCredentialsKey // ""' "$data_file")"
     custom="$(jq -r '.CustomHostnames // false' "$data_file")"
     proof="$(jq -r '.EdgeProofSecret // ""' "$data_file")"
+    limits="$(jq -r '.RouteLimits // false' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
     forge="$(yq -p json -r '.Forge // ""' "$data_file")"
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
@@ -1361,6 +1378,29 @@ for v in "${variants[@]}"; do
         && ! grep -qw -- httproutefilters.gateway.envoyproxy.io <<<"$proof_waits" && ! grep -qw -- clienttrafficpolicies.gateway.envoyproxy.io <<<"$proof_waits" \
         && ok "$variant: no edge proof: no filter, no ClientTrafficPolicy, one rule for Infrared" \
         || bad "$variant: without EdgeProofSecret the edge has a filter, a ClientTrafficPolicy, a second rule or their wait"
+    fi
+    # Each tenant zone's limits (ADR 0068 D4): with RouteLimits, the EnvoyProxy
+    # runs Envoy's local rate limit before ext auth, so a zone's limit is
+    # counted before its sign-in check asks Infrared's API, and holds no other
+    # filter order. With or without it, the BackendTrafficPolicy edge keeps
+    # its one setting for the whole Gateway, no request timeout, so Infrared's
+    # routes are as before: each zone's limits are the operator's, in the zone.
+    filter_order="$(line "$e" 'select(.kind == "EnvoyProxy") | (.spec.filterOrder // [])[] | .name + ">" + (.before // "-") + ">" + (.after // "-")')"
+    [ "$(line "$e" 'select(.kind == "BackendTrafficPolicy") | .metadata.namespace + "/" + .metadata.name
+        + " " + ([.spec.targetRefs[] | .group + "/" + .kind + "/" + .name + "/" + (.sectionName // "-")] | join(","))
+        + " " + (.spec | keys | join(",")) + " " + (.spec.timeout | keys | join(",")) + " " + (.spec.timeout.http | keys | join(","))
+        + " " + .spec.timeout.http.requestTimeout')" \
+        = "envoy-gateway-system/edge gateway.networking.k8s.io/Gateway/edge/- targetRefs,timeout http requestTimeout 0s" ] \
+      && ok "$variant: the BackendTrafficPolicy edge is the whole Gateway's alone: no request timeout, nothing else" \
+      || bad "$variant: the BackendTrafficPolicy edge is not the whole Gateway's one setting, requestTimeout 0s"
+    if [ "$limits" = true ]; then
+      [ "$filter_order" = "envoy.filters.http.local_ratelimit>envoy.filters.http.ext_authz>-" ] \
+        && ok "$variant: Envoy counts a zone's rate limit before its sign-in check" \
+        || bad "$variant: with RouteLimits the EnvoyProxy's filter order is '$filter_order', want the local rate limit before ext auth alone"
+    else
+      [ -z "$filter_order" ] \
+        && ok "$variant: no route limits: Envoy Gateway's own filter order" \
+        || bad "$variant: without RouteLimits the EnvoyProxy has a filter order: $filter_order"
     fi
     if [ "$tunnel" = true ]; then
       check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$host" "$domain" "$custom"
@@ -3150,6 +3190,40 @@ for refused in "-edge-proof-secret $proof_secret" \
   i=$((i + 1))
   # shellcheck disable=SC2086 # the flags split on purpose
   if "$work/render" -out "$work/proof-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
+    bad "hack/render $refused: rendered, want a refusal"
+  else
+    ok "hack/render $refused: refused"
+  fi
+done
+
+# --- Each tenant zone's limits (infrared-docs-internal ADR 0068 D4) ---------------
+# RouteLimits changes only the edge's gateway (the EnvoyProxy's filter order,
+# and a comment on the BackendTrafficPolicy edge) and the repo's README, on
+# the nodes' ports and behind the tunnel alike: the operator writes each
+# zone's policy itself, and the infrared Application does not carry the
+# setting, which the install's own values file keeps. Without it every
+# gateway variant above renders as before (each checks it has no filter
+# order, and scripts/compare-render.sh origin/main checks a tree byte for
+# byte). hack/render refuses it without a gateway edge or a platform domain.
+for c in gateway:demo-rl tunnel-proof:demo-rm; do
+  base="${c%%:*}" pc="${c#*:}"
+  "$work/render" -out "$work/limits-off-$base" -cluster "$pc" -flavor k3s -build-registry "" -data "$work/$base.json" >/dev/null
+  yq -p json -o json '. + {"RouteLimits": true}' "$work/$base.json" >"$work/limits-on-$base.json"
+  "$work/render" -out "$work/limits-on-$base" -cluster "$pc" -flavor k3s -build-registry "" -data "$work/limits-on-$base.json" >/dev/null
+  changed="$({ diff -rq "$work/limits-off-$base" "$work/limits-on-$base" || true; } \
+    | sed -E "s#^Files $work/limits-off-$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  want="$(words "README.md components/edge/gateway.yaml")"
+  [ "$changed" = "$want" ] \
+    && ok "$base: the route limits change only the edge's gateway and the README" \
+    || bad "$base: the route limits change '$changed', want '$want'"
+done
+i=0
+for refused in "-route-limits" \
+    "-edge traefik -platform-domain $split_domain -route-limits" \
+    "-edge gateway -infrared-host $split_host -route-limits"; do
+  i=$((i + 1))
+  # shellcheck disable=SC2086 # the flags split on purpose
+  if "$work/render" -out "$work/limits-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
     bad "hack/render $refused: rendered, want a refusal"
   else
     ok "hack/render $refused: refused"

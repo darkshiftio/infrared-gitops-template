@@ -199,6 +199,14 @@ The edge stamps every request for Infrared's API with the value of the Secret
 rotate it, replace the value in place; never delete the Secret, or every API
 request through the edge answers 500 until Infrared makes it again.
 [[- end ]]
+[[- if and .PlatformDomain .RouteLimits ]]
+
+Infrared limits every route in each tenant zone with the BackendTrafficPolicy
+`infrared-route-limits` it writes there: a request timeout, connections and
+requests in flight, and requests a second for each visitor, which Envoy counts
+before it asks Infrared whether the visitor is signed in. Infrared's own
+routes keep no timeout and no limit.
+[[- end ]]
 [[- else ]]
 Everything is reached by port-forward; nothing is exposed.
 [[- end ]]

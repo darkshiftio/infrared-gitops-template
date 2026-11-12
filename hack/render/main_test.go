@@ -1129,6 +1129,51 @@ func TestEdgeProof(t *testing.T) {
 	}
 }
 
+// Each tenant zone's limits (infrared-docs-internal ADR 0068 D4): RouteLimits
+// loads from the operator's Data by its Go name, absent is off, as an
+// operator from before it leaves it out, and it is refused unless the edge is
+// a gateway with a PlatformDomain, the one edge whose zones' routes the
+// operator limits.
+func TestRouteLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "darkshift.cloud", "RouteLimits": true}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil || !d.RouteLimits {
+		t.Errorf("loaded RouteLimits %t, %v", d.RouteLimits, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "darkshift.cloud"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.RouteLimits {
+		t.Errorf("an operator's data without it loaded RouteLimits %t, %v; want off", d.RouteLimits, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct {
+		name          string
+		edge, domain  string
+		limits        bool
+		wantValidated bool
+	}{
+		{"off, any edge", "", "", false, true},
+		{"a gateway edge with a platform domain", "gateway", "darkshift.cloud", true, true},
+		{"no gateway edge", "traefik", "darkshift.cloud", true, false},
+		{"the default edge, Traefik", "", "darkshift.cloud", true, false},
+		{"no platform domain", "gateway", "", true, false},
+	} {
+		d := base
+		d.Edge, d.PlatformDomain, d.InfraredHost, d.RouteLimits = c.edge, c.domain, "infrared.darkshift.io", c.limits
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}
+
 // The caps (workspace TODO 473): each loads from the operator's Data by its Go
 // name, absent is off, as an operator from before them leaves them out, and
 // each is refused unless it is one line of JSON the chart's block takes.

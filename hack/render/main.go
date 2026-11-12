@@ -117,6 +117,16 @@ type Data struct {
 	// and the ClientTrafficPolicy edge strips any copy a client sent. ""
 	// renders as before, and an operator leaves it out of the data.
 	EdgeProofSecret string `json:"EdgeProofSecret,omitempty"`
+	// RouteLimits is the operator's INFRARED_ROUTE_LIMITS (the Infrared
+	// chart's tenancy.routeLimits.enabled) on a gateway edge with a
+	// PlatformDomain: the operator writes the BackendTrafficPolicy
+	// infrared-route-limits in each tenant zone, a request timeout, a circuit
+	// breaker and a rate limit for each visitor on every route there
+	// (infrared-docs-internal ADR 0068 D4), and the EnvoyProxy edge then runs
+	// Envoy's local rate limit before ext auth, so a flood at a zone's name is
+	// refused before it reaches Infrared's sign-in check. false renders as
+	// before, and an operator leaves it out of the data.
+	RouteLimits bool `json:"RouteLimits,omitempty"`
 	// ImageRegistry is the registry of Infrared's own images (the operator's
 	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
 	ImageRegistry string `json:"ImageRegistry"`
@@ -628,6 +638,8 @@ func main() {
 		"TunnelCredentialsKey: the key of infrared-platform-tokens with the tunnel's credentials file, with -tunnel-id")
 	flag.StringVar(&d.EdgeProofSecret, "edge-proof-secret", "",
 		"EdgeProofSecret: the Secret in -namespace whose key credential the edge stamps on requests for Infrared's API (INFRARED_EDGE_PROOF_SECRET); needs -edge gateway and -infrared-host (empty: no stamp)")
+	flag.BoolVar(&d.RouteLimits, "route-limits", false,
+		"RouteLimits: the operator limits every tenant zone's routes, and Envoy counts a zone's rate limit before its sign-in check (INFRARED_ROUTE_LIMITS); needs -edge gateway and -platform-domain")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
@@ -729,6 +741,7 @@ func mergeDataFile(d *Data, path string) error {
 		"tunnel-id":              func() { d.TunnelID = explicit.TunnelID },
 		"tunnel-credentials-key": func() { d.TunnelCredentialsKey = explicit.TunnelCredentialsKey },
 		"edge-proof-secret":      func() { d.EdgeProofSecret = explicit.EdgeProofSecret },
+		"route-limits":           func() { d.RouteLimits = explicit.RouteLimits },
 		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
 		"images":                 func() { d.Images = explicit.Images },
 		"cloud":                  func() { d.Cloud = explicit.Cloud },
@@ -803,6 +816,9 @@ func validate(d Data) error {
 	errs = append(errs, validateDomainTokenKey(d)...)
 	errs = append(errs, validateTunnel(d)...)
 	errs = append(errs, validateEdgeProof(d)...)
+	if d.RouteLimits && (d.Edge != "gateway" || d.PlatformDomain == "") {
+		errs = append(errs, errors.New("RouteLimits needs Edge gateway and a PlatformDomain: only the Gateway edge's zones have routes the operator limits"))
+	}
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
 			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
