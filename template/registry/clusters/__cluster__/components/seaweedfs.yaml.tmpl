@@ -215,12 +215,15 @@ spec:
                   name: seaweedfs-jwt
                   key: volume-write
 [[- end ]]
+            # At 1Gi all three volume servers were OOMKilled while a build
+            # pushed an 838 MB layer (infrared-cp-google, 2026-11-11), failing
+            # the registry's writes with 500s.
             resources:
               requests:
                 cpu: 50m
                 memory: 128Mi
               limits:
-                memory: 1Gi
+                memory: 3Gi
           filer:
             replicas: [[ if $single ]]1[[ else ]]2[[ end ]]
             data:
