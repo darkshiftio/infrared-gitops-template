@@ -313,6 +313,13 @@ type Data struct {
 	// together (workspace TODO 473), which the infrared Application carries.
 	// Empty renders as before.
 	TenantStorage string `json:"TenantStorage,omitempty"`
+	// MetricsStorage is the operator's INFRARED_METRICS_STORAGE, the Infrared
+	// chart's operator.metricsStorage: the size of the install's own metrics
+	// store, such as 40Gi (infrared-docs-internal ADR 0075, lane H). VMSingle's
+	// claim takes it, or on k3s with the stores the emptyDir its data is on
+	// (see "The metrics store's size"). Empty is 10Gi, which renders as before
+	// the field existed, and an operator leaves it out of the data.
+	MetricsStorage string `json:"MetricsStorage,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -667,6 +674,8 @@ func main() {
 	flag.BoolVar(&d.ArgoCDRestrictDefaultProject, "argocd-restrict-default-project", false, "ArgoCDRestrictDefaultProject: Argo CD's default project takes the platform's root alone (INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT)")
 	flag.StringVar(&d.BuildCaps, "build-caps", "", `BuildCaps: the chart's tenancy.buildCaps as one line of JSON, {"enabled":true,"deadlineMinutes":20,"minutesPerOrgPerDay":60} (INFRARED_BUILD_CAPS; empty for none)`)
 	flag.StringVar(&d.TenantStorage, "tenant-storage", "", `TenantStorage: the chart's tenancy.tenantStorage as one line of JSON, {"enabled":true,"capGi":400,"minDiskGi":10} (INFRARED_TENANT_STORAGE; empty for none)`)
+	flag.StringVar(&d.MetricsStorage, "metrics-storage", "",
+		"MetricsStorage: the size of the install's metrics store, VMSingle's claim or on k3s with the stores its emptyDir, e.g. 40Gi (INFRARED_METRICS_STORAGE; empty: 10Gi)")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -760,8 +769,9 @@ func mergeDataFile(d *Data, path string) error {
 		"argocd-restrict-default-project": func() {
 			d.ArgoCDRestrictDefaultProject = explicit.ArgoCDRestrictDefaultProject
 		},
-		"build-caps":     func() { d.BuildCaps = explicit.BuildCaps },
-		"tenant-storage": func() { d.TenantStorage = explicit.TenantStorage },
+		"build-caps":      func() { d.BuildCaps = explicit.BuildCaps },
+		"tenant-storage":  func() { d.TenantStorage = explicit.TenantStorage },
+		"metrics-storage": func() { d.MetricsStorage = explicit.MetricsStorage },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -843,6 +853,9 @@ func validate(d Data) error {
 		validateTenancyCarry("TenantQuotas", d.TenantQuotas, "zones", "builds"),
 		validateTenancyCarry("BuildCaps", d.BuildCaps, "deadlineMinutes", "minutesPerOrgPerDay"),
 		validateTenancyCarry("TenantStorage", d.TenantStorage, "capGi", "minDiskGi"))
+	if d.MetricsStorage != "" && !metricsSize.MatchString(d.MetricsStorage) {
+		errs = append(errs, fmt.Errorf("MetricsStorage must be the metrics store's size, a whole number above zero of Mi, Gi or Ti (or a larger binary unit), e.g. 40Gi, got %q", d.MetricsStorage))
+	}
 	return errors.Join(errs...)
 }
 
@@ -1056,6 +1069,10 @@ var (
 	awsRoleARN = regexp.MustCompile(`^arn:aws(-us-gov|-cn)?:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$`)
 	// gcpServiceAccount is a Google service account's email.
 	gcpServiceAccount = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`)
+	// metricsSize is the metrics store's size as the operator hands it: the
+	// canonical form of a whole number above zero of Mi, Gi or Ti, which may
+	// name a larger binary unit (1024Ti is 1Pi).
+	metricsSize = regexp.MustCompile(`^[1-9][0-9]*(Mi|Gi|Ti|Pi|Ei)$`)
 )
 
 // The backup bucket's key, as day one reads it: from this Secret alone, and

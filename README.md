@@ -92,6 +92,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.ArgoCDRestrictDefaultProject` | absent or `false`, `true` | the operator's `INFRARED_ARGOCD_RESTRICT_DEFAULT_PROJECT`, the chart's `tenancy.argoCD.restrictDefaultProject`: Argo CD's default project takes the platform org's gitops repo alone (ADR 0066 D10), which the `infrared` Application carries |
 | `.BuildCaps` | absent or `""`, one line of JSON | the operator's `INFRARED_BUILD_CAPS`, the Infrared chart's `tenancy.buildCaps` as `{"enabled":true,"deadlineMinutes":...,"minutesPerOrgPerDay":...}`: each tenant build's deadline and its org's build minutes a UTC day (workspace TODO 473). The operator keeps them; the `infrared` Application carries the setting (see "The caps"). `hack/render` refuses anything but one line of JSON with `"enabled":true` and those two keys |
 | `.TenantStorage` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_STORAGE`, the chart's `tenancy.tenantStorage` as `{"enabled":true,"capGi":...,"minDiskGi":...}`: the cap on every tenant org's volumes together (workspace TODO 473), which the `infrared` Application carries |
+| `.MetricsStorage` | absent or ``, `40Gi` | the operator's `INFRARED_METRICS_STORAGE`, the Infrared chart's `operator.metricsStorage`: the size of the install's own metrics store, VMSingle's claim, or on k3s with the stores the `emptyDir` its data is on (infrared-docs-internal ADR 0075; see "The metrics store's size"). The canonical form of a whole number above zero of `Mi`, `Gi` or `Ti` (`hack/render` refuses anything else); empty is `10Gi`, as before the field existed |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -106,8 +107,8 @@ array, exactly as the operator's environment carries them, `-forge` with
 (with `-edge gateway` and `-platform-domain`); `-tunnel-id` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
 `cloudflare-tunnel-credentials`); `-edge-proof-secret` (with `-edge gateway`
-and `-infrared-host`); `-network-policies`; and `-registry-pulls` and
-`-stores-security`.
+and `-infrared-host`); `-network-policies`; `-registry-pulls` and
+`-stores-security`; and `-metrics-storage`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -174,6 +175,10 @@ its data while they are unset (`make verify` checks it).
 without the stores and the registry: the operator does all of it. It leaves
 each out of its data while it is unset (`make verify` checks it).
 `.BuildCaps` and `.TenantStorage` do the same.
+`.MetricsStorage` changes only the `victoria-metrics-k8s-stack` Application,
+nothing in it but VMSingle's claim, or on k3s with the stores its `emptyDir`
+and the comment that names its size; the operator leaves it out of its data
+while it is unset (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -319,7 +324,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 23 | `substrate-actors` (the same) | `components/substrate-actors` | the same, images by digest |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
 | 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
-| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi (see "Metrics with the stores"; on Google Cloud with a gcs backup bucket, copied there every night, see "The metrics' nightly copy") | 0.95.0 (operator v0.75.0) |
+| 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi, each `.MetricsStorage` instead when it is set (see "Metrics with the stores" and "The metrics store's size"; on Google Cloud with a gcs backup bucket, copied there every night, see "The metrics' nightly copy") | 0.95.0 (operator v0.75.0) |
 | 30 | `telemetry` (with `.Telemetry.URL`, and the metrics stack left out) | `components/telemetry`: one vmagent that remote-writes to that URL (see "The telemetry plane") | vmagent v1.154.0, by digest |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
@@ -1064,6 +1069,27 @@ older template keeps its old claim, which nothing uses once VMSingle has moved:
 the operator never deletes it, so a person does
 (`kubectl -n monitoring delete pvc vmsingle-victoria-metrics-k8s-stack`).
 
+### The metrics store's size
+
+`.MetricsStorage` (the Infrared chart's `operator.metricsStorage`,
+infrared-docs-internal ADR 0075) is the size of the install's own metrics
+store: VMSingle's claim on every branch that has one, and on k3s with the
+stores the `emptyDir`'s `sizeLimit`. Empty is `10Gi`, so an install that sets
+nothing renders the files it rendered before (on Google Cloud the comment
+beside the claim says why the size is the install's). 10Gi proved too small for
+the home: VictoriaMetrics keeps each month in a partition of its own and drops
+it only after the next month, so with 30 days' retention up to two months sit
+on disk.
+
+A claim grows in place where its storage class allows expansion, and never
+shrinks: the VictoriaMetrics operator refuses a
+size below the claim's ("cannot decrease PVC size") and the VMSingle reads
+`failed` until the size is the claim's again or larger. So a claim grown by
+hand is described here by setting `.MetricsStorage` to at least its size, and
+`.MetricsStorage` is never lowered. On k3s with the stores the `emptyDir` is
+the node's own disk, and a pod that outgrows its limit is evicted and starts
+empty, whatever the size.
+
 ### The metrics' nightly copy
 
 On Google Cloud (`.Cloud` `gcp`) with the backup bucket on Google Cloud Storage
@@ -1580,6 +1606,7 @@ make render STORES=true CLOUD=linode DISABLED='["infisical"]' \
 make render FORGE=gitea FORGE_URL=http://gitea-http.infrared.svc.cluster.local:3000
 make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000
 make render STORES=true STORES_SINGLE_NODE=true   # one node, as a local install on a Mac
+make render CLOUD=gcp METRICS_STORAGE=40Gi         # the metrics store's own size
 make render STORES=true REGISTRY=10.43.0.50:5000 SUBSTRATE_CAPABLE=true PULL_SECRET=ghcr-pull
 make render STORES=true REGISTRY=10.43.0.50:5000 BUILD_REGISTRY=10.43.0.50:5000 EDGE=gateway \
   PLATFORM_DOMAIN=preprod.example.com NETWORK_POLICIES=true   # the network fence

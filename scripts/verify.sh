@@ -142,6 +142,12 @@
 #   - metrics: on k3s with the stores VMSingle's data on an emptyDir of 10Gi
 #     and no claim (a request of no space), except on Google Cloud; otherwise
 #     its 10Gi claim as before; and nothing else in the stack asks for a claim
+#   - the metrics store's size (MetricsStorage, infrared-docs-internal ADR
+#     0075, lane H): on each branch above, the claim or the emptyDir takes the
+#     size, and only the victoria-metrics-k8s-stack Application changes,
+#     nothing in it but VMSingle's storage and its comments; unset, every
+#     variant keeps 10Gi; and hack/render refuses a size the operator never
+#     hands over (no space, a fraction, a decimal unit, no unit)
 #   - telemetry (ADR 0044): with a telemetry URL in the -data file and the
 #     metrics stack left out, one vmagent that writes to that URL as that
 #     platform; with the stack on, or without a URL, nothing of it. That
@@ -926,22 +932,28 @@ for v in "${variants[@]}"; do
   # claim for (a null would not survive an apply of the Application); without
   # the stores, on EKS, and on Google Cloud (Cloud gcp, where the default class
   # is a persistent disk that follows the pod), its 10Gi claim of the default
-  # class.
+  # class. With the store's size (MetricsStorage, by flag or in the -data
+  # file) the emptyDir or the claim is that size instead.
   # Nothing else in the stack asks for a claim: Grafana's persistence,
   # Alertmanager's storage and vmagent's stateful mode stay off.
   vm="$reg/components/victoria-metrics-k8s-stack.yaml"
   if holds_objects "$vm"; then
     vmsingle="$(yq -o json -I0 '.spec.source.helm.valuesObject.vmsingle.spec | {"storage": .storage, "volumes": .volumes}' "$vm")"
+    vm_size="$(sed -n -E 's/.*-metrics-storage ([^ ]+).*/\1/p' <<<"${extra:-}")"
+    if [ -z "$vm_size" ] && [ -n "$data_file" ]; then
+      vm_size="$(jq -r '.MetricsStorage // ""' "$data_file")"
+    fi
+    vm_size="${vm_size:-10Gi}"
     vm_empty=false
     [ "$flavor" = k3s ] && [ "$stores" = true ] && [ "$cloud" != gcp ] && vm_empty=true
     if [ "$vm_empty" = true ]; then
-      want_vm='{"storage":{"resources":{"requests":{"storage":"0"}}},"volumes":[{"name":"data","emptyDir":{"sizeLimit":"10Gi"}}]}'
+      want_vm='{"storage":{"resources":{"requests":{"storage":"0"}}},"volumes":[{"name":"data","emptyDir":{"sizeLimit":"'"$vm_size"'"}}]}'
     else
-      want_vm='{"storage":{"resources":{"requests":{"storage":"10Gi"}}},"volumes":null}'
+      want_vm='{"storage":{"resources":{"requests":{"storage":"'"$vm_size"'"}}},"volumes":null}'
     fi
     [ "$vmsingle" = "$want_vm" ] \
       && [ "$(yq -r '.spec.source.helm.valuesObject | [(.grafana.persistence.enabled // false), (.alertmanager.spec.storage // "none"), (.vmagent.spec.statefulMode // false), (.vmagent.spec.statefulStorage // "none")] | join(" ")' "$vm")" = "false none false none" ] \
-      && ok "$variant: VMSingle's data $([ "$vm_empty" = true ] && echo "on an emptyDir of 10Gi, no claim" || echo "on a 10Gi claim"), and nothing else in the stack asks for one" \
+      && ok "$variant: VMSingle's data $([ "$vm_empty" = true ] && echo "on an emptyDir of $vm_size, no claim" || echo "on a $vm_size claim"), and nothing else in the stack asks for one" \
       || bad "$variant: VMSingle's storage is $vmsingle, want $want_vm, or another part of the stack asks for a claim"
     # The metrics' nightly copy: only on Google Cloud with the backup bucket on
     # Google Cloud Storage, a CronJob on VMSingle's node that mounts its claim
@@ -3226,6 +3238,45 @@ render_again k3s "$work/single-node-k3s" -stores-single-node >/dev/null
 changed="$({ diff -rq "$work/k3s" "$work/single-node-k3s" || true; } | tr '\n' ' ')"
 [ -z "$changed" ] && ok "single node without the stores: nothing changes" \
   || bad "single node without the stores changes files: $changed"
+
+# --- The metrics store's size ------------------------------------------------------
+# MetricsStorage (infrared-docs-internal ADR 0075, lane H) on each of VMSingle's
+# storage branches: a claim on k3s without the stores (k3s), on EKS (eks) and on
+# Google Cloud with the metrics' nightly copy (gcs-gke), and an emptyDir on k3s
+# with the stores (stores-plain). Set, the claim or the emptyDir is that size,
+# and only the victoria-metrics-k8s-stack Application changes, nothing in it
+# but VMSingle's storage (its objects compared with the storage taken out) and
+# its comments. Unset, every variant above keeps 10Gi (the metrics check), and
+# hack/render refuses a size the operator never hands over.
+vm_storage='.spec.source.helm.valuesObject.vmsingle.spec | {"storage": .storage, "volumes": .volumes}'
+vm_rest='del(.spec.source.helm.valuesObject.vmsingle.spec.storage, .spec.source.helm.valuesObject.vmsingle.spec.volumes)'
+for base in k3s eks gcs-gke stores-plain; do
+  out="$work/metrics-size-$base"
+  cluster="$(render_again "$base" "$out" -metrics-storage 40Gi)" || { bad "metrics size: no variant $base"; continue; }
+  vm="registry/clusters/$cluster/components/victoria-metrics-k8s-stack.yaml"
+  changed="$({ diff -rq "$work/$base" "$out" || true; } | sed -E "s#^Files $work/$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$base" = stores-plain ]; then
+    kind=emptyDir want_vm='{"storage":{"resources":{"requests":{"storage":"0"}}},"volumes":[{"name":"data","emptyDir":{"sizeLimit":"40Gi"}}]}'
+  else
+    kind=claim want_vm='{"storage":{"resources":{"requests":{"storage":"40Gi"}}},"volumes":null}'
+  fi
+  if [ "$changed" = "$vm" ] && [ "$(yq -o json -I0 "$vm_storage" "$out/$vm")" = "$want_vm" ] \
+      && [ "$(yq -o json -I0 "$vm_rest" "$out/$vm")" = "$(yq -o json -I0 "$vm_rest" "$work/$base/$vm")" ]; then
+    ok "metrics size ($base): VMSingle's $kind is 40Gi, and only its Application changes, nothing in it but the storage and its comments"
+  else
+    bad "metrics size ($base): changed '$changed', want '$vm'; storage $(yq -o json -I0 "$vm_storage" "$out/$vm"), want $want_vm; or more of the Application changed"
+  fi
+done
+for size in 0Gi 1.5Gi 40G 40 040Gi 40gi; do
+  if "$work/render" -out "$work/metrics-size-refused" -metrics-storage "$size" >/dev/null 2>"$work/metrics-size-refused.log"; then
+    bad "metrics size: hack/render took $size"
+  elif grep -q 'MetricsStorage must be' "$work/metrics-size-refused.log"; then
+    ok "metrics size: hack/render refuses $size"
+  else
+    bad "metrics size: hack/render refused $size for another reason: $(cat "$work/metrics-size-refused.log")"
+  fi
+  rm -rf "$work/metrics-size-refused"
+done
 
 # --- The telemetry plane: what a Mac's vmagent keeps, and how often it scrapes ---
 # (localred findings O7 and T3). The vmagent of the telemetry variant keeps, of

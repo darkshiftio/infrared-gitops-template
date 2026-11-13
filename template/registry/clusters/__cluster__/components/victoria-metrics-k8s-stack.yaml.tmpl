@@ -63,6 +63,7 @@ spec:
               maxLabelsPerTimeseries: "40"
               storage.maxHourlySeries: "2000000"
               storage.maxDailySeries: "5000000"
+[[- /* The store's size is the install's own, .MetricsStorage (the operator's INFRARED_METRICS_STORAGE, the Infrared chart's operator.metricsStorage; infrared-docs-internal ADR 0075, lane H): VMSingle's claim, or on k3s with the stores the emptyDir its data is on. Empty is 10Gi, so an install that sets nothing keeps the size it had. */ -]]
 [[- if and (eq .ClusterFlavor "k3s") .Stores (ne .Cloud "gcp") ]]
             # With the stores the cluster is several servers, each with its own
             # disk, and is built to lose one: SeaweedFS keeps every file on two
@@ -70,7 +71,7 @@ spec:
             # VMSingle's data on one server's disk, and after that server is
             # lost the pod would stay Pending until a person deleted the claim.
             # So the data is on the pod's own disk instead, an emptyDir of up
-            # to 10Gi, which the
+            # to [[ default "10Gi" .MetricsStorage ]], which the
             # operator mounts where VictoriaMetrics keeps its data because it
             # is named data. A request for no space turns off the chart's
             # claim: the operator makes none for a zero request. (A null would
@@ -85,20 +86,24 @@ spec:
             volumes:
               - name: data
                 emptyDir:
-                  sizeLimit: 10Gi
+                  sizeLimit: [[ default "10Gi" .MetricsStorage ]]
 [[- else ]]
 [[- if eq .Cloud "gcp" ]]
             # On Google Cloud the claim is a persistent disk of the cluster's
             # default class, which follows the pod to whichever node it lands
             # on, as SeaweedFS's disks do: a restart, a template move or a
-            # node's replacement keeps the metrics. 10Gi holds the 30 days:
-            # infrared-cp-google wrote about 130 MB a day on 2026-10-13 (localred
-            # plan, spike S4), a few GB at the retention.
+            # node's replacement keeps the metrics. Its size is the install's
+            # own (the Infrared chart's operator.metricsStorage), 10Gi while
+            # that is empty. 10Gi proved too small for the home, which takes
+            # every install's series: VictoriaMetrics drops a month's partition
+            # only after the next month, so up to two months sit on disk. The
+            # claim grows in place and never shrinks: the VictoriaMetrics
+            # operator refuses a size below the claim's.
 [[- end ]]
             storage:
               resources:
                 requests:
-                  storage: 10Gi
+                  storage: [[ default "10Gi" .MetricsStorage ]]
 [[- end ]]
         vmagent:
 [[- if .Telemetry.URL ]]
