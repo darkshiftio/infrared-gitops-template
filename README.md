@@ -1626,18 +1626,20 @@ its name.
 
 ### Checks on a running install
 
-Two scripts check an install's monitoring end to end and its first agent run
-on Amazon Bedrock (infrared-docs-internal ADR 0069 T11), against a named
-cluster and never from CI, the way the fence, stores, tenancy and Product
-checks above run. Each prints its numbered checks as `ok`, `FAIL`, `WARN` or
-`SKIP` with the reason, and exits with the number of FAILs. They read the
-store, vmalert and Alertmanager through the API server's proxy, Grafana
-through a port-forward as its admin, and Infrared's API with the bearer token
-in a file of one line, mode 600; no password or token is printed.
+Three scripts check an install's monitoring end to end, its first agent run
+on Amazon Bedrock (infrared-docs-internal ADR 0069 T11) and its figures
+against its own records (ADR 0075 D12), against a named cluster and never
+from CI, the way the fence, stores, tenancy and Product checks above run.
+Each prints its numbered checks as `ok`, `FAIL`, `WARN` or `SKIP` with the
+reason, and exits with the number of FAILs. The first two read the store,
+vmalert and Alertmanager through the API server's proxy, Grafana through a
+port-forward as its admin, and Infrared's API with the bearer token in a file
+of one line, mode 600; no password or token is printed.
 
 ```bash
 scripts/observability-check.sh <context> [--api <url>] [--token-file <file>] [--plane <home context> --platform <name>] [--alert-path] [--opt-out-test] [--only <n,...>]
 scripts/bedrock-proof.sh <context> <api url> <org> [--token-file <file>] [--cloud-account <name> --account-id <id> --role-arn <arn> --region <r>] [--tiers <frontier>,<balanced>,<fast>] [--product <name>] [--kubectl-fallback] [--cloudwatch] [--plane <home context> --platform <name>] [--config <ir config>]
+scripts/telemetry-truth-check.sh <context> [--platform <name>] [--kubectl-arg <arg>]... [--mask-tenants] [--only <n,...>]
 ```
 
 `observability-check.sh`'s thirteen checks:
@@ -1737,6 +1739,37 @@ installs check 3 SKIPs lane A's series, check 6 FAILs (the gap it names),
 check 7 SKIPs the platform VMRule, check 10 SKIPs on a full-stack install
 (its Installation names no plane), check 11 SKIPs on the 404, and check 13
 SKIPs the series.
+
+`telemetry-truth-check.sh` compares, org by org, what an install's records say
+(`kubectl get`, read-only) with what its own metrics store says, for the
+figures read from the records at each scrape (ADR 0075 D7 and D8), and prints
+a table of each org's figures, the records' beside the store's, before its six
+checks: (1) AgentWorkflowRuns by org, workflow and phase against
+`infrared_runs`; (2) Releases by org, Product and phase against
+`infrared_deployments`; (3) ReleaseCuts against `infrared_releases`; (4) the
+`status.buildCounter` of each Product's kpack Images, in the namespace its org
+builds in, against `infrared_builds`; (5) Users against `infrared_users`, each
+org's Products and their environments against `infrared_org_products` and
+`infrared_org_environments`, and each org's kind against `infrared_org_info`;
+(6) 30 days of agent-step spend by org from the runs' records against the
+`increase_pure` of `infrared_step_cost_usd_total`, within 5 percent, else a
+WARN, never a FAIL (an attempt carries no time of its own, so it is dated at
+its round's or its step's finish). It counts the records the operator's way
+(an org is its namespace less `ir-org-`, a record with no phase is Queued or
+Pending, a row that no record carries has no sample) and reads each series as
+`max` by its own labels, so several operator replicas count once. Checks 1 to
+5 must be equal: each read brackets a scrape of the operator between two reads
+of the records, and a row that is not equal is read again after 60 seconds
+(95 when builds differ) before it FAILs. The series are the install's own, by
+`platform`: `--platform`, else the Installation's telemetry platform, else the
+external label of the stack's VMAgent, else the context's cluster name.
+`--kubectl-arg` (repeatable) adds an argument to every `kubectl` call, such as
+`--server` and `--tls-server-name` for a cluster reached by its address;
+`--mask-tenants` prints an org a self-service sign-up made, or whose kind is
+tenant, as `tenant-<the first 6 hex of the SHA-256 of its name>`, and its
+workflows and Products hashed the same way. It writes nothing, needs no token
+and uses no port-forward. Until the operator release that brings these series
+runs on an install (ADR 0075 lane A), checks 1 to 5 SKIP and check 6 runs.
 
 ## Cutting a version
 
