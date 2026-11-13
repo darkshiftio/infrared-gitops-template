@@ -103,6 +103,11 @@ ARGOCD_RESTRICT_DEFAULT_PROJECT ?= false
 # for none.
 BUILD_CAPS     ?=
 TENANT_STORAGE ?=
+# METRICS_STORAGE: the size of the install's own metrics store, VMSingle's claim
+# or on k3s with the stores its emptyDir (as INFRARED_METRICS_STORAGE,
+# infrared-docs-internal ADR 0075); empty is 10Gi. E.g.
+# make render CLOUD=gcp METRICS_STORAGE=40Gi
+METRICS_STORAGE ?=
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -121,7 +126,7 @@ render:
 		-tenant-pods '$(TENANT_PODS)' -tenant-quotas '$(TENANT_QUOTAS)' \
 		-admission-policies=$(ADMISSION_POLICIES) -deny-logging=$(DENY_LOGGING) \
 		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT) \
-		-build-caps '$(BUILD_CAPS)' -tenant-storage '$(TENANT_STORAGE)'
+		-build-caps '$(BUILD_CAPS)' -tenant-storage '$(TENANT_STORAGE)' -metrics-storage "$(METRICS_STORAGE)"
 
 ## verify: the gate CI runs
 verify:

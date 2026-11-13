@@ -1176,3 +1176,38 @@ func TestCapsFields(t *testing.T) {
 		t.Errorf("validate took BuildCaps %q: %v", d.BuildCaps, err)
 	}
 }
+
+// The metrics store's size (infrared-docs-internal ADR 0075, lane H): it loads
+// from the operator's Data by its Go name, absent is the template's own 10Gi,
+// as an operator from before it leaves it out, and only a size the operator
+// hands over validates: the canonical form of a whole number above zero of
+// Mi, Gi or Ti.
+func TestMetricsStorage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string]string{
+		`{"clusterName": "c1", "MetricsStorage": "40Gi"}`: "40Gi",
+		`{"clusterName": "c1"}`:                           "",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.MetricsStorage != want {
+			t.Errorf("%s: loaded MetricsStorage %q, %v; want %q", body, d.MetricsStorage, err, want)
+		}
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for size, ok := range map[string]bool{
+		"": true, "40Gi": true, "10Gi": true, "512Mi": true, "1536Mi": true, "2Ti": true, "1Pi": true,
+		"0Gi": false, "040Gi": false, "-40Gi": false, "1.5Gi": false, "40": false, "40G": false, "40Ki": false,
+		"40gi": false, "40 Gi": false, "40e9": false, `"40Gi"`: false, "40Gi\n": false,
+	} {
+		d := base
+		d.MetricsStorage = size
+		if err := validate(d); (err == nil) != ok {
+			t.Errorf("MetricsStorage %q: validate = %v, want validated %t", size, err, ok)
+		}
+	}
+}
