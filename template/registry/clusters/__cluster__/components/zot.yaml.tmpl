@@ -29,7 +29,9 @@ splits a string, so a range over its length finds the colon. */ -]]
 # Its config and its users are the Infrared operator's: the Secret zot-config,
 # from components/zot/base.yaml, at /etc/zot, and the Secret zot-auth at
 # /etc/zot-auth. Zot rereads both within seconds of a change, without a
-# restart, so nothing here rolls the pod when they change.
+# restart, so nothing here rolls the pod when they change. The one exception is
+# the config's HTTP timeouts, which Zot reads only when it starts: the pod
+# annotation below names them, so a change to them rolls the pod.
 #
 # Its pods carry app.kubernetes.io/name: zot, which the operator's network rule
 # for publishing steps selects. Removing this Application removes Zot and
@@ -68,6 +70,11 @@ spec:
           replicaCount: 1
           strategy:
             type: Recreate
+          # Zot reads http.readTimeout and http.writeTimeout from
+          # components/zot/base.yaml only when it starts: change this with
+          # them, so the pod rolls.
+          podAnnotations:
+            infrared.darkshift.io/http-timeouts: read 15m write 15m
           # The chart's default is NodePort.
           service:
             type: ClusterIP
