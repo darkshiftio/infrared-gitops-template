@@ -30,7 +30,13 @@
 [[- end ]]
 #   http     plain HTTP on port 5000. compat docker2s2 admits Docker schema 2
 #            manifests, which the Paketo images builds start from are: without
-#            it Zot refuses them.
+#            it Zot refuses them. readTimeout and writeTimeout give each request
+#            and each response 15 minutes. Zot's own default since v2.1.18 is
+#            one minute, which cuts a large layer off partway when two or three
+#            builds pull their caches at once: kpack's restore then fails with
+#            "unexpected EOF". Zot reads these two only when it starts, so a
+#            change to them changes the pod annotation in the zot Application
+#            too, which rolls the pod.
 #   auth     htpasswd, and API keys (a publishing step's credential).
 [[- if .RegistryPulls ]]
 #   rules    no one reads without a login (the Infrared chart's
@@ -105,6 +111,8 @@ data:
       "http": {
         "address": "0.0.0.0",
         "port": "5000",
+        "readTimeout": "15m",
+        "writeTimeout": "15m",
         "compat": ["docker2s2"],
         "auth": {
           "htpasswd": {"path": "/etc/zot-auth/htpasswd"},
