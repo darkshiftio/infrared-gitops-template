@@ -1770,6 +1770,14 @@ for v in "${variants[@]}"; do
       && [ "$(zb '.http.accessControl.adminPolicy')" = '{"users":["infrared"],"actions":["read","delete"]}' ] \
       && ok "$variant: zot-base: S3 in the bucket registry with no key in it, docker2s2, htpasswd and API keys, anyone reads, platform writes platform/, infrared deletes" \
       || bad "$variant: zot-base's config.json is wrong"
+    # Its HTTP timeouts: 15 minutes, not Zot's one, which cuts a large cache
+    # layer off when builds pull at once. Zot reads them only when it starts,
+    # so the pod annotation names them and a change to them rolls the pod.
+    timeouts="$(zb '"read " + .http.readTimeout + " write " + .http.writeTimeout')"
+    [ "$timeouts" = '"read 15m write 15m"' ] \
+      && [ "\"$(sel "$f" "$zv | .podAnnotations[\"infrared.darkshift.io/http-timeouts\"]")\"" = "$timeouts" ] \
+      && ok "$variant: Zot gives each request and response 15 minutes, and its pod annotation names both timeouts" \
+      || bad "$variant: Zot's HTTP timeouts, or the pod annotation that names them, are wrong (zot-base reads $timeouts)"
     # Order: zot-base, then the S3 keys, then the wait for the operator's
     # Secrets (a Sync hook: they come from zot-base), then Zot; before all of
     # it, a PreSync wait for the store and SeaweedFS's S3 gateway.
