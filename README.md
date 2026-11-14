@@ -1255,7 +1255,7 @@ metrics' copy's `MetricsBackupStale` and `MetricsBackupNeverRan` carry
 | `InfraredAPIDown` | `up` of the job `infrared-api` (the scrape `infrared-metrics`) is 0 or absent for 3 minutes | critical |
 | `InfraredOperatorDown` | the same for the job `infrared-operator` | critical |
 | `InfraredOperatorReconcileErrors` | the operator's `controller_runtime_reconcile_total{result="error"}` rate is above 0 for 15 minutes, by controller | warning |
-| `InfraredMetricsStoreDown` | `up` of VMSingle's own scrape (`vmsingle-*`) is 0 or absent for 3 minutes | critical |
+| `InfraredMetricsStoreDown` | `up` of this install's VMSingle's own scrape (the job `vmsingle-victoria-metrics-k8s-stack`, alone: another VMSingle beside it, such as the home's telemetry store, alerts on its own) is 0 or absent for 3 minutes | critical |
 | `InfraredTelemetryWritesFailing` | with `.Telemetry.URL` only: a remote write of this vmagent (the plane's, or VMSingle's own) answers other than 2xx (`vmagent_remotewrite_requests_total`, by `url`) for 15 minutes | warning |
 
 The chart's own `ServiceDown` and `TargetDown` fire beside these for the

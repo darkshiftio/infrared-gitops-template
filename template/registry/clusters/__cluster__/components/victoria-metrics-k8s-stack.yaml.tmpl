@@ -496,7 +496,7 @@ spec:
                       annotations:
                         summary: "Infrared's operator has failed reconciles of {{ `{{ $labels.controller }}` }} for 15 minutes."
                     - alert: InfraredMetricsStoreDown
-                      expr: max(up{job=~"vmsingle-.*", platform="[[ $platform ]]"}) == 0 or absent(up{job=~"vmsingle-.*", platform="[[ $platform ]]"})
+                      expr: max(up{job="vmsingle-victoria-metrics-k8s-stack", platform="[[ $platform ]]"}) == 0 or absent(up{job="vmsingle-victoria-metrics-k8s-stack", platform="[[ $platform ]]"})
                       for: 3m
                       labels:
                         severity: critical
