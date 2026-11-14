@@ -681,8 +681,9 @@ for v in "${variants[@]}"; do
       && jq -e --arg p "$want_platform" '[.spec.groups[0].rules[].expr | select(contains("platform=\"" + $p + "\"") | not)] | length == 0' <<<"$vmrule_json" >/dev/null \
       && jq -e '[.spec.groups[0].rules[] | select(.alert | test("Down$")) | .for] | unique == ["3m"]' <<<"$vmrule_json" >/dev/null \
       && jq -e '[.spec.groups[0].rules[] | select(.alert | test("ReconcileErrors|WritesFailing")) | .for] | unique == ["15m"]' <<<"$vmrule_json" >/dev/null \
+      && jq -e '[.spec.groups[0].rules[] | select(.alert == "InfraredMetricsStoreDown") | .expr | select(contains("job=\"vmsingle-victoria-metrics-k8s-stack\"") and (contains("=~") | not))] | length == 1' <<<"$vmrule_json" >/dev/null \
       && [ "$(jq -r '.metadata.namespace' <<<"$vmrule_json")" = monitoring ]; then
-      ok "$variant: the platform VMRule carries the API's, the operator's and the store's alerts$([ -n "$tele_url" ] && echo ", and the writes to the plane,") on platform $want_platform, each with severity and infrared_platform and no infrared_product"
+      ok "$variant: the platform VMRule carries the API's, the operator's and the store's alerts$([ -n "$tele_url" ] && echo ", and the writes to the plane,") on platform $want_platform, each with severity and infrared_platform and no infrared_product, the store's on this install's own VMSingle alone"
     else
       bad "$variant: the platform VMRule is wrong: $(jq -c '[.spec.groups[0].rules[] | {alert, for, labels, expr}]' <<<"$vmrule_json")"
     fi
