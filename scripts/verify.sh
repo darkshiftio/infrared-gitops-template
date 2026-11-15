@@ -3511,6 +3511,24 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
       && [ "$(api_off "$work/vmks.yaml")" = false ] \
       && ok "gcs-gke: no API server or CoreDNS scrape, and no API server rules, on GKE; both kept elsewhere" \
       || bad "gcs-gke: GKE still scrapes the API server or CoreDNS or reads its rules, or another cloud lost them: $(yq -N -r 'select(.kind == "VMServiceScrape") | .metadata.name' "$work/vmks-gke.yaml" | tr '\n' ' ')"
+    # A Spot node's cAdvisor scrape drops kube-system and the other nodes'
+    # scrape leaves Spot nodes out, so each node is scraped once; off Google
+    # Cloud the chart's one cAdvisor scrape stays (workspace TODO 558).
+    node_scrape() { yq -N -o json -I0 "select(.kind == \"VMNodeScrape\" and .metadata.name == \"victoria-metrics-k8s-stack-$2\") | $3" "$1"; }
+    [ "$(node_scrape "$work/vmks-gke.yaml" cadvisor-spot '.spec.selector.matchLabels["cloud.google.com/gke-spot"]')" = '"true"' ] \
+      && [ "$(node_scrape "$work/vmks-gke.yaml" cadvisor-spot '.spec.metricRelabelConfigs[] | select(.action == "drop" and .regex == "kube-system") | .action')" = '"drop"' ] \
+      && [ "$(node_scrape "$work/vmks-gke.yaml" cadvisor '.spec.selector.matchExpressions[0].operator')" = '"DoesNotExist"' ] \
+      && [ -z "$(node_scrape "$work/vmks.yaml" cadvisor-spot '.metadata.name')" ] \
+      && [ -z "$(node_scrape "$work/vmks.yaml" cadvisor '.spec.selector | select(length > 0)')" ] \
+      && ok "gcs-gke: a Spot node's cAdvisor scrape drops kube-system, every node scraped once; one scrape elsewhere" \
+      || bad "gcs-gke: the cAdvisor scrapes split by Spot are wrong: $(yq -N -r 'select(.kind == "VMNodeScrape") | .metadata.name' "$work/vmks-gke.yaml" | tr '\n' ' ')"
+    # TooHighChurnRate24h is off on every install: builds' short-lived pods
+    # tripped it on every busy day (workspace TODO 558).
+    churn_off() { yq -N -r 'select(.kind == "ConfigMap" and (.metadata.name | test("sync-job-config$"))) | .data["config.yaml"]' "$1" \
+      | yq -r '.rules.common.rules.TooHighChurnRate24h.enabled // .rules.rules.TooHighChurnRate24h.enabled'; }
+    [ "$(churn_off "$work/vmks-gke.yaml")" = false ] && [ "$(churn_off "$work/vmks.yaml")" = false ] \
+      && ok "gcs-gke: TooHighChurnRate24h is off, on GKE and elsewhere" \
+      || bad "gcs-gke: TooHighChurnRate24h is still on: $(churn_off "$work/vmks-gke.yaml") / $(churn_off "$work/vmks.yaml")"
   else
     bad "gcs-gke: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-gke.err")"
   fi
