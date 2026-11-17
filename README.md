@@ -93,6 +93,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.BuildCaps` | absent or `""`, one line of JSON | the operator's `INFRARED_BUILD_CAPS`, the Infrared chart's `tenancy.buildCaps` as `{"enabled":true,"deadlineMinutes":...,"minutesPerOrgPerDay":...}`: each tenant build's deadline and its org's build minutes a UTC day (workspace TODO 473). The operator keeps them; the `infrared` Application carries the setting (see "The caps"). `hack/render` refuses anything but one line of JSON with `"enabled":true` and those two keys |
 | `.TenantStorage` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_STORAGE`, the chart's `tenancy.tenantStorage` as `{"enabled":true,"capGi":...,"minDiskGi":...}`: the cap on every tenant org's volumes together (workspace TODO 473), which the `infrared` Application carries |
 | `.MetricsStorage` | absent or ``, `40Gi` | the operator's `INFRARED_METRICS_STORAGE`, the Infrared chart's `operator.metricsStorage`: the size of the install's own metrics store, VMSingle's claim, or on k3s with the stores the `emptyDir` its data is on (infrared-docs-internal ADR 0075; see "The metrics store's size"). The canonical form of a whole number above zero of `Mi`, `Gi` or `Ti` (`hack/render` refuses anything else); empty is `10Gi`, as before the field existed |
+| `.MediaStore` | absent or ``, `both`, `objectStore` | the operator's `INFRARED_MEDIA_STORE`, the Infrared chart's `summaryvideo.store` (infrared-docs-internal ADR 0087 D4 and D7): with `.Stores`, Infrared's API keeps its videos and pictures in SeaweedFS's bucket `media`, which the S3 identity `media` alone reaches and only the API holds, beside `storage-reader`, which lists each bucket for the storage views; media joins the hourly copy and the restore, and the stores' fence admits the API's pods to the S3 gateway (see "The bucket media"). Both values render the same files: the chart and the API tell them apart. The `infrared` Application does not carry it, since the install's values file moves `summaryvideo.store` both ways and a value carried there would win over it. Empty, the chart's `volume`, renders as before the field existed; without `.Stores` it changes nothing; `hack/render` refuses any other value |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -108,7 +109,7 @@ array, exactly as the operator's environment carries them, `-forge` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
 `cloudflare-tunnel-credentials`); `-edge-proof-secret` (with `-edge gateway`
 and `-infrared-host`); `-network-policies`; `-registry-pulls` and
-`-stores-security`; and `-metrics-storage`.
+`-stores-security`; `-metrics-storage`; and `-media-store`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -178,7 +179,12 @@ each out of its data while it is unset (`make verify` checks it).
 `.MetricsStorage` changes only the `victoria-metrics-k8s-stack` Application,
 nothing in it but VMSingle's claim, or on k3s with the stores its `emptyDir`
 and the comment that names its size; the operator leaves it out of its data
-while it is unset (`make verify` checks it).
+while it is unset (`make verify` checks it). `.MediaStore` changes SeaweedFS's
+Application, its identities, its PreSync hook and its hourly copy, the store
+`infrared-stores` and its Application, the restore's copy, the stores' fence
+and the README, and only with `.Stores`; the `infrared` Application never
+carries it. The operator leaves it out of its data while it is unset or
+`volume` (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -726,6 +732,28 @@ The hook also waits for the platform's Postgres to answer before the filers
 start. A new set of identities changes the gateways' annotation
 `infrared.darkshift.io/s3-identities`, so they restart and read it.
 
+### The bucket media
+
+With `.MediaStore` (`both` or `objectStore`, the Infrared chart's
+`summaryvideo.store`; infrared-docs-internal ADR 0087 D4) and `.Stores`,
+Infrared's API keeps its videos and pictures in SeaweedFS's bucket `media`, at
+`<org>/<kind>/<name>`, rather than on its own volume alone:
+
+| What | How |
+|---|---|
+| The bucket | made with the others: by the chart's bucket hook, or under the stores' own mutual TLS by the PostSync Job `seaweedfs-buckets` |
+| The identity `media` | Read, Write, List and Tagging on `media` alone. Its Secret `seaweedfs-s3-media` is made once by the PreSync hook, and the store `infrared-stores` copies its keys into `.InfraredNamespace` as `infrared-media-s3` (wave 2), the only namespace that gets them. Only the API reads them: it serves every file itself, never at a presigned or public URL, since a presenter is a person's likeness; no bucket policy is anonymous |
+| The identity `storage-reader` | List on each bucket, nothing else, for the storage views' figures by org; copied the same way as `infrared-storage-reader-s3` |
+| The copies | `media` joins the hourly copy to the outside bucket (the identity `backup` reads and lists it) and a restore's copy back (the identity `restore` writes it). A copy outside made before the bucket existed holds none, and a restore skips it |
+| The fence | with `.NetworkPolicies`, the stores' fence admits the API's pods (`app.kubernetes.io/part-of: infrared`, `app.kubernetes.io/component: api`) in `.InfraredNamespace` to the S3 gateway, 8333 |
+
+`both` and `objectStore` render the same files: the chart mounts the API's
+volume read-write or read-only, and the API copies, verifies and then reads
+the bucket. The `infrared` Application does not carry the value: the install's
+values file moves `summaryvideo.store` from `volume` to `both`, then to
+`objectStore`, and back, and a carried value would win over it. Without the
+value, nothing of it renders.
+
 ### Backups
 
 With `.Stores` and a `.Backup.Bucket`, the stores are copied to that bucket,
@@ -752,7 +780,7 @@ through the S3 API with a key. The other providers render as before.
 
 | What | How | Where | Kept |
 |---|---|---|---|
-| SeaweedFS's buckets `ate-snapshots` and `registry` | every hour at 17 past, CronJob `seaweedfs-backup`: rclone 1.75.1 makes `current/<bucket>/` match the bucket, and keeps what that run replaced or deleted under `archive/<run>/<bucket>/`; a mark `runs/<run>.json` says the run finished | `<Bucket>/<prefix>/seaweedfs/` | archives and marks for seven days, by the run's name |
+| SeaweedFS's buckets `ate-snapshots` and `registry`, and with `.MediaStore` `media` | every hour at 17 past, CronJob `seaweedfs-backup`: rclone 1.75.1 makes `current/<bucket>/` match the bucket, and keeps what that run replaced or deleted under `archive/<run>/<bucket>/`; a mark `runs/<run>.json` says the run finished | `<Bucket>/<prefix>/seaweedfs/` | archives and marks for seven days, by the run's name |
 | Postgres's WAL, with `.PostgresArchive.Enabled` | continuously: CloudNativePG's Barman Cloud plugin archives each segment as it is written (the Cluster's plugin, `isWALArchiver`) | `s3://<Bucket>/<prefix>/postgres/` | seven days of point-in-time recovery (`retentionPolicy: 7d` on the ObjectStore `backup`) |
 | Postgres's base backup, with `.PostgresArchive.Enabled` | every day at 03:00 UTC, and once at the first sync (ScheduledBackup `postgres-daily`, `method: plugin`) | the same | the same |
 
@@ -785,7 +813,7 @@ key.
 
 A copy of every object at every hour would take 168 times the buckets' size,
 so the buckets are kept as one mirror and the hourly changes to it. rclone reads
-SeaweedFS as the S3 identity `backup`, which may only read and list the two
+SeaweedFS as the S3 identity `backup`, which may only read and list the
 buckets. With the archive, the plugin (chart 0.8.1, `plugin-barman-cloud`
 0.15.1 and its sidecar, by digest) is a second chart of `cloudnative-pg`; its
 mTLS certificates come from `components/cloudnative-pg`, in waves of their own
@@ -832,7 +860,7 @@ private address.
 
 | Application | What |
 |---|---|
-| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry`, and with Agent Substrate `ate-system` too, for `seaweedfs-s3-ate-snapshots` and `postgres-substrate`; with `.Copies.Recipients` and a backup bucket, `.InfraredNamespace` too, for the Postgres roles the backup dumps as (`postgres-substrate`), which its ExternalSecret copies there (wave 2, after the store), and then it renders without `.Registry` as well. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
+| `stores-credentials` (wave 19) | ClusterSecretStore `infrared-stores` (Kubernetes provider), which reads the Secrets the stores keep for their consumers in `stores`, each by name, as the ServiceAccount `stores/stores-credentials-reader`; `conditions` admit `registry`, and with Agent Substrate `ate-system` too, for `seaweedfs-s3-ate-snapshots` and `postgres-substrate`; with `.Copies.Recipients` and a backup bucket, `.InfraredNamespace` too, for the Postgres roles the backup dumps as (`postgres-substrate`), which its ExternalSecret copies there (wave 2, after the store), and then it renders without `.Registry` as well; with `.MediaStore`, `.InfraredNamespace` too, for Infrared's API's keys to the bucket `media` (`infrared-media-s3`, `infrared-storage-reader-s3`, wave 2), and then it renders without `.Registry` or backups as well. A new consumer adds its Secret to the Role and its namespace to the conditions. It waits, in a PreSync hook in `.InfraredNamespace`, for External Secrets' webhook and SeaweedFS's S3 gateway, and never creates `stores`. |
 | `zot` (wave 20) | `components/zot`: the ConfigMap `zot-base`, the ExternalSecret `zot-s3` (the S3 identity `registry`'s keys, from `stores/seaweedfs-s3-registry`) and two waits; and the chart: one replica, `strategy: Recreate`, not root, a read-only root filesystem, and the Service above. |
 
 Zot's config and its users are split between the template and the operator:
@@ -1341,7 +1369,7 @@ for the platform.
 | `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform. None behind a Cloudflare Tunnel, which leaves the issuer and its namespace out |
 | `external-dns` | `infrared-fence` (`external-dns`) | the platform. None behind a Cloudflare Tunnel, which leaves external-dns out |
 | `cert-manager`, `external-secrets` | `infrared-fence` (their charts' `extraObjects`) | the platform; the control plane on each webhook's port, 10250 |
-| `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
+| `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; with `.MediaStore`, Infrared's API on 8333 (the bucket `media`); CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
 | `cnpg-system` | `infrared-fence` (`postgres`) | the platform; the control plane on CloudNativePG's webhook, 9443 |
 | `builds`, `build-credentials`, `kpack` | `infrared-fence` (`builds`) | the platform; the control plane on kpack's webhook, 8443 |
 | `monitoring` | `infrared-fence` (the metrics stack's `extraObjects`, or `telemetry`) | the platform |

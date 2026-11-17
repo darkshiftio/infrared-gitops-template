@@ -66,6 +66,22 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+[[- if .MediaStore ]]
+    # Infrared's API, to SeaweedFS's S3 gateway: its videos and pictures in the
+    # bucket media, and the storage views' listing (the Infrared chart's
+    # summaryvideo.store, infrared-docs-internal ADR 0087 D4).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: infrared
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: 8333
+[[- end ]]
     # CloudNativePG's operator, to the instance manager.
     - from:
         - namespaceSelector:

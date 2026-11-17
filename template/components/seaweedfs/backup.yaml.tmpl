@@ -3,6 +3,7 @@
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $credentials := default "infrared-platform-tokens" .Backup.Credentials.Secret -]]
 [[- $gcs := eq .Backup.Provider "gcs" -]]
+[[- $media := and .Stores .MediaStore -]]
 [[- if and .Stores .Backup.Bucket -]]
 # =============================================================================
 # SeaweedFS's buckets, copied to the bucket outside the cluster every hour.
@@ -44,7 +45,7 @@
 # empty the copy the restore reads.
 [[- end ]]
 #
-# rclone reads with the S3 identity backup (Read and List on both buckets, see
+# rclone reads with the S3 identity backup (Read and List on [[ if $media ]]each bucket[[ else ]]both buckets[[ end ]], see
 [[- if $gcs ]]
 # identities.yaml) and writes to Google Cloud Storage as the ServiceAccount
 # seaweedfs-backup, which the cluster grants the bucket's role through
@@ -130,7 +131,7 @@ spec:
                 - name: HOME
                   value: /tmp
                 - name: BUCKETS
-                  value: "ate-snapshots registry"
+                  value: "ate-snapshots registry[[ if $media ]] media[[ end ]]"
                 - name: DESTINATION
                   value: [[ printf "dst:%s/%s/seaweedfs" .Backup.Bucket $prefix | quote ]]
 [[- if $backups ]]

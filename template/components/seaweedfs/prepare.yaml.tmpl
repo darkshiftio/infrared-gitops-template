@@ -1,6 +1,7 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
 [[- $mtls := and .StoresSecurity $certManager -]]
+[[- $media := and .Stores .MediaStore -]]
 [[- if .Stores -]]
 # =============================================================================
 # Before SeaweedFS: its S3 keys, and the Postgres that holds its filer metadata.
@@ -90,7 +91,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]][[ if .StoresSecurity ]], "seaweedfs-jwt"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if $media ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]][[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]][[ if .StoresSecurity ]], "seaweedfs-jwt"[[ end ]]]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -146,7 +147,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: IDENTITIES
-              value: "ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]"
+              value: "ate-snapshots registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]"
             - name: WAIT_CRDS
               value: "[[ if .Backup.Bucket ]]externalsecrets.external-secrets.io[[ end ]][[ if $mtls ]][[ if .Backup.Bucket ]] [[ end ]]certificates.cert-manager.io issuers.cert-manager.io[[ end ]]"
             - name: WAIT_SERVICES
@@ -257,7 +258,7 @@ spec:
           emptyDir: {}
 [[- if $mtls ]]
 ---
-# After each sync: the buckets ate-snapshots and registry, made with weed shell
+# After each sync: the buckets ate-snapshots[[ if $media ]], registry and media[[ else ]] and registry[[ end ]], made with weed shell
 # over SeaweedFS's mutual TLS, as the chart's bucket hook would make them with
 # the certificates it lacks (above). It needs no S3 key and no Kubernetes API.
 apiVersion: batch/v1
@@ -295,7 +296,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: BUCKETS
-              value: "ate-snapshots registry"
+              value: "ate-snapshots registry[[ if $media ]] media[[ end ]]"
             # The cluster weed shell reaches, as the chart's hook names it.
             - name: WEED_CLUSTER_DEFAULT
               value: sw

@@ -1,5 +1,5 @@
 [[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
-[[- if and .Stores (or .Registry $backups) -]]
+[[- if and .Stores (or .Registry $backups .MediaStore) -]]
 # =============================================================================
 # infrared-stores: the stores' credentials, each one handed out by name.
 # =============================================================================
@@ -24,6 +24,12 @@
 #   postgres-substrate      [[ .InfraredNamespace ]]/postgres-substrate (the backup's dump of
 #                           Substrate's records, as the role substrate)
 [[- end ]]
+[[- if .MediaStore ]]
+#   seaweedfs-s3-media      [[ .InfraredNamespace ]]/infrared-media-s3 (Infrared's API, its videos
+#                           and pictures in the bucket media)
+#   seaweedfs-s3-storage-reader  [[ .InfraredNamespace ]]/infrared-storage-reader-s3 (the
+#                           storage views, which list each bucket by org)
+[[- end ]]
 #
 # `conditions` limits the store to those namespaces: any other namespace, a
 # product's zone included, cannot read a credential through it. A new consumer
@@ -45,9 +51,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
 [[- if .Registry ]]
-    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots", "postgres-substrate"[[ else if $backups ]], "postgres-substrate"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots", "postgres-substrate"[[ else if $backups ]], "postgres-substrate"[[ end ]][[ if .MediaStore ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]]]
+[[- else if $backups ]]
+    resourceNames: ["postgres-substrate"[[ if .MediaStore ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]]]
 [[- else ]]
-    resourceNames: ["postgres-substrate"]
+    resourceNames: ["seaweedfs-s3-media", "seaweedfs-s3-storage-reader"]
 [[- end ]]
     verbs: ["get"]
 ---
@@ -81,7 +89,7 @@ spec:
 [[- if and .Registry .SubstrateCapable ]]
         - ate-system
 [[- end ]]
-[[- if $backups ]]
+[[- if or $backups .MediaStore ]]
         - [[ .InfraredNamespace ]]
 [[- end ]]
   provider:
@@ -98,6 +106,69 @@ spec:
         serviceAccount:
           name: stores-credentials-reader
           namespace: stores
+[[- if .MediaStore ]]
+---
+# Infrared's API's keys to the bucket media: with the Infrared chart's
+# summaryvideo.store at [[ .MediaStore ]] (infrared-docs-internal ADR 0087 D4), the API keeps
+# its videos and pictures there as the S3 identity media (Read, Write, List
+# and Tagging on media alone), and the storage views list each bucket, by org,
+# as the identity storage-reader (List alone). Each identity's keys, AWS_ACCESS_KEY_ID
+# and AWS_SECRET_ACCESS_KEY, are copied into [[ .InfraredNamespace ]] under the name the
+# chart hands the API, and only the API reads them: it serves every file
+# itself, never at a presigned or public URL, since a presenter is a person's
+# likeness. Wave 2: after the store (1), whose webhook admits them.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: infrared-media-s3
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-stores
+  target:
+    name: infrared-media-s3
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: AWS_ACCESS_KEY_ID
+      remoteRef:
+        key: seaweedfs-s3-media
+        property: AWS_ACCESS_KEY_ID
+    - secretKey: AWS_SECRET_ACCESS_KEY
+      remoteRef:
+        key: seaweedfs-s3-media
+        property: AWS_SECRET_ACCESS_KEY
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: infrared-storage-reader-s3
+  namespace: [[ .InfraredNamespace ]]
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  refreshInterval: 1h0m0s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: infrared-stores
+  target:
+    name: infrared-storage-reader-s3
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data:
+    - secretKey: AWS_ACCESS_KEY_ID
+      remoteRef:
+        key: seaweedfs-s3-storage-reader
+        property: AWS_ACCESS_KEY_ID
+    - secretKey: AWS_SECRET_ACCESS_KEY
+      remoteRef:
+        key: seaweedfs-s3-storage-reader
+        property: AWS_SECRET_ACCESS_KEY
+[[- end ]]
 [[- else -]]
 # The stores' credentials are handed out only to the registry inside the
 # cluster, with the platform's own stores: no store.

@@ -6,6 +6,8 @@
 [[- /* SeaweedFS's own security (StoresSecurity): mutual TLS needs cert-manager's certificates. */ -]]
 [[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end ]]
 [[- $mtls := and .StoresSecurity $certManager ]]
+[[- /* The bucket media (MediaStore, the chart's summaryvideo.store): the API's videos and pictures. */ -]]
+[[- $media := and .Stores .MediaStore ]]
 [[- if not $on -]]
 # seaweedfs is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
@@ -35,9 +37,16 @@
 # (components/seaweedfs/prepare.yaml) makes the buckets ate-snapshots and
 # registry after each sync, with the certificates the chart's bucket hook lacks.[[ else ]] The chart's bucket hook makes the
 # buckets ate-snapshots and registry after each sync.[[ end ]]
+[[- if $media ]]
+#
+# The bucket media keeps Infrared's API's videos and pictures (the Infrared
+# chart's summaryvideo.store, infrared-docs-internal ADR 0087 D4), made with the
+# others. Its S3 identity media is the API's alone; storage-reader may list
+# each bucket and do nothing else, for the storage views.
+[[- end ]]
 [[- if .Backup.Bucket ]]
 #
-# Every hour both buckets are copied to s3://[[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs
+# Every hour [[ if $media ]]each bucket is[[ else ]]both buckets are[[ end ]] copied to s3://[[ .Backup.Bucket ]]/[[ $prefix ]]/seaweedfs
 # (components/seaweedfs/backup.yaml), what each copy replaces kept seven days.
 [[- end ]]
 [[- if $restore ]]
@@ -302,7 +311,7 @@ spec:
             # The gateway reads the identities file once, at start: a new set of
             # identities is a new value here, so the gateways roll.
             podAnnotations:
-              infrared.darkshift.io/s3-identities: ate-snapshots registry[[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]
+              infrared.darkshift.io/s3-identities: ate-snapshots registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]
             extraEnvironmentVars:
               S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:
                 secretKeyRef:
@@ -320,6 +329,24 @@ spec:
                 secretKeyRef:
                   name: seaweedfs-s3-registry
                   key: AWS_SECRET_ACCESS_KEY
+[[- if $media ]]
+              S3_MEDIA_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-media
+                  key: AWS_ACCESS_KEY_ID
+              S3_MEDIA_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-media
+                  key: AWS_SECRET_ACCESS_KEY
+              S3_STORAGE_READER_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-storage-reader
+                  key: AWS_ACCESS_KEY_ID
+              S3_STORAGE_READER_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-storage-reader
+                  key: AWS_SECRET_ACCESS_KEY
+[[- end ]]
 [[- if .Backup.Bucket ]]
               S3_BACKUP_ACCESS_KEY_ID:
                 secretKeyRef:
@@ -359,6 +386,9 @@ spec:
             createBuckets:
               - name: ate-snapshots
               - name: registry
+[[- if $media ]]
+              - name: media
+[[- end ]]
 [[- end ]]
             # The gateway holds each upload's parts in memory: at 512Mi it was
             # OOMKilled while eight image builds pushed their layers at once

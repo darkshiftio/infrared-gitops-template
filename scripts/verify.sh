@@ -233,6 +233,14 @@
 #     stores their own callers alone; Argo CD's seven policies, patched, admit
 #     no org's namespace; the infrared Application carries the setting; alone,
 #     it changes only the Applications that carry it
+#   - the bucket media (MediaStore, infrared-docs-internal ADR 0087 D4): with
+#     the stores, SeaweedFS makes the bucket media; the identity media reaches
+#     it alone and storage-reader only lists each bucket; their keys reach the
+#     API's namespace alone, through infrared-stores; media joins the hourly
+#     copy and the restore; and the stores' fence admits the API's pods on
+#     8333. Against the store volume only those files change, the infrared
+#     Application never carries it, without the stores nothing changes, and
+#     hack/render refuses any other value
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
@@ -2623,6 +2631,120 @@ if helm pull seaweedfs --repo https://seaweedfs.github.io/seaweedfs/helm --versi
 else
   echo "skip: seaweedfs $sw_version could not be fetched; its render is not checked"
 fi
+
+# --- The bucket media (infrared-docs-internal ADR 0087, D4) --------------------------
+# With MediaStore (the operator's INFRARED_MEDIA_STORE, the Infrared chart's
+# summaryvideo.store) both or objectStore, Infrared's API keeps its videos and
+# pictures in SeaweedFS's bucket media: the bucket is made with the others (by
+# the chart's hook, or under mutual TLS by the Job seaweedfs-buckets); the S3
+# identity media reaches it alone (Read, Write, List and Tagging), and
+# storage-reader only lists each bucket; the gateways read both keys from the
+# Secrets the PreSync hook makes, and roll on the new set; the store copies both
+# keys into the API's namespace alone, after the store; media joins the hourly
+# copy and the restore, whose identities reach it; and the API's pods pass the
+# stores' fence to the gateway's 8333. Against the same render with the store
+# volume (MediaStore empty), only those files change: the infrared Application
+# does not carry it, since the install's values file moves summaryvideo.store
+# both ways. Without the stores it changes nothing, and hack/render refuses any
+# value the chart does not name.
+"$work/render" -out "$work/media-alone" -cluster demo -flavor k3s -build-registry "" -media-store both >/dev/null
+[ -z "$(d3_diff "$work/k3s" "$work/media-alone")" ] \
+  && ok "media-alone: without the stores, the media store changes nothing" \
+  || bad "media-alone: without the stores, the media store changes '$(d3_diff "$work/k3s" "$work/media-alone")'"
+if "$work/render" -out "$work/media-bad" -cluster demo -flavor k3s -build-registry "" -stores -media-store bucket >/dev/null 2>"$work/media-bad.err"; then
+  bad "media-bad: hack/render took the media store bucket"
+elif grep -q 'summaryvideo.store' "$work/media-bad.err"; then
+  ok "media-bad: hack/render refuses a media store the chart does not name"
+else
+  bad "media-bad: hack/render refused the media store bucket without naming summaryvideo.store: $(head -c 200 "$work/media-bad.err")"
+fi
+# The one install's shape (Substrate, a backup bucket), against pulls-open, the same with the store volume.
+yq -p json -o json '. + {"MediaStore": "both"}' "$work/substrate.json" >"$work/media.json"
+"$work/render" -out "$work/media" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/media.json" >/dev/null
+want_media="README.md components/seaweedfs/backup.yaml components/seaweedfs/identities.yaml components/seaweedfs/prepare.yaml"
+want_media="$want_media components/stores-credentials/store.yaml registry/clusters/demo-pl/components/seaweedfs.yaml"
+want_media="$want_media registry/clusters/demo-pl/components/stores-credentials.yaml"
+[ "$(d3_diff "$work/pulls-open" "$work/media")" = "$(words "$want_media")" ] \
+  && ok "media: renders what the store volume does, but $want_media" \
+  || bad "media: differs from the store volume in '$(d3_diff "$work/pulls-open" "$work/media")', want '$want_media'"
+m_ids="$(sel "$work/media/components/seaweedfs/identities.yaml" 'select(.kind == "Secret" and .metadata.name == "seaweedfs-s3-identities") | .stringData.seaweedfs_s3_config')"
+# shellcheck disable=SC2016 # the identities' own words, matched as they render
+[ "$(yq -p json -r '.identities[] | .name + "=" + (.actions | join(","))' <<<"$m_ids" | grep -E '^(media|storage-reader|backup)=' | tr '\n' ' ')" \
+    = "media=Read:media,Write:media,List:media,Tagging:media storage-reader=List:ate-snapshots,List:registry,List:media backup=Read:ate-snapshots,List:ate-snapshots,Read:registry,List:registry,Read:media,List:media " ] \
+  && [ -z "$(yq -p json -r '.identities[].actions[] | select(test(":") | not)' <<<"$m_ids")" ] \
+  && [ "$(yq -p json -r '.identities[] | select(.name == "media" or .name == "storage-reader") | .credentials[0] | .accessKey + " " + .secretKey' <<<"$m_ids" | tr '\n' ' ')" \
+    = '${S3_MEDIA_ACCESS_KEY_ID} ${S3_MEDIA_SECRET_ACCESS_KEY} ${S3_STORAGE_READER_ACCESS_KEY_ID} ${S3_STORAGE_READER_SECRET_ACCESS_KEY} ' ] \
+  && ok "media: the identity media reaches the bucket media alone, storage-reader only lists each bucket, backup reads media too, no key in the repo" \
+  || bad "media: the S3 identities are wrong: $m_ids"
+m_sw="$work/media/registry/clusters/demo-pl/components/seaweedfs.yaml"
+[ "$(sel "$m_sw" "$sw_v | .s3.createBuckets[].name" | tr '\n' ' ')" = "ate-snapshots registry media " ] \
+  && [ "$(sel "$m_sw" "$sw_v | .s3.podAnnotations[\"infrared.darkshift.io/s3-identities\"]")" = "ate-snapshots registry media storage-reader backup" ] \
+  && [ "$(yq -o json -I0 "$sw_v | .s3.extraEnvironmentVars | to_entries | map(select(.key | test(\"^S3_(MEDIA|STORAGE_READER)_\")) | .key + \"<-\" + .value.secretKeyRef.name + \"/\" + .value.secretKeyRef.key) | sort" "$m_sw")" \
+    = '["S3_MEDIA_ACCESS_KEY_ID<-seaweedfs-s3-media/AWS_ACCESS_KEY_ID","S3_MEDIA_SECRET_ACCESS_KEY<-seaweedfs-s3-media/AWS_SECRET_ACCESS_KEY","S3_STORAGE_READER_ACCESS_KEY_ID<-seaweedfs-s3-storage-reader/AWS_ACCESS_KEY_ID","S3_STORAGE_READER_SECRET_ACCESS_KEY<-seaweedfs-s3-storage-reader/AWS_SECRET_ACCESS_KEY"]' ] \
+  && ok "media: the chart's hook makes the bucket media, and the gateways read the two identities' keys and roll on them" \
+  || bad "media: SeaweedFS's Application does not make the bucket media or hand the gateways its identities' keys"
+m_prep="$work/media/components/seaweedfs/prepare.yaml"
+[ "$(prep_env "$m_prep" IDENTITIES)" = "ate-snapshots registry media storage-reader backup" ] \
+  && [ "$(sorted "$m_prep" 'select(.kind == "Role" and .metadata.name == "seaweedfs-prepare") | .rules[0].resourceNames[]')" \
+    = "seaweedfs-s3-ate-snapshots seaweedfs-s3-backup seaweedfs-s3-media seaweedfs-s3-registry seaweedfs-s3-storage-reader" ] \
+  && [ "$(sel "$work/media/components/seaweedfs/backup.yaml" 'select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == "BUCKETS") | .value')" \
+    = "ate-snapshots registry media" ] \
+  && ok "media: the PreSync hook makes the two identities' Secrets once, and the hourly copy carries media" \
+  || bad "media: the hook does not make the identities' Secrets, or the hourly copy leaves media out"
+m_store="$work/media/components/stores-credentials/store.yaml"
+m_es() { line "$m_store" "select(.kind == \"ExternalSecret\" and .metadata.name == \"$1\") | .metadata.namespace + \" \" + .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] + \" \" + .spec.secretStoreRef.name + \" \" + .spec.target.name + \" \" + (.spec.data | map(.secretKey + \"=\" + .remoteRef.key + \"/\" + .remoteRef.property) | join(\",\"))"; }
+[ "$(m_es infrared-media-s3)" = "infrared 2 infrared-stores infrared-media-s3 AWS_ACCESS_KEY_ID=seaweedfs-s3-media/AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY=seaweedfs-s3-media/AWS_SECRET_ACCESS_KEY" ] \
+  && [ "$(m_es infrared-storage-reader-s3)" = "infrared 2 infrared-stores infrared-storage-reader-s3 AWS_ACCESS_KEY_ID=seaweedfs-s3-storage-reader/AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY=seaweedfs-s3-storage-reader/AWS_SECRET_ACCESS_KEY" ] \
+  && [ "$(sorted "$m_store" 'select(.kind == "Role") | .rules[0].resourceNames[]')" \
+    = "postgres-substrate seaweedfs-s3-ate-snapshots seaweedfs-s3-media seaweedfs-s3-registry seaweedfs-s3-storage-reader" ] \
+  && [ "$(sorted "$m_store" 'select(.kind == "ClusterSecretStore") | .spec.conditions[0].namespaces[]')" = "ate-system infrared registry" ] \
+  && ok "media: infrared-stores copies the two identities' keys into the API's namespace, after the store, and no other namespace gets them" \
+  || bad "media: the API's keys to the bucket media are not copied as they should be: $(m_es infrared-media-s3)"
+for c in seaweedfs stores-credentials; do
+  if kubectl kustomize "$work/media/components/$c" >"$work/media-$c.yaml" \
+    && kubeconform -strict -ignore-missing-schemas -summary "$work/media-$c.yaml" >/dev/null; then
+    ok "media: components/$c builds and passes kubeconform"
+  else
+    bad "media: components/$c does not build or pass kubeconform"
+  fi
+done
+# The API's door in the stores' fence, with the network fence on, and none without the bucket.
+api_in() { yq -N -o json -I0 'select(.kind == "NetworkPolicy" and .metadata.namespace == "stores") | .spec.ingress[] | select(.from[0].podSelector.matchLabels["app.kubernetes.io/component"] == "api") | sort_keys(..)' "$1" 2>/dev/null || true; }
+yq -p json -o json '. + {"MediaStore": "objectStore"}' "$work/fence.json" >"$work/media-fence.json"
+"$work/render" -out "$work/media-fence" -cluster demo-fn -flavor k3s -build-registry "$zot_registry" -data "$work/media-fence.json" >/dev/null
+[ "$(api_in "$work/media-fence/components/postgres/fence.yaml")" \
+    = '{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"infrared"}},"podSelector":{"matchLabels":{"app.kubernetes.io/component":"api","app.kubernetes.io/part-of":"infrared"}}}],"ports":[{"port":8333,"protocol":"TCP"}]}' ] \
+  && [ -z "$(api_in "$work/fence/components/postgres/fence.yaml")" ] \
+  && [ "$(d3_diff "$work/fence" "$work/media-fence")" = "$(words "${want_media//demo-pl/demo-fn} components/postgres/fence.yaml")" ] \
+  && ok "media-fence: the stores' fence admits Infrared's API's pods to the S3 gateway's 8333, and only with the bucket media" \
+  || bad "media-fence: the API's door in the stores' fence is wrong: $(api_in "$work/media-fence/components/postgres/fence.yaml")"
+# Under mutual TLS the Job seaweedfs-buckets makes it, as it makes the others.
+yq -p json -o json '. + {"MediaStore": "both"}' "$work/stores-sec.json" >"$work/media-sec.json"
+"$work/render" -out "$work/media-sec" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/media-sec.json" >/dev/null
+[ "$(sel "$work/media-sec/components/seaweedfs/prepare.yaml" "$bj_pod | .containers[0].env[] | select(.name == \"BUCKETS\") | .value")" = "ate-snapshots registry media" ] \
+  && [ "$(sel "$work/media-sec/registry/clusters/demo-pl/components/seaweedfs.yaml" "$sw_v | .s3 | has(\"createBuckets\")")" = false ] \
+  && ok "media-sec: under mutual TLS, the Job seaweedfs-buckets makes the bucket media with the others" \
+  || bad "media-sec: under mutual TLS, the bucket media is not made by the Job seaweedfs-buckets"
+# A restore copies media back, as the identity restore, which reaches it.
+yq -p json -o json '. + {"MediaStore": "objectStore"}' "$work/restore.json" >"$work/media-restore.json"
+"$work/render" -out "$work/media-restore" -cluster demo-rs -flavor k3s -build-registry "$zot_registry" -data "$work/media-restore.json" >/dev/null
+[ "$(sel "$work/media-restore/components/stores-restore/restore.yaml" 'select(.kind == "Job" and .metadata.name == "stores-restore") | .spec.template.spec.initContainers[] | select(.name == "copy") | .env[] | select(.name == "BUCKETS") | .value')" \
+    = "ate-snapshots registry media" ] \
+  && [ "$(sel "$work/media-restore/components/seaweedfs/identities.yaml" 'select(.kind == "Secret") | .stringData.seaweedfs_s3_config' | yq -p json -r '.identities[] | select(.name == "restore") | .actions | join(",")')" \
+    = "Read:ate-snapshots,Write:ate-snapshots,List:ate-snapshots,Read:registry,Write:registry,List:registry,Read:media,Write:media,List:media" ] \
+  && ok "media-restore: a restore copies the bucket media back too, as the identity restore" \
+  || bad "media-restore: a restore leaves the bucket media out"
+# The bucket alone, with no registry and no backups: the store renders for the API's keys alone.
+"$work/render" -out "$work/media-only" -cluster demo-sp -flavor k3s -build-registry "" -stores -media-store objectStore >/dev/null
+mo_store="$work/media-only/components/stores-credentials/store.yaml"
+[ "$(sorted "$mo_store" 'select(.kind == "Role") | .rules[0].resourceNames[]')" = "seaweedfs-s3-media seaweedfs-s3-storage-reader" ] \
+  && [ "$(sorted "$mo_store" 'select(.kind == "ClusterSecretStore") | .spec.conditions[0].namespaces[]')" = "infrared" ] \
+  && holds_objects "$work/media-only/registry/clusters/demo-sp/components/stores-credentials.yaml" \
+  && ! holds_objects "$work/stores-plain/registry/clusters/demo-sp/components/stores-credentials.yaml" \
+  && kubectl kustomize "$work/media-only/components/stores-credentials" >"$work/media-only-credentials.yaml" \
+  && kubeconform -strict -ignore-missing-schemas -summary "$work/media-only-credentials.yaml" >/dev/null \
+  && ok "media-only: with the stores alone, stores-credentials renders for the API's keys, and hands out nothing else" \
+  || bad "media-only: with the stores alone, stores-credentials does not render for the API's keys alone"
 
 # --- The rest of the tenancy (ADR 0066 D4, D5, D6, D10) ---------------------------
 # TenantPods and TenantQuotas (the operator's INFRARED_TENANT_PODS and

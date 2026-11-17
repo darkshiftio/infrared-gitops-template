@@ -1,6 +1,7 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
 [[- $mtls := and .StoresSecurity $certManager -]]
+[[- $media := and .Stores .MediaStore -]]
 [[- if .Stores -]]
 # =============================================================================
 # SeaweedFS's S3 identities: who may do what, in which bucket.
@@ -14,8 +15,13 @@
 #   identity        bucket          for
 #   ate-snapshots   ate-snapshots   Agent Substrate's actor snapshots
 #   registry        registry        the registry's images and charts
+[[- if $media ]]
+#   media           media           Infrared's API's videos and pictures
+#                   (summaryvideo.store, infrared-docs-internal ADR 0087 D4)
+#   storage-reader  each, list      the storage views, which list every bucket by org
+[[- end ]]
 [[- if .Backup.Bucket ]]
-#   backup          both, read      the hourly copy to the outside bucket
+#   backup          [[ if $media ]]each[[ else ]]both[[ end ]], read      the hourly copy to the outside bucket
 [[- end ]]
 [[- if $restore ]]
 #   restore         every bucket, read and write  a restore copying the buckets
@@ -48,16 +54,26 @@ stringData:
           "name": "registry",
           "credentials": [{"accessKey": "${S3_REGISTRY_ACCESS_KEY_ID}", "secretKey": "${S3_REGISTRY_SECRET_ACCESS_KEY}"}],
           "actions": ["Read:registry", "Write:registry", "List:registry", "Tagging:registry"]
-        }[[ if .Backup.Bucket ]],
+        }[[ if $media ]],
+        {
+          "name": "media",
+          "credentials": [{"accessKey": "${S3_MEDIA_ACCESS_KEY_ID}", "secretKey": "${S3_MEDIA_SECRET_ACCESS_KEY}"}],
+          "actions": ["Read:media", "Write:media", "List:media", "Tagging:media"]
+        },
+        {
+          "name": "storage-reader",
+          "credentials": [{"accessKey": "${S3_STORAGE_READER_ACCESS_KEY_ID}", "secretKey": "${S3_STORAGE_READER_SECRET_ACCESS_KEY}"}],
+          "actions": ["List:ate-snapshots", "List:registry", "List:media"]
+        }[[ end ]][[ if .Backup.Bucket ]],
         {
           "name": "backup",
           "credentials": [{"accessKey": "${S3_BACKUP_ACCESS_KEY_ID}", "secretKey": "${S3_BACKUP_SECRET_ACCESS_KEY}"}],
-          "actions": ["Read:ate-snapshots", "List:ate-snapshots", "Read:registry", "List:registry"]
+          "actions": ["Read:ate-snapshots", "List:ate-snapshots", "Read:registry", "List:registry"[[ if $media ]], "Read:media", "List:media"[[ end ]]]
         }[[ end ]][[ if $restore ]],
         {
           "name": "restore",
           "credentials": [{"accessKey": "${S3_RESTORE_ACCESS_KEY_ID}", "secretKey": "${S3_RESTORE_SECRET_ACCESS_KEY}"}],
-          "actions": ["Read:ate-snapshots", "Write:ate-snapshots", "List:ate-snapshots", "Read:registry", "Write:registry", "List:registry"]
+          "actions": ["Read:ate-snapshots", "Write:ate-snapshots", "List:ate-snapshots", "Read:registry", "Write:registry", "List:registry"[[ if $media ]], "Read:media", "Write:media", "List:media"[[ end ]]]
         }[[ end ]]
       ]
     }

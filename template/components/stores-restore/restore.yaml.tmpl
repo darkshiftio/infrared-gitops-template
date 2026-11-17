@@ -135,7 +135,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: BUCKETS
-              value: "ate-snapshots registry"
+              value: "ate-snapshots registry[[ if .MediaStore ]] media[[ end ]]"
             - name: SOURCE
               value: [[ printf "outside:%s/%s/seaweedfs/current" .Backup.Bucket $prefix | quote ]]
 [[- if $gcs ]]

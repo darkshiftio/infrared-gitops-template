@@ -320,6 +320,18 @@ type Data struct {
 	// (see "The metrics store's size"). Empty is 10Gi, which renders as before
 	// the field existed, and an operator leaves it out of the data.
 	MetricsStorage string `json:"MetricsStorage,omitempty"`
+	// MediaStore is the operator's INFRARED_MEDIA_STORE, the Infrared chart's
+	// summaryvideo.store, where the API keeps its videos and pictures
+	// (infrared-docs-internal ADR 0087, D4 and D7): both or objectStore puts
+	// them in SeaweedFS's bucket media, which the API alone reads and writes
+	// with the S3 identity media; with it the identity storage-reader (List on
+	// every bucket, for the storage views), the API's pods through the stores'
+	// fence on 8333, and media in the hourly copy and the restore (see "The
+	// bucket media"). The infrared Application does not carry it: the
+	// install's values file moves the value both ways. Empty, the chart's
+	// volume, renders as before the field existed, and an operator leaves it
+	// out of the data.
+	MediaStore string `json:"MediaStore,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -501,11 +513,13 @@ func (f disabledFlag) Set(s string) error {
 	return nil
 }
 
-// Edges, Clouds and Forges are the values Edge, Cloud and Forge may take.
+// Edges, Clouds, Forges and MediaStores are the values Edge, Cloud, Forge
+// and MediaStore may take.
 var (
-	Edges  = []string{"", "traefik", "gateway"}
-	Clouds = []string{"", "aws", "linode", "gcp"}
-	Forges = []string{"", "gitea"}
+	Edges       = []string{"", "traefik", "gateway"}
+	Clouds      = []string{"", "aws", "linode", "gcp"}
+	Forges      = []string{"", "gitea"}
+	MediaStores = []string{"", "both", "objectStore"}
 )
 
 // imagesFlag reads -images: a JSON object of component to {"tag", "digest"},
@@ -676,6 +690,8 @@ func main() {
 	flag.StringVar(&d.TenantStorage, "tenant-storage", "", `TenantStorage: the chart's tenancy.tenantStorage as one line of JSON, {"enabled":true,"capGi":400,"minDiskGi":10} (INFRARED_TENANT_STORAGE; empty for none)`)
 	flag.StringVar(&d.MetricsStorage, "metrics-storage", "",
 		"MetricsStorage: the size of the install's metrics store, VMSingle's claim or on k3s with the stores its emptyDir, e.g. 40Gi (INFRARED_METRICS_STORAGE; empty: 10Gi)")
+	flag.StringVar(&d.MediaStore, "media-store", "",
+		`MediaStore: "" (the chart's volume, as before), "both" or "objectStore": the API's videos and pictures in SeaweedFS's bucket media (INFRARED_MEDIA_STORE)`)
 	flag.Parse()
 
 	if dataFile != "" {
@@ -772,6 +788,7 @@ func mergeDataFile(d *Data, path string) error {
 		"build-caps":      func() { d.BuildCaps = explicit.BuildCaps },
 		"tenant-storage":  func() { d.TenantStorage = explicit.TenantStorage },
 		"metrics-storage": func() { d.MetricsStorage = explicit.MetricsStorage },
+		"media-store":     func() { d.MediaStore = explicit.MediaStore },
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -855,6 +872,9 @@ func validate(d Data) error {
 		validateTenancyCarry("TenantStorage", d.TenantStorage, "capGi", "minDiskGi"))
 	if d.MetricsStorage != "" && !metricsSize.MatchString(d.MetricsStorage) {
 		errs = append(errs, fmt.Errorf("MetricsStorage must be the metrics store's size, a whole number above zero of Mi, Gi or Ti (or a larger binary unit), e.g. 40Gi, got %q", d.MetricsStorage))
+	}
+	if !slices.Contains(MediaStores, d.MediaStore) {
+		errs = append(errs, fmt.Errorf("MediaStore must be one of %q (the chart's summaryvideo.store; its volume is empty here), got %q", MediaStores, d.MediaStore))
 	}
 	return errors.Join(errs...)
 }

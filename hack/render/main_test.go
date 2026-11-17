@@ -1211,3 +1211,38 @@ func TestMetricsStorage(t *testing.T) {
 		}
 	}
 }
+
+// The bucket media (infrared-docs-internal ADR 0087, D4): MediaStore loads from
+// the operator's Data by its Go name, absent is the chart's volume, as an
+// operator from before it leaves it out, and only both and objectStore are
+// taken.
+func TestMediaStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string]string{
+		`{"clusterName": "c1", "Stores": true, "MediaStore": "both"}`:        "both",
+		`{"clusterName": "c1", "Stores": true, "MediaStore": "objectStore"}`: "objectStore",
+		`{"clusterName": "c1"}`: "",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.MediaStore != want {
+			t.Errorf("%s: loaded MediaStore %q, %v; want %q", body, d.MediaStore, err, want)
+		}
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0", Stores: true}
+	for store, ok := range map[string]bool{
+		"": true, "both": true, "objectStore": true,
+		"volume": false, "objectstore": false, "Both": false, "bucket": false, " both": false,
+	} {
+		d := base
+		d.MediaStore = store
+		err := validate(d)
+		if (err == nil) != ok || (err != nil && !strings.Contains(err.Error(), "summaryvideo.store")) {
+			t.Errorf("MediaStore %q: validate = %v, want validated %t", store, err, ok)
+		}
+	}
+}
