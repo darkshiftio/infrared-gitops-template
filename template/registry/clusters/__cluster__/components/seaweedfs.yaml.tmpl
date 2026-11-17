@@ -299,6 +299,12 @@ spec:
             lancePort: 0
             logs:
               type: ""
+[[- if $single ]]
+            # No rule against two gateways on a node: the gateway is a
+            # Deployment, which rolls by starting its new pod beside the old
+            # one, and on the cluster's one node that rule leaves the new pod
+            # Pending and the old one serving the old config, for good.
+[[- else ]]
             affinity: |
               podAntiAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -308,6 +314,7 @@ spec:
                         app.kubernetes.io/instance: seaweedfs
                         app.kubernetes.io/component: s3
                     topologyKey: kubernetes.io/hostname
+[[- end ]]
             # The gateway reads the identities file once, at start: a new set of
             # identities is a new value here, so the gateways roll.
             podAnnotations:

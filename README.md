@@ -726,7 +726,12 @@ which a local install on one machine sets) the same chart runs one master, one
 volume server, one filer and one S3 gateway, and writes every file once
 (replication `000`, the masters' default): three masters would never form a
 Raft quorum there, since the chart's anti-affinity keeps two of them from the
-one node, and there is no second server to copy a file to. The node's disk is
+one node, and there is no second server to copy a file to. The one S3 gateway
+carries no rule against a second gateway on its node: it is a Deployment,
+which rolls by starting the new pod beside the old one (a new set of
+identities, or `.StoresSecurity`), and that rule would leave the new pod
+Pending on the one node, with the old one serving the old config. A gateway
+that still carries the rule rolls once by hand: delete its old pod. The node's disk is
 then the only copy, so a lost node loses the buckets, except what the backups
 copied outside. The setting is the install's, never derived from the nodes it
 sees: a cluster of three rendered while one node had joined would keep

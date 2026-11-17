@@ -3626,10 +3626,12 @@ for base in stores-plain registry; do
       && [ "$(sel "$out/$sw" "$sw_v | .global.seaweedfs.enableReplication")" = false ] \
       && [ -z "$(sel "$out/$sw" "$sw_v | .global.seaweedfs.replicationPlacement // \"\"")" ] \
       && [ "$(sel "$out/$sw" "$sw_v | .volume.dataDirs[0].type")" = hostPath ] \
+      && [ -z "$(sel "$out/$sw" "$sw_v | .s3.affinity // \"\"")" ] \
+      && [ "$(sel "$work/$base/$sw" "$sw_v | .s3.affinity" | yq -N -r '.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey')" = kubernetes.io/hostname ] \
       && [ "$(yq -o json -I0 '.spec.sources[0].helm.valuesObject.stores' "$out/$infrared")" = '{"enabled":true,"singleNode":true}' ]; then
-    ok "single node ($base): SeaweedFS 1 master, 1 volume server, 1 filer, 1 S3 gateway, every file once; only its Application, the README and the infrared Application change"
+    ok "single node ($base): SeaweedFS 1 master, 1 volume server, 1 filer, 1 S3 gateway with no rule against a second on its node (its rolls start the new pod beside the old), every file once; only its Application, the README and the infrared Application change"
   else
-    bad "single node ($base): changed '$changed', want '$want'; or SeaweedFS is not one of each with every file once, or stores.singleNode is not carried"
+    bad "single node ($base): changed '$changed', want '$want'; or SeaweedFS is not one of each with every file once, the one S3 gateway keeps the rule against two on a node (or the gateways across the nodes lost it), or stores.singleNode is not carried"
   fi
 done
 render_again k3s "$work/single-node-k3s" -stores-single-node >/dev/null
