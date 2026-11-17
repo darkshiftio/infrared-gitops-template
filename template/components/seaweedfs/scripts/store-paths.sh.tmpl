@@ -138,7 +138,26 @@ printf 'user = "%s:%s"\n' "${S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:-}" "${S3_ATE_SNAPSH
 bucket_of() { local p=${1#/buckets/}; printf '%s' "${p%%/*}"; }
 key_of() { local p=${1#/buckets/}; printf '%s' "${p#*/}"; }
 
-# hash_object <filer path>: "<sha256> <bytes>" of the file, read through S3.
+# Every curl gives up on a connection not made in 10 seconds, the name's
+# lookup included (one hung for 300 seconds on kind), and on a call still
+# running at its --max-time. A call that times out (curl's exit 28) fails as
+# any failed call does: nothing is copied over or deleted, the move's step
+# records failed, and the next run takes it up again where the files are.
+#
+# s3_max_time <bytes>: the --max-time of an S3 read or copy of a file that
+# size, which takes as long as the file: a minute, and a second more for each
+# MiB (1 MiB/s at the least, far below the gateway's pace inside the cluster),
+# so a large blob is not cut off and a small one that stalls gives up in about
+# a minute. A size it cannot read gets an hour.
+s3_max_time() {
+  case "${1:-}" in
+    "" | *[!0-9]*) echo 3600 ;;
+    *) echo $((60 + 10#$1 / 1048576)) ;;
+  esac
+}
+
+# hash_object <filer path> <bytes>: "<sha256> <bytes>" of the file, read
+# through S3; <bytes>, its size as listed, sets the call's time limit.
 hash_object() {
   local bucket key fifo=$tmp/hash.fifo wcpid rc=0
   bucket="$(bucket_of "$1")"
@@ -147,19 +166,24 @@ hash_object() {
   mkfifo "$fifo"
   wc -c <"$fifo" >"$tmp/hash.count" &
   wcpid=$!
-  curl -sS -f --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" "$S3_ENDPOINT/$bucket/$key" 2>"$tmp/hash.err" \
-    | tee "$fifo" | sha256sum >"$tmp/hash.sum" || rc=$?
+  curl -sS -f --connect-timeout 10 --max-time "$(s3_max_time "${2:-}")" --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" \
+    "$S3_ENDPOINT/$bucket/$key" 2>"$tmp/hash.err" | tee "$fifo" | sha256sum >"$tmp/hash.sum" || rc=$?
   wait "$wcpid" || rc=1
   [ "$rc" = 0 ] || return 1
   printf '%s %s\n' "$(cut -d' ' -f1 <"$tmp/hash.sum")" "$(tr -d ' ' <"$tmp/hash.count")"
 }
 
-# copy_object <from path> <to path>: a new copy of the file, never over one:
-# prints copied, or exists when the destination has a file there.
+# copy_object <from path> <to path> <bytes>: a new copy of the file, never
+# over one: prints copied, or exists when the destination has a file there.
+# <bytes>, the source's size, sets the call's time limit: the gateway answers
+# a CopyObject once it has written the whole copy.
 copy_object() {
   local bucket code
   bucket="$(bucket_of "$1")"
-  code="$(curl -sS -o "$tmp/copy.out" -w '%{http_code}' -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" \
+  # A call that times out writes no body: none of an earlier copy's either.
+  : >"$tmp/copy.out"
+  code="$(curl -sS --connect-timeout 10 --max-time "$(s3_max_time "${3:-}")" -o "$tmp/copy.out" -w '%{http_code}' -X PUT \
+    --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" \
     -H "x-amz-copy-source: /$bucket/$(key_of "$1")" -H "If-None-Match: *" \
     "$S3_ENDPOINT/$bucket/$(key_of "$2")" 2>"$tmp/copy.err")" || code=000
   case "$code" in
@@ -501,7 +525,7 @@ copy_move() {
   : >"$tmp/times"
   while IFS=$'\t' read -r p size mtime ns dsize dmtime <&3; do
     if [ "$dsize" = - ]; then
-      if ! r="$(copy_object "$SRC/$p" "$DST/$p")"; then
+      if ! r="$(copy_object "$SRC/$p" "$DST/$p" "$size")"; then
         step "$n" "failed $(now) $p could not be copied: HTTP $(head -c 100 "$tmp/copy.out" | tr -d '\n') $(head -c 100 "$tmp/copy.err")"
         return 0
       fi
@@ -511,7 +535,7 @@ copy_move() {
     if [ "$r" = exists ]; then
       # A file at the destination already: it keeps its data only if it is
       # the source's, and is never written over.
-      if ! hs="$(hash_object "$SRC/$p")" || ! hd="$(hash_object "$DST/$p")"; then
+      if ! hs="$(hash_object "$SRC/$p" "$size")" || ! hd="$(hash_object "$DST/$p" "$dsize")"; then
         step "$n" "failed $(now) $p could not be read: $(head -c 200 "$tmp/hash.err")"
         return 0
       fi
@@ -599,7 +623,7 @@ verify_move() {
       step "$n" "mismatch $(now) $p was modified at $mtime at the source and $dmtime at the destination"
       return 0
     fi
-    if ! hs="$(hash_object "$SRC/$p")" || ! hd="$(hash_object "$DST/$p")"; then
+    if ! hs="$(hash_object "$SRC/$p" "$size")" || ! hd="$(hash_object "$DST/$p" "$dsize")"; then
       step "$n" "failed $(now) $p could not be read: $(head -c 200 "$tmp/hash.err")"
       return 0
     fi
@@ -696,7 +720,7 @@ free_bytes() {
   local id least="" servers=0 all free avail
   printf '{}\n' | grpc "$MASTER_GRPC" master_pb.Seaweed/VolumeList >"$tmp/topology.json" 2>"$tmp/topology.err" || return 1
   for id in $(jq -r '.. | objects | select(has("dataNodeInfos")) | .dataNodeInfos[] | .id' "$tmp/topology.json"); do
-    curl -sS -f -m 60 "http://$id/status" >"$tmp/status.json" 2>"$tmp/status.err" || return 1
+    curl -sS -f --connect-timeout 10 --max-time 60 "http://$id/status" >"$tmp/status.json" 2>"$tmp/status.err" || return 1
     all="$(jq -r '[.DiskStatuses[]?.all // 0] | add // 0 | floor' "$tmp/status.json")"
     free="$(jq -r '[.DiskStatuses[]?.free // 0] | add // 0 | floor' "$tmp/status.json")"
     avail=$((free - all / 10))

@@ -1061,11 +1061,20 @@ own pods to every server: the applier needs no new door. Under
 `.StoresSecurity` it never uses the filer's HTTP, whose tokens it holds no key
 for.
 
+Every `curl` call gives up on a connection not made in 10 seconds, the name's
+lookup included, and on a call still running at its time limit: a minute for
+a volume server's `/status`; for an S3 read or copy, a minute and a second
+more for each MiB of the file, so a large blob is not cut off (an hour for a
+size it cannot read). A call that times out fails as any failed call does:
+the move's step records `failed`, nothing is copied over or deleted, and the
+next run takes it up again.
+
 `scripts/store-applier-test.sh` runs the two scripts as the template renders
 them against a pretend SeaweedFS and API (`scripts/testdata/store-applier`):
 the path rules, the refusals, and every step of a migration, among them that
 a destination file that differs is never written over, that a copy that
 fails or does not match leaves the source and is never deleted, that a stopped
+run resumes, that a call that stalls times out and fails its step and the next
 run resumes, that a delete whose copy changed since its verification deletes
 nothing, and that a journal another migration took stops the run. `make
 verify` runs it. A real SeaweedFS is the proof on kind (P2).

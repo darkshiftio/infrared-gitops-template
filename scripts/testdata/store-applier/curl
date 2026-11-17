@@ -4,10 +4,18 @@
 # servers' /status. FAKE_COPY_CORRUPT (a pattern of keys) writes a copy that
 # differs; FAKE_COPY_FAIL answers 500; FAKE_KILL_AFTER_COPIES kills the run
 # (FAKE_MAIN_PID) after that many copies.
-# shellcheck disable=SC2254 # FAKE_COPY_FAIL and FAKE_COPY_CORRUPT are patterns
+#
+# Every call must carry --connect-timeout and --max-time: one without them
+# would wait for good on a connection that stalls, so the fake refuses it.
+# FAKE_STALL (a pattern of keys): an S3 call on one stalls, and gives up as
+# curl does once its --max-time has passed (exit 28, no body, HTTP 000);
+# with FAKE_STALL_LANDS=true a copy is made all the same, as a gateway that
+# finishes a copy its caller gave up on.
+# shellcheck disable=SC2254 # FAKE_COPY_FAIL, FAKE_COPY_CORRUPT and FAKE_STALL are patterns
 # shellcheck source-path=SCRIPTDIR source=fake-lib.sh
 . "$(dirname "$0")/fake-lib.sh"
 method=GET out=- wfmt="" fail=false config="" url="" copy_source="" none_match=false
+connect_timeout="" max_time=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -sS | -s | -S) ;;
@@ -15,7 +23,9 @@ while [ $# -gt 0 ]; do
     -o) out=$2; shift ;;
     -w) wfmt=$2; shift ;;
     -X) method=$2; shift ;;
-    -m | --aws-sigv4) shift ;;
+    --connect-timeout) connect_timeout=$2; shift ;;
+    -m | --max-time) max_time=$2; shift ;;
+    --aws-sigv4) shift ;;
     -K) config=$2; shift ;;
     -H)
       case "$2" in
@@ -30,15 +40,33 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if ! [[ "$connect_timeout" =~ ^[1-9][0-9]*$ ]] || ! [[ "$max_time" =~ ^[1-9][0-9]*$ ]]; then
+  called "no time limit $method $url"
+  echo "fake curl: $url without --connect-timeout and --max-time, which would wait for good on a stalled connection" >&2
+  exit 2
+fi
 body="$STATE/curl.body.$$"
 : >"$body"
 code=200
+stalled=false
+# timed_out: what curl does once its --max-time has passed.
+timed_out() {
+  rm -f "$body"
+  called "s3 timed out $method $dst after $max_time"
+  echo "curl: (28) Operation timed out after ${max_time}000 milliseconds with 0 bytes received" >&2
+  if [ "$wfmt" = '%{http_code}' ]; then printf '000'; fi
+  exit 28
+}
 case "$url" in
   http://seaweedfs-s3.stores.svc:8333/*)
     # Every S3 call signs with an identity's keys.
     grep -qE '^user = "[^:"]+:[^:"]+"$' "$config" || { echo "fake curl: no S3 keys in $config" >&2; exit 2; }
     key="${url#http://seaweedfs-s3.stores.svc:8333/}"
     dst="/buckets/$key"
+    if [ -n "${FAKE_STALL:-}" ] && case "$dst" in $FAKE_STALL) true ;; *) false ;; esac; then
+      stalled=true
+      if [ "$method" != PUT ] || [ "${FAKE_STALL_LANDS:-}" != true ]; then timed_out; fi
+    fi
     if [ "$method" = GET ]; then
       if [ -f "$STATE/fs$dst" ]; then cat "$STATE/fs$dst" >"$body"; else code=404; fi
       called "s3 get $dst"
@@ -84,6 +112,7 @@ case "$url" in
     exit 2
     ;;
 esac
+if [ "$stalled" = true ]; then timed_out; fi
 if [ "$fail" = true ] && [ "$code" -ge 400 ]; then
   rm -f "$body"
   echo "curl: (22) The requested URL returned error: $code" >&2

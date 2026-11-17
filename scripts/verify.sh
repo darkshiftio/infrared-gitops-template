@@ -258,11 +258,13 @@
 #     three ConfigMaps by name; the token in the sidecar journal alone, the S3
 #     keys and, under mutual TLS, the client certificate in the container weed
 #     alone; inside the stores' fence; only the applier's files change, and
-#     without the stores nothing; the scripts never move or rename a file, and
+#     without the stores nothing; the scripts never move or rename a file,
+#     every curl in them has a connect timeout and a time limit, and
 #     scripts/store-applier-test.sh runs them against a pretend SeaweedFS and
 #     API: nothing deleted before its copy is verified at its new path, a
-#     failed or mismatched copy leaves the source, a stopped run resumes, and
-#     the path rules, purges and log prune as the operator's contract says
+#     failed or mismatched copy leaves the source, a call that stalls times
+#     out and fails its step, a stopped run resumes, and the path rules,
+#     purges and log prune as the operator's contract says
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
@@ -3007,6 +3009,12 @@ bash -n "$ps/store-paths.sh" && bash -n "$ps/store-journal.sh" \
   && [ "$(grep -c -- '-H "If-None-Match: \*"' "$ps/store-paths.sh")" = 1 ] && [ "$(grep -c -- '-X PUT' "$ps/store-paths.sh")" = 1 ] \
   && ok "paths: the applier's scripts parse, copy only with If-None-Match: *, and never move or rename a file (no fs.mv, no rename)" \
   || bad "paths: the applier's scripts move, rename or overwrite"
+# Every curl gives up rather than hang the Job: a connect timeout and a time
+# limit on the line that starts it.
+curls="$(grep -hE '(^|[^A-Za-z])curl -' "$ps/store-paths.sh" "$ps/store-journal.sh" | grep -v '^[[:space:]]*#' || true)"
+[ -n "$curls" ] && ! grep -vqE -- '--connect-timeout 10 --max-time ' <<<"$curls" \
+  && ok "paths: each of the applier's $(grep -c . <<<"$curls") curl calls has a connect timeout and a time limit" \
+  || bad "paths: an applier curl without --connect-timeout 10 --max-time: $(grep -vE -- '--connect-timeout 10 --max-time ' <<<"$curls" | head -n 1)"
 if scripts/store-applier-test.sh "$ps"; then
   ok "paths: scripts/store-applier-test.sh: the applier keeps the owner's rule and the operator's contracts"
 else

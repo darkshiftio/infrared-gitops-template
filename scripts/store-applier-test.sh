@@ -30,6 +30,11 @@
 #   failed-copy      a copy that fails leaves the source
 #   resume           a run stopped mid-copy is taken up again: what was copied
 #                    is kept, the rest copied, then verified
+#   timeout          every curl carries a connect timeout and a time limit
+#                    that grows with the file; a copy or a read that stalls
+#                    times out and fails its step like any failed call,
+#                    nothing deleted, and the next run resumes, keeping a copy
+#                    the gateway finished after the call gave up
 #   changed          a delete whose copy changed after its verification
 #                    deletes nothing
 #   stale            a journal another migration took stops the run
@@ -316,6 +321,39 @@ run_applier || true
   && [ "$(tree_of "$NEW" | grep -v '^./api/')" = "$(tree_of "$WEB" | grep -v '^./api/')" ] && [ "$(tree_of "$WEB")" = "$before" ] \
   && ok "resume: a run stopped after two copies records no outcome; the next keeps those two (the same bytes, given their time), copies the other three, and verifies" \
   || { bad "resume: stopped '$stopped' (exit $rc), then '$(steps 2)', $(grep -c '^s3 copy ' "$S/calls") copies"; show; }
+
+# --- A call that stalls times out, fails its step, and the next run resumes ----------------------
+# A blob of 3 MiB, whose calls get a minute and three seconds; the others a
+# minute. Its copy stalls, though the gateway finishes it after the call gave
+# up; then a read of a copy stalls; then nothing does.
+new_state timeout
+registry_repos
+BIG="$(blob "$WEB" "$(head -c 3145728 /dev/zero | tr '\0' b)" 1700000105)"
+before="$(tree_of "$WEB")"
+journal 20261117T101500Z "$FROM" "$TO" "$MOVES" 2 $'copy 2\ndelete 2\n'
+run_applier FAKE_STALL="$NEW/blobs/sha256/$BIG" FAKE_STALL_LANDS=true || true
+first="$(steps 2)"
+why="$(data infrared-store-moves state.2 | sed -n 2p)"
+copies_first="$(grep -c '^s3 copy ' "$S/calls" || true)"
+journal 20261117T101500Z "$FROM" "$TO" "$MOVES" 3 $'copy 2\n'
+run_applier FAKE_STALL="$NEW/.uploads/u1" || true
+second="$(steps 2)"
+copies_second="$(grep -c '^s3 copy ' "$S/calls" || true)"
+[ "$first" = "copying failed failed" ] && [[ "$why" == *"could not be copied"*"(28) Operation timed out"* ]] \
+  && grep -qxF "s3 timed out PUT $NEW/blobs/sha256/$BIG after 63" "$S/calls" \
+  && [ "$second" = "copying failed failed copying failed" ] && [ "$copies_second" = "$copies_first" ] \
+  && grep -qxF "s3 timed out GET $NEW/.uploads/u1 after 60" "$S/calls" \
+  && [ "$(tree_of "$WEB")" = "$before" ] && ! grep -q '^removed ' "$S/calls" \
+  && ok "timeout: a copy that stalls past its limit (a minute, and a second a MiB) records failed and a delete asked after it deletes nothing; the next run's read that stalls records failed too and copies nothing more; the source untouched" \
+  || { bad "timeout: '$first' ($why), then '$second'"; show; }
+journal 20261117T101500Z "$FROM" "$TO" "$MOVES" 4 $'copy 2\n'
+run_applier || true
+[ "$(steps 2)" = "copying failed failed copying failed copying copied verified" ] \
+  && [ "$(grep -c '^s3 copy ' "$S/calls")" = 6 ] && [ "$(grep -c "^s3 copy $WEB/blobs/sha256/$BIG " "$S/calls")" = 1 ] \
+  && [ "$(tree_of "$NEW" | grep -v '^./api/')" = "$(tree_of "$WEB" | grep -v '^./api/')" ] && [ "$(tree_of "$WEB")" = "$before" ] \
+  && ! grep -q '^no time limit ' "$S/calls" \
+  && ok "timeout: the next run resumes: the copy the gateway finished is kept, not written over, the rest copied once each, and verified; every call had its limits" \
+  || { bad "timeout: the run after: '$(steps 2)', $(grep -c '^s3 copy ' "$S/calls") copies"; show; }
 
 # --- A copy changed after its verification is not deleted ------------------------------------
 new_state changed
