@@ -1246,3 +1246,35 @@ func TestMediaStore(t *testing.T) {
 		}
 	}
 }
+
+// The stores' org layout and the registry's pause (infrared-docs-internal ADR
+// 0087 D2, D7): each loads from the operator's Data by its Go name, as the
+// operator's gitopstemplate.Data names it, absent is off, as an operator from
+// before them leaves them out, and the zero value is left out of the JSON, so
+// a Data file written before them reads the same.
+func TestStoresLayoutFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string][2]bool{
+		`{"clusterName": "c1", "Stores": true, "StoresOrgLayout": true, "RegistryPaused": true}`: {true, true},
+		`{"clusterName": "c1", "Stores": true, "RegistryPaused": true}`:                          {false, true},
+		`{"clusterName": "c1", "Stores": true, "StoresOrgLayout": true}`:                         {true, false},
+		`{"clusterName": "c1"}`: {false, false},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.StoresOrgLayout != want[0] || d.RegistryPaused != want[1] {
+			t.Errorf("%s: loaded StoresOrgLayout %t, RegistryPaused %t, %v; want %v", body, d.StoresOrgLayout, d.RegistryPaused, err, want)
+		}
+	}
+	b, err := json.Marshal(Data{ClusterName: "c1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"StoresOrgLayout", "RegistryPaused"} {
+		if strings.Contains(string(b), `"`+name+`"`) {
+			t.Errorf("the zero Data carries %s: %s", name, b)
+		}
+	}
+}

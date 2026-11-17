@@ -332,6 +332,28 @@ type Data struct {
 	// volume, renders as before the field existed, and an operator leaves it
 	// out of the data.
 	MediaStore string `json:"MediaStore,omitempty"`
+	// StoresOrgLayout is the registry in the stores' org layout
+	// (infrared-docs-internal ADR 0087 D2, D3): the Installation's
+	// status.storage.layout is org, which the operator sets only once a
+	// migration has copied, verified and deleted every repository's files into
+	// the layout, never from the chart's stores.orgLayout.enabled. With the
+	// stores and the registry, zot-base's S3 driver has no rootdirectory, so
+	// Zot's root is the bucket's, and Zot's pods carry an annotation naming it,
+	// so a change of root rolls them; the platform's own repositories are
+	// platform/images/kpack-builder and platform/images/substrate/<name>; and
+	// Substrate's test actors are the ActorTemplates counter-v2 and
+	// sandbox-v2, located at s3://ate-snapshots/platform/snapshots/ (see "The
+	// stores' org layout"). False, the default, renders as before the field
+	// existed, and an operator leaves it out of the data.
+	StoresOrgLayout bool `json:"StoresOrgLayout,omitempty"`
+	// RegistryPaused stops Zot while a migration between the layouts copies,
+	// verifies and deletes its files, and while its root changes: with the
+	// stores and the registry, Zot's Application renders replicaCount 0, and
+	// nothing else changes. The operator sets it from the migration's phase in
+	// the Installation's status.storage (Pausing, Copying and Rooting). False,
+	// the default, renders as before the field existed, and an operator leaves
+	// it out of the data.
+	RegistryPaused bool `json:"RegistryPaused,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -692,6 +714,10 @@ func main() {
 		"MetricsStorage: the size of the install's metrics store, VMSingle's claim or on k3s with the stores its emptyDir, e.g. 40Gi (INFRARED_METRICS_STORAGE; empty: 10Gi)")
 	flag.StringVar(&d.MediaStore, "media-store", "",
 		`MediaStore: "" (the chart's volume, as before), "both" or "objectStore": the API's videos and pictures in SeaweedFS's bucket media (INFRARED_MEDIA_STORE)`)
+	flag.BoolVar(&d.StoresOrgLayout, "stores-org-layout", false,
+		"StoresOrgLayout: the registry in the stores' org layout, Zot at the bucket's root and the platform's repositories under platform/images/ (the Installation's status.storage.layout org)")
+	flag.BoolVar(&d.RegistryPaused, "registry-paused", false,
+		"RegistryPaused: Zot stopped, no replica, while a migration between the stores' layouts moves its files")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -785,10 +811,12 @@ func mergeDataFile(d *Data, path string) error {
 		"argocd-restrict-default-project": func() {
 			d.ArgoCDRestrictDefaultProject = explicit.ArgoCDRestrictDefaultProject
 		},
-		"build-caps":      func() { d.BuildCaps = explicit.BuildCaps },
-		"tenant-storage":  func() { d.TenantStorage = explicit.TenantStorage },
-		"metrics-storage": func() { d.MetricsStorage = explicit.MetricsStorage },
-		"media-store":     func() { d.MediaStore = explicit.MediaStore },
+		"build-caps":        func() { d.BuildCaps = explicit.BuildCaps },
+		"tenant-storage":    func() { d.TenantStorage = explicit.TenantStorage },
+		"metrics-storage":   func() { d.MetricsStorage = explicit.MetricsStorage },
+		"media-store":       func() { d.MediaStore = explicit.MediaStore },
+		"stores-org-layout": func() { d.StoresOrgLayout = explicit.StoresOrgLayout },
+		"registry-paused":   func() { d.RegistryPaused = explicit.RegistryPaused },
 	}
 	for name, apply := range overrides {
 		if set[name] {

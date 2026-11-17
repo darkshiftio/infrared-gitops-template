@@ -22,7 +22,7 @@
 [[- end ]]
 #
 [[- if not $testActors ]]
-# Substrate's test actors (the ActorTemplates counter-v1 and sandbox-v1, and
+# Substrate's test actors (the ActorTemplates counter-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]] and sandbox-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]], and
 # their images) are off: the install names substrate-test-actors among the
 # components it leaves out, as the Infrared chart does unless its value
 # substrate.testActors is true. images.yaml and templates.yaml hold no objects.

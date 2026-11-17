@@ -114,6 +114,15 @@ METRICS_STORAGE ?=
 # infrared-docs-internal ADR 0087). E.g.
 # make render STORES=true MEDIA_STORE=both
 MEDIA_STORE ?=
+# STORES_ORG_LAYOUT: true renders the registry in the stores' org layout (the
+# Installation's status.storage.layout org): Zot at the bucket's root, the
+# platform's repositories under platform/images/, and Substrate's test actors
+# counter-v2 and sandbox-v2; REGISTRY_PAUSED: true stops Zot while a migration
+# between the layouts moves its files (as the operator's StoresOrgLayout and
+# RegistryPaused; infrared-docs-internal ADR 0087 D2, D7). E.g.
+# make render STORES=true REGISTRY=10.43.0.50:5000 STORES_ORG_LAYOUT=true
+STORES_ORG_LAYOUT ?= false
+REGISTRY_PAUSED   ?= false
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -133,7 +142,7 @@ render:
 		-admission-policies=$(ADMISSION_POLICIES) -deny-logging=$(DENY_LOGGING) \
 		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT) \
 		-build-caps '$(BUILD_CAPS)' -tenant-storage '$(TENANT_STORAGE)' -metrics-storage "$(METRICS_STORAGE)" \
-		-media-store "$(MEDIA_STORE)"
+		-media-store "$(MEDIA_STORE)" -stores-org-layout=$(STORES_ORG_LAYOUT) -registry-paused=$(REGISTRY_PAUSED)
 
 ## verify: the gate CI runs
 verify:

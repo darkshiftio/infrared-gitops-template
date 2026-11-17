@@ -10,7 +10,10 @@
 #      mounted into crane pods in builds, so its password never leaves the
 #      cluster), a copy of the source image into <org>/registry-check is
 #      accepted, and copies into platform/ and into another organization's
-#      path are refused;
+#      path are refused. In the stores' org layout (the Installation's
+#      status.storage.layout org, infrared-docs-internal ADR 0087 D2) the copy
+#      goes to <org>/images/registry-check, and one under <org>/ outside its
+#      kinds is refused too;
 #   2. the copy answers by the same digest after every Zot pod is deleted and
 #      replaced;
 #   3. as Zot's admin user infrared, which the operator deletes an
@@ -22,7 +25,8 @@
 #      anyone (tenancy.registryPulls).
 #
 # The source image defaults to Substrate's counter demo in the registry, by the
-# digest in scripts/substrate-images.json. Step 3 removes the copy; the crane
+# digest in scripts/substrate-images.json, under platform/substrate/ (in the
+# layout platform/images/substrate/). Step 3 removes the copy; the crane
 # pods are removed unless KEEP=1.
 # Needs: kubectl, jq, curl. Writes to the namespaces builds and registry only.
 # =============================================================================
@@ -45,17 +49,21 @@ k get --raw /readyz >/dev/null 2>&1 || die "context $CTX does not answer"
 REG="$(k -n registry get service zot -o jsonpath='{.spec.clusterIP}:{.spec.ports[0].port}' 2>/dev/null)" ||
   die "no registry on $CTX (registry/zot)"
 k -n builds get secret "registry-push-$ORG" >/dev/null 2>&1 || die "no builds/registry-push-$ORG on $CTX"
+# The stores' org layout names every repository <org>/<kind>/<name>.
+layout="$(k get installations.infrared.darkshift.io infrared -o jsonpath='{.status.storage.layout}' 2>/dev/null || true)"
+kind=""
+[ "$layout" = org ] && kind=images/
 if [ -n "${3:-}" ]; then
   SRC="$3"
 else
   ref="$(jq -r '.images.counter.ref' "$here/substrate-images.json")"
-  SRC="$REG/platform/substrate/counter@${ref##*@}"
+  SRC="$REG/platform/${kind}substrate/counter@${ref##*@}"
 fi
 case "$SRC" in *@sha256:*) ;; *) die "the source image must be named by digest: $SRC" ;; esac
 digest="${SRC##*@}"
 repo="${SRC#"$REG"/}"
 repo="${repo%@*}"
-copy="$ORG/registry-check"
+copy="$ORG/${kind}registry-check"
 
 pf=""
 cleanup() {
@@ -130,13 +138,18 @@ log "1. pushes as the organization's user $ORG, from $SRC"
 r="$(crane "registry-check-own-$stamp" copy --insecure "$SRC" "$REG/$copy:check")"
 echo "  into $copy: $r"
 [ "${r%% *}" = 0 ] || fail=1
-for path in platform "not-$ORG"; do
-  r="$(crane "registry-check-$path-$stamp" copy --insecure "$SRC" "$REG/$path/registry-check:check")"
-  echo "  into $path/registry-check: $r"
+refused="platform/${kind}registry-check not-$ORG/${kind}registry-check"
+# In the layout an org writes only under its kinds.
+[ -n "$kind" ] && refused="$refused $ORG/registry-check"
+n=0
+for target in $refused; do
+  n=$((n + 1))
+  r="$(crane "registry-check-refused-$n-$stamp" copy --insecure "$SRC" "$REG/$target:check")"
+  echo "  into $target: $r"
   [ "${r%% *}" != 0 ] || fail=1
 done
-[ "$fail" = 0 ] || die "step 1: want the copy into $copy accepted and the other two refused"
-echo "  ok    $ORG writes under $ORG/ only"
+[ "$fail" = 0 ] || die "step 1: want the copy into $copy accepted and the copies into $refused refused"
+echo "  ok    $ORG writes under $ORG/${kind} only"
 
 log "2. the copy outlives the registry's pod"
 before="$(crane "registry-check-before-$stamp" digest --insecure "$REG/$copy:check")"
@@ -195,4 +208,4 @@ echo "  $repo: $((n - bad)) of $n blobs answer"
 [ "$bad" = 0 ] || die "step 3: a blob of $repo went with $ORG's copy"
 echo "  ok    $ORG's copy is gone, and $repo answers with every blob"
 
-log "PASS: the registry keeps $ORG to $ORG/, an image outlives the registry's pod, and deleting $ORG's image leaves the rest, on $CTX"
+log "PASS: the registry keeps $ORG to $ORG/${kind}, an image outlives the registry's pod, and deleting $ORG's image leaves the rest, on $CTX"

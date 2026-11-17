@@ -67,14 +67,23 @@ spec:
             repository: ghcr.io/project-zot/zot
             tag: "v2.1.21@sha256:6b69512c00dceaad05b1144e6079aac6aa7309d7fd200f9947ecb1de09cf48c8"
             pullPolicy: IfNotPresent
-          replicaCount: 1
+          replicaCount: [[ if .RegistryPaused ]]0[[ else ]]1[[ end ]]
           strategy:
             type: Recreate
           # Zot reads http.readTimeout and http.writeTimeout from
           # components/zot/base.yaml only when it starts: change this with
           # them, so the pod rolls.
+[[- if .StoresOrgLayout ]]
+          # It reads its storage root then too: the stores' org layout keeps
+          # every repository at the bucket's root (infrared-docs-internal ADR
+          # 0087 D2), and the annotation naming it rolls the pod when the root
+          # changes, either way.
+[[- end ]]
           podAnnotations:
             infrared.darkshift.io/http-timeouts: read 15m write 15m
+[[- if .StoresOrgLayout ]]
+            infrared.darkshift.io/storage-root: s3://registry/
+[[- end ]]
           # The chart's default is NodePort.
           service:
             type: ClusterIP

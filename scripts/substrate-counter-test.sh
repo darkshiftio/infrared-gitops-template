@@ -7,7 +7,8 @@
 # the policy in components/substrate/network-policies.yaml admits: a Job in
 # ate-system labelled infrared.darkshift.io/substrate-client. It
 #
-#   1. creates a counter actor from the template counter-v1 in the atespace
+#   1. creates a counter actor from the template counter-v1 (counter-v2 in
+#      the stores' org layout, test_template in substrate-lib.sh) in the atespace
 #      platform, and sends it three requests through the router: both its
 #      counters, one in memory and one on disk, go 1, 2, 3;
 #   2. suspends it: a Full snapshot to SeaweedFS's bucket ate-snapshots, listed
@@ -44,7 +45,8 @@ case "$PHASE" in
 esac
 # shellcheck source-path=SCRIPTDIR source=substrate-lib.sh
 . "$(dirname "$0")/substrate-lib.sh"
-preflight counter-v1
+template="$(test_template counter)"
+preflight "$template"
 
 job="substrate-counter-test-$(date -u +%Y%m%d-%H%M%S)"
 start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -110,8 +112,8 @@ hit() { # hit <n>: one POST through the router; HTTP 200 and both counters at n
 
 W1=""
 if [ "$PHASE" != resume ]; then
-echo "actor $A/$ACT, from the template counter-v1"
-printf "{\"actor\":{\"metadata\":{\"atespace\":\"%s\",\"name\":\"%s\"},\"actorTemplate\":{\"atespace\":\"%s\",\"name\":\"counter-v1\"}}}" "$A" "$ACT" "$A" | ate CreateActor >/dev/null
+echo "actor $A/$ACT, from the template $TEMPLATE"
+printf "{\"actor\":{\"metadata\":{\"atespace\":\"%s\",\"name\":\"%s\"},\"actorTemplate\":{\"atespace\":\"%s\",\"name\":\"%s\"}}}" "$A" "$ACT" "$A" "$TEMPLATE" | ate CreateActor >/dev/null
 for n in 1 2 3; do hit "$n"; done
 W1="$(actor | jq -r ".status.workerAssignment.workerPod // empty")"
 check "the actor runs on a worker ($W1)" [ -n "$W1" ]
@@ -159,6 +161,7 @@ echo "RESULT {\"actor\": \"$A/$ACT\", \"worker_before\": \"$W1\", \"worker_after
 rc=0
 client_job "$job" "PHASE=$PHASE
 FIXED_ACT=$ACTOR
+TEMPLATE=$template
 $script" || rc=$?
 
 log "atelet's timings for this run"

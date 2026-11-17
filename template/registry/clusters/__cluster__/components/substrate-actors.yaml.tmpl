@@ -9,7 +9,7 @@
 # the WorkerPool platform in the namespace ate-workers, three warm gVisor
 # workers; a Sync hook that copies the counter demo's image and the test
 # actor's into the registry inside the cluster ([[ .Registry ]], under
-# platform/substrate/), where atelet pulls them; and a Sync hook that makes the
+# platform/[[ if .StoresOrgLayout ]]images/[[ end ]]substrate/), where atelet pulls them; and a Sync hook that makes the
 # atespace platform and its ActorTemplates, then waits for each one's golden
 # snapshot. Wave 23, after the control plane (22).
 #
@@ -20,7 +20,7 @@
 # the WorkerPool platform in the namespace ate-workers, three warm gVisor
 # workers. Wave 23, after the control plane (22).
 #
-# Substrate's test actors, the ActorTemplates counter-v1 and sandbox-v1 that the
+# Substrate's test actors, the ActorTemplates counter-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]] and sandbox-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]] that the
 # counter test and the fence check (scripts/substrate-*.sh in the template) run
 # against, are off: the Installation names substrate-test-actors among its
 # disabled components, as the Infrared chart does unless its value

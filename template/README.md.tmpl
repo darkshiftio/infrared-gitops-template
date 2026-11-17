@@ -6,6 +6,8 @@
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 [[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
 [[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey (not $tunnel) -]]
+[[- $layout := and .Stores .Registry .StoresOrgLayout -]]
+[[- $actorsV := "v1" ]][[ if $layout ]][[ $actorsV = "v2" ]][[ end -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -138,7 +140,7 @@ products/                  yours: one directory per product (see "Products")
 | 19 | `stores-credentials` | ClusterSecretStore `infrared-stores`: the stores' credentials, each by name, for the namespaces that use them |
 [[- end ]]
 [[- if not (contains " zot " $disabled) ]]
-| 20 | `zot` | Zot, the registry inside the cluster, at `[[ .Registry ]]` (namespace `registry`), every layer in SeaweedFS's bucket `registry` |
+| 20 | `zot` | Zot, the registry inside the cluster, at `[[ .Registry ]]` (namespace `registry`), every layer in SeaweedFS's bucket `registry`[[ if $layout ]], at its root: each repository is `<org>/<kind>/<name>`, the stores' org layout[[ end ]] |
 [[- end ]]
 [[- if .SubstrateCapable ]]
 [[- if not (contains " substrate-crds " $disabled) ]]
@@ -152,9 +154,9 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 [[- if not (contains " substrate-actors " $disabled) ]]
 [[- if $testActors ]]
-| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`), the actor images copied to `[[ .Registry ]]/platform/substrate/`, and the ActorTemplates `counter-v1` and `sandbox-v1` in the atespace `platform` |
+| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`), the actor images copied to `[[ .Registry ]]/platform/[[ if $layout ]]images/[[ end ]]substrate/`, and the ActorTemplates `counter-[[ $actorsV ]]` and `sandbox-[[ $actorsV ]]` in the atespace `platform`[[ if $layout ]], their snapshots under `platform/snapshots/` in the bucket `ate-snapshots`[[ end ]] |
 [[- else ]]
-| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`). Substrate's test actors, the ActorTemplates `counter-v1` and `sandbox-v1`, are off: the Installation names `substrate-test-actors` among its disabled components, as the Infrared chart does unless its value `substrate.testActors` is true |
+| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`). Substrate's test actors, the ActorTemplates `counter-[[ $actorsV ]]` and `sandbox-[[ $actorsV ]]`, are off: the Installation names `substrate-test-actors` among its disabled components, as the Infrared chart does unless its value `substrate.testActors` is true |
 [[- end ]]
 [[- end ]]
 [[- end ]]

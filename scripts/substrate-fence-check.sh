@@ -13,7 +13,8 @@
 #      Kubernetes API, so its network works;
 #   2. a pod in ate-workers, the namespace the worker pods run in: what an actor
 #      that broke out of its sandbox would have;
-#   3. inside the test actor: a sandbox-v1 actor in the atespace platform runs
+#   3. inside the test actor: a sandbox-v1 actor (sandbox-v2 in the stores' org
+#      layout, test_template in substrate-lib.sh) in the atespace platform runs
 #      the same calls, sent to it through the router from a Job in ate-system
 #      (a place the policy admits, which also shows the API and the router
 #      answer). An actor's traffic leaves its sandbox only through the egress
@@ -34,7 +35,8 @@ set -euo pipefail
 CTX="${1:?usage: scripts/substrate-fence-check.sh <kube context> [organization namespace]}"
 # shellcheck source-path=SCRIPTDIR source=substrate-lib.sh
 . "$(dirname "$0")/substrate-lib.sh"
-preflight sandbox-v1
+template="$(test_template sandbox)"
+preflight "$template"
 
 org_ns="${2:-$(k get namespaces -l infrared.darkshift.io/org -o jsonpath='{.items[0].metadata.name}')}"
 [ -n "$org_ns" ] || die "no organization's namespace (label infrared.darkshift.io/org) on $CTX: name one"
@@ -123,14 +125,14 @@ probe "$org_ns" || fails=$((fails + 1))
 log "2. from ate-workers, the workers' namespace"
 probe ate-workers || fails=$((fails + 1))
 
-log "3. from inside the test actor (a sandbox-v1 actor, asked through the router from ate-system)"
+log "3. from inside the test actor (a $template actor, asked through the router from ate-system)"
 client_account
 # shellcheck disable=SC2016 # expanded in the Job's shell, not here
 script='
 A=platform
 ACT="fence-$(date -u +%Y%m%d-%H%M%S)"
 trap "remove_actor \"\$A\" \"\$ACT\"" EXIT
-printf "{\"actor\":{\"metadata\":{\"atespace\":\"%s\",\"name\":\"%s\"},\"actorTemplate\":{\"atespace\":\"%s\",\"name\":\"sandbox-v1\"}}}" "$A" "$ACT" "$A" | ate CreateActor >/dev/null
+printf "{\"actor\":{\"metadata\":{\"atespace\":\"%s\",\"name\":\"%s\"},\"actorTemplate\":{\"atespace\":\"%s\",\"name\":\"%s\"}}}" "$A" "$ACT" "$A" "$TEMPLATE" | ate CreateActor >/dev/null
 echo "  the actor $A/$ACT, made through the API from here"
 # What the actor runs: each call refused unless it got an HTTP answer. busybox
 # wget says "server returned error" when one came back with an error status.
@@ -161,7 +163,8 @@ for t in api.ate-system.svc.cluster.local:443 atenet-router.ate-system.svc.clust
 done
 exit "$rc"
 '
-client_job "$job" "$script" || fails=$((fails + 1))
+client_job "$job" "TEMPLATE=$template
+$script" || fails=$((fails + 1))
 
 if [ "$fails" -eq 0 ]; then
   log "PASS: Substrate's API and router refuse $org_ns, ate-workers and the inside of an actor, on $CTX"

@@ -105,7 +105,7 @@ patches:
   # the registry inside the cluster. atelet pulls images itself, without a
   # login and without the node's registry mirrors: no GCP credentials, and
   # every image named on a localhost or loopback registry (a template names
-  # localhost/platform/substrate/<image>@sha256:...) is pulled from
+  # localhost/platform/[[ if .StoresOrgLayout ]]images/[[ end ]]substrate/<image>@sha256:...) is pulled from
   # [[ .Registry ]] instead, over plain HTTP. The args are upstream's list with
   # those two changed: a patch replaces the whole list.
   - target:

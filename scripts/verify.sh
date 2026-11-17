@@ -241,6 +241,17 @@
 #     8333. Against the store volume only those files change, the infrared
 #     Application never carries it, without the stores nothing changes, and
 #     hack/render refuses any other value
+#   - the stores' org layout and the registry's pause (StoresOrgLayout and
+#     RegistryPaused, infrared-docs-internal ADR 0087 D2, D3, D7): with the
+#     stores and the registry, the layout renders zot-base with no
+#     rootdirectory and nothing else of its config changed, Zot's pods
+#     annotated with their root, the builder and the actor images under
+#     platform/images/, the anonymous read of pulls by identity following
+#     them, and the test actors counter-v2 and sandbox-v2 by the same digests,
+#     their snapshots at s3://ate-snapshots/platform/snapshots/, the hook's
+#     Job unchanged; the pause renders Zot's replicaCount 0 and nothing else;
+#     against both off only those files change, and without the stores and
+#     the registry neither changes anything
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
@@ -2745,6 +2756,123 @@ mo_store="$work/media-only/components/stores-credentials/store.yaml"
   && kubeconform -strict -ignore-missing-schemas -summary "$work/media-only-credentials.yaml" >/dev/null \
   && ok "media-only: with the stores alone, stores-credentials renders for the API's keys, and hands out nothing else" \
   || bad "media-only: with the stores alone, stores-credentials does not render for the API's keys alone"
+
+# --- The stores' org layout and the registry's pause (ADR 0087 D2, D3, D7) -----------
+# StoresOrgLayout (the Installation's status.storage.layout org, which the
+# operator sets only once a migration has copied, verified and deleted every
+# repository's files into the layout) renders the registry at the bucket's
+# root: zot-base's S3 driver has no rootdirectory key at all, and nothing else
+# of zot-base changes but its comment and, with RegistryPulls, the test actors'
+# anonymous read, which follows their images to platform/images/substrate/;
+# Zot's pods carry the annotation infrared.darkshift.io/storage-root, so a
+# change of root rolls them; the builder is pushed to
+# platform/images/kpack-builder; Substrate's test actors are the ActorTemplates
+# counter-v2 and sandbox-v2, their images on localhost under
+# platform/images/substrate/ by the same digests, copied there, and their
+# snapshots at s3://ate-snapshots/platform/snapshots/, with the hook's Job as it
+# was, so it never deletes the -v1 templates (the operator does, once their
+# snapshots are copied and verified). RegistryPaused (a migration's Pausing,
+# Copying and Rooting phases) renders Zot with replicaCount 0 and changes
+# nothing else, byte for byte. Without the stores and the registry neither
+# changes anything.
+"$work/render" -out "$work/layout-alone" -cluster demo -flavor k3s -build-registry "" -stores-org-layout -registry-paused >/dev/null
+"$work/render" -out "$work/layout-stores" -cluster demo-sp -flavor k3s -build-registry "" -stores -stores-org-layout -registry-paused >/dev/null
+[ -z "$(d3_diff "$work/k3s" "$work/layout-alone")" ] && [ -z "$(d3_diff "$work/stores-plain" "$work/layout-stores")" ] \
+  && ok "layout-alone: without the stores and the registry, the layout and the pause change nothing" \
+  || bad "layout-alone: without the registry, the layout or the pause change '$(d3_diff "$work/k3s" "$work/layout-alone") $(d3_diff "$work/stores-plain" "$work/layout-stores")'"
+# The one install's shape (Substrate with its test actors, builds to the
+# registry), against pulls-open, the same with both fields off.
+yq -p json -o json '. + {"StoresOrgLayout": true}' "$work/substrate.json" >"$work/layout.json"
+yq -p json -o json '. + {"RegistryPaused": true}' "$work/substrate.json" >"$work/paused.json"
+yq -p json -o json '. + {"StoresOrgLayout": true, "RegistryPaused": true}' "$work/substrate.json" >"$work/layout-paused.json"
+for v in layout paused layout-paused; do
+  "$work/render" -out "$work/$v" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/$v.json" >/dev/null
+done
+want_layout="README.md components/builds/README.md components/builds/builder.yaml components/substrate/kustomization.yaml"
+want_layout="$want_layout components/substrate-actors/images.yaml components/substrate-actors/templates.yaml components/zot/base.yaml"
+want_layout="$want_layout registry/clusters/demo-pl/components/substrate-actors.yaml registry/clusters/demo-pl/components/zot.yaml"
+[ "$(d3_diff "$work/pulls-open" "$work/layout")" = "$(words "$want_layout")" ] \
+  && ok "layout: renders what the layout off does, but $want_layout" \
+  || bad "layout: differs from the layout off in '$(d3_diff "$work/pulls-open" "$work/layout")', want '$want_layout'"
+zot_app="registry/clusters/demo-pl/components/zot.yaml"
+zv='.spec.sources[] | select(.chart == "zot") | .helm.valuesObject'
+# replicaCount set back to 1 makes the paused Application today's, and the
+# files differ in that line alone.
+paused_lines() { { diff "$1/$zot_app" "$2/$zot_app" || true; } | grep -E '^[<>]' | tr '\n' '|'; }
+[ "$(d3_diff "$work/pulls-open" "$work/paused")" = "$zot_app" ] \
+  && [ "$(paused_lines "$work/pulls-open" "$work/paused")" = "<           replicaCount: 1|>           replicaCount: 0|" ] \
+  && [ "$(d3_diff "$work/layout" "$work/layout-paused")" = "$zot_app" ] \
+  && [ "$(paused_lines "$work/layout" "$work/layout-paused")" = "<           replicaCount: 1|>           replicaCount: 0|" ] \
+  && [ "$(sel "$work/paused/$zot_app" "$zv | .replicaCount")" = 0 ] \
+  && ok "paused: Zot's Application renders replicaCount 0 and nothing else changes, with the layout or without" \
+  || bad "paused: the pause changes more than Zot's replicaCount: $(d3_diff "$work/pulls-open" "$work/paused") $(paused_lines "$work/pulls-open" "$work/paused")"
+# zot-base: today's config.json without rootdirectory, byte for byte as JSON.
+zb_config() { sel "$1/components/zot/base.yaml" 'select(.kind == "ConfigMap" and .metadata.name == "zot-base") | .data["config.json"]'; }
+[ "$(zb_config "$work/layout" | jq -c '.storage.storageDriver | has("rootdirectory")')" = false ] \
+  && [ "$(zb_config "$work/pulls-open" | jq -c -S 'del(.storage.storageDriver.rootdirectory)')" = "$(zb_config "$work/layout" | jq -c -S .)" ] \
+  && [ "$(zb_config "$work/pulls-open" | jq -r '.storage.storageDriver.rootdirectory')" = /zot ] \
+  && ok "layout: zot-base keeps Zot's repositories at the bucket's root, its S3 driver with no rootdirectory, and nothing else of the config changes" \
+  || bad "layout: zot-base's config is not today's without the rootdirectory: $(zb_config "$work/layout" | jq -c .storage.storageDriver)"
+# Zot's Application: the annotation naming the root, nothing else of its values.
+[ "$(sel "$work/layout/$zot_app" "$zv | .podAnnotations[\"infrared.darkshift.io/storage-root\"]")" = "s3://registry/" ] \
+  && [ -z "$(sel "$work/pulls-open/$zot_app" "$zv | .podAnnotations[\"infrared.darkshift.io/storage-root\"] // \"\"")" ] \
+  && [ "$(yq -o json -I0 "$zv | del(.podAnnotations[\"infrared.darkshift.io/storage-root\"])" "$work/layout/$zot_app")" \
+    = "$(yq -o json -I0 "$zv" "$work/pulls-open/$zot_app")" ] \
+  && ok "layout: Zot's pods carry the annotation naming the root, s3://registry/, so a change of root rolls them, and nothing else of Zot's values changes" \
+  || bad "layout: Zot's pod annotation for its root is wrong, or other values changed"
+# The platform's own names: the builder, and the actors' images copied by digest.
+lay_builds="$work/layout/components/builds/builder.yaml"
+lay_sa="$work/layout/components/substrate-actors"
+[ "$(sel "$lay_builds" 'select(.kind == "ClusterBuilder") | .spec.tag')" = "$zot_registry/platform/images/kpack-builder" ] \
+  && [ "$(sel "$work/pulls-open/components/builds/builder.yaml" 'select(.kind == "ClusterBuilder") | .spec.tag')" = "$zot_registry/platform/kpack-builder" ] \
+  && ok "layout: the builder is pushed to $zot_registry/platform/images/kpack-builder" \
+  || bad "layout: the ClusterBuilder's tag is $(sel "$lay_builds" 'select(.kind == "ClusterBuilder") | .spec.tag')"
+lay_copies="$(sel "$lay_sa/images.yaml" 'select(.kind == "Job" and .metadata.name == "substrate-images") | .spec.template.spec.initContainers[] | select(.args[0] == "copy") | .args[1] + " " + .args[2]')"
+old_copies="$(sel "$work/pulls-open/components/substrate-actors/images.yaml" 'select(.kind == "Job" and .metadata.name == "substrate-images") | .spec.template.spec.initContainers[] | select(.args[0] == "copy") | .args[1] + " " + .args[2]')"
+lay_check="$(sel "$lay_sa/images.yaml" 'select(.kind == "Job" and .metadata.name == "substrate-images") | .spec.template.spec.containers[0].command[2]')"
+[ -n "$lay_copies" ] && [ "$lay_copies" = "$(sed 's#/platform/substrate/#/platform/images/substrate/#' <<<"$old_copies")" ] \
+  && [ "$(grep -c '/platform/images/substrate/' <<<"$lay_check")" = 2 ] && ! grep -q '/platform/substrate/' <<<"$lay_check" \
+  && ok "layout: the actor images are copied to $zot_registry/platform/images/substrate/ by the same tags and digests, and checked there" \
+  || bad "layout: the actor images are not copied to platform/images/substrate/: $lay_copies"
+# The test actors: version 2, their images by the same digests on localhost
+# under platform/images/substrate/, their snapshots under platform/snapshots/.
+tcm='select(.kind == "ConfigMap" and .metadata.name == "substrate-actor-templates")'
+v2_fail=""
+for name in counter sandbox; do
+  old="$(sel "$work/pulls-open/components/substrate-actors/templates.yaml" "$tcm | .data[\"$name-v1.json\"]")"
+  new="$(sel "$lay_sa/templates.yaml" "$tcm | .data[\"$name-v2.json\"]")"
+  [ -n "$old" ] && [ -n "$new" ] \
+    && [ "$(jq -r '.actorTemplate.metadata.name' <<<"$new")" = "$name-v2" ] \
+    && [ "$(jq -r '.actorTemplate.snapshotConfig.storageLocation' <<<"$new")" = "s3://ate-snapshots/platform/snapshots/" ] \
+    && [ "$(jq -r '.actorTemplate.containers[0].image' <<<"$new")" \
+      = "$(jq -r '.actorTemplate.containers[0].image | sub("^localhost/platform/substrate/"; "localhost/platform/images/substrate/")' <<<"$old")" ] \
+    && [ "$(jq -c -S 'del(.actorTemplate.metadata.name, .actorTemplate.snapshotConfig.storageLocation, .actorTemplate.containers[0].image)' <<<"$new")" \
+      = "$(jq -c -S 'del(.actorTemplate.metadata.name, .actorTemplate.snapshotConfig.storageLocation, .actorTemplate.containers[0].image)' <<<"$old")" ] \
+    || v2_fail="$v2_fail $name"
+done
+[ -z "$v2_fail" ] && [ "$(sorted "$lay_sa/templates.yaml" "$tcm | .data | keys | .[]")" = "counter-v2.json sandbox-v2.json" ] \
+  && [ "$(yq -o json -I0 'select(.kind == "Job")' "$lay_sa/templates.yaml")" \
+    = "$(yq -o json -I0 'select(.kind == "Job")' "$work/pulls-open/components/substrate-actors/templates.yaml")" ] \
+  && ok "layout: the test actors are counter-v2 and sandbox-v2, their images on localhost under platform/images/substrate/ by the same digests, their snapshots at s3://ate-snapshots/platform/snapshots/, and the hook's Job is as it was: it deletes no -v1 template" \
+  || bad "layout: the v2 test actors are wrong:$v2_fail"
+# With RegistryPulls, the anonymous read follows the actors' images, and the
+# rule is the only other change to zot-base.
+yq -p json -o json '. + {"StoresOrgLayout": true}' "$work/pulls.json" >"$work/pulls-layout.json"
+"$work/render" -out "$work/pulls-layout" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/pulls-layout.json" >/dev/null
+[ "$(zb_rules "$work/pulls-layout" '.http.accessControl.repositories | keys')" = '["**","platform/**","platform/images/substrate/**"]' ] \
+  && [ "$(zb_config "$work/pulls" | jq -c -S 'del(.storage.storageDriver.rootdirectory) | .http.accessControl.repositories |= with_entries(if .key == "platform/substrate/**" then .key = "platform/images/substrate/**" else . end)')" \
+    = "$(zb_config "$work/pulls-layout" | jq -c -S .)" ] \
+  && [ "$(d3_diff "$work/pulls" "$work/pulls-layout")" = "$(words "$want_layout")" ] \
+  && ok "pulls-layout: with pulls by identity, anyone reads platform/images/substrate/ alone, where the actors' images are, and nothing else of zot-base changes but the root" \
+  || bad "pulls-layout: zot-base's rules are $(zb_rules "$work/pulls-layout" '.http.accessControl.repositories | keys')"
+for c in zot builds substrate-actors; do
+  if kubectl kustomize "$work/layout/components/$c" >"$work/layout-$c.yaml" \
+    && kubeconform -strict -ignore-missing-schemas -summary "$work/layout-$c.yaml" >/dev/null; then
+    ok "layout: components/$c builds and passes kubeconform"
+  else
+    bad "layout: components/$c does not build or pass kubeconform"
+  fi
+done
 
 # --- The rest of the tenancy (ADR 0066 D4, D5, D6, D10) ---------------------------
 # TenantPods and TenantQuotas (the operator's INFRARED_TENANT_PODS and

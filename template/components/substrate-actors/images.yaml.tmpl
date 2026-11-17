@@ -1,4 +1,6 @@
 [[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
+[[- /* The stores' org layout (StoresOrgLayout, ADR 0087 D2): the actor images under platform/images/substrate/. */ -]]
+[[- $repo := "platform/substrate" ]][[ if and .Stores .Registry .StoresOrgLayout ]][[ $repo = "platform/images/substrate" ]][[ end ]]
 [[- if and .Stores .SubstrateCapable .Registry $testActors -]]
 # =============================================================================
 # The actor images, copied into the registry inside the cluster.
@@ -7,7 +9,7 @@
 # registry mirrors, so it cannot pull the private images on
 # [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]. This Sync
 # hook copies the two the platform's templates run (templates.yaml) from there
-# into [[ .Registry ]], under platform/substrate/, as the registry's user platform
+# into [[ .Registry ]], under [[ $repo ]]/, as the registry's user platform
 # (the operator's Secret registry/platform-push), with crane:
 #
 #   counter  Substrate's counter demo: one counter in memory, one on disk
@@ -131,7 +133,7 @@ spec:
           args:
             - copy
             - [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698
-            - "[[ .Registry ]]/platform/substrate/counter:one-install-ce05e5d-7e86cab"
+            - "[[ .Registry ]]/[[ $repo ]]/counter:one-install-ce05e5d-7e86cab"
           env:
             - name: DOCKER_CONFIG
               value: /docker
@@ -159,7 +161,7 @@ spec:
           args:
             - copy
             - [[ or .SubstrateRegistry "ghcr.io/darkshiftio/substrate" ]]/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481
-            - "[[ .Registry ]]/platform/substrate/sandbox:one-install-ce05e5d-7e86cab"
+            - "[[ .Registry ]]/[[ $repo ]]/sandbox:one-install-ce05e5d-7e86cab"
           env:
             - name: DOCKER_CONFIG
               value: /docker
@@ -200,10 +202,10 @@ spec:
             - -ec
             - |
               for image in $IMAGES; do
-                ref="$REGISTRY/platform/substrate/${image%@*}@${image#*@}"
+                ref="$REGISTRY/[[ $repo ]]/${image%@*}@${image#*@}"
                 code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 \
                   -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json' \
-                  "http://$REGISTRY/v2/platform/substrate/${image%@*}/manifests/${image#*@}")"
+                  "http://$REGISTRY/v2/[[ $repo ]]/${image%@*}/manifests/${image#*@}")"
                 [ "$code" = 200 ] || { echo "$ref: HTTP $code without a login, want 200" >&2; exit 1; }
                 echo "$ref pulls without a login"
               done

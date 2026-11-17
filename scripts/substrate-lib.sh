@@ -34,7 +34,7 @@ die() {
 
 # preflight <ActorTemplate>: the context answers, Substrate runs there, and so
 # does the test actor the check needs. Substrate's test actors (counter-v1 and
-# sandbox-v1) are off by default: the install turns them on with the Infrared
+# sandbox-v1, in the stores' org layout counter-v2 and sandbox-v2) are off by default: the install turns them on with the Infrared
 # chart's value substrate.testActors (true), and the template then makes them in
 # the substrate-actors Application.
 preflight() {
@@ -45,6 +45,18 @@ preflight() {
   k -n ate-system get deployment ate-api-server >/dev/null 2>&1 || die "no Substrate on $CTX (ate-system/ate-api-server)"
   k -n ate-system get configmap substrate-actor-templates -o jsonpath='{.data}' 2>/dev/null | jq -e --arg f "$template.json" 'has($f)' >/dev/null 2>&1 \
     || die "no ActorTemplate $template on $CTX. This check needs Substrate's test actors, which are off by default: set the Infrared chart's value substrate.testActors to true for this install, and run it again once the substrate-actors Application has synced"
+}
+
+# test_template <actor>: the ActorTemplate of the test actor <actor> (counter
+# or sandbox) that the install makes: <actor>-v2 in the stores' org layout
+# (README, "The stores' org layout"), whose templates the substrate-actors
+# Application then lists, and <actor>-v1 before it.
+test_template() {
+  if k -n ate-system get configmap substrate-actor-templates -o jsonpath='{.data}' 2>/dev/null | jq -e --arg f "$1-v2.json" 'has($f)' >/dev/null 2>&1; then
+    echo "$1-v2"
+  else
+    echo "$1-v1"
+  fi
 }
 
 # The ServiceAccount the client Jobs run as; the caller adds Roles to it.

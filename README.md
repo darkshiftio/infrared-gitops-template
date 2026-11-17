@@ -94,6 +94,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.TenantStorage` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_STORAGE`, the chart's `tenancy.tenantStorage` as `{"enabled":true,"capGi":...,"minDiskGi":...}`: the cap on every tenant org's volumes together (workspace TODO 473), which the `infrared` Application carries |
 | `.MetricsStorage` | absent or ``, `40Gi` | the operator's `INFRARED_METRICS_STORAGE`, the Infrared chart's `operator.metricsStorage`: the size of the install's own metrics store, VMSingle's claim, or on k3s with the stores the `emptyDir` its data is on (infrared-docs-internal ADR 0075; see "The metrics store's size"). The canonical form of a whole number above zero of `Mi`, `Gi` or `Ti` (`hack/render` refuses anything else); empty is `10Gi`, as before the field existed |
 | `.MediaStore` | absent or ``, `both`, `objectStore` | the operator's `INFRARED_MEDIA_STORE`, the Infrared chart's `summaryvideo.store` (infrared-docs-internal ADR 0087 D4 and D7): with `.Stores`, Infrared's API keeps its videos and pictures in SeaweedFS's bucket `media`, which the S3 identity `media` alone reaches and only the API holds, beside `storage-reader`, which lists each bucket for the storage views; media joins the hourly copy and the restore, and the stores' fence admits the API's pods to the S3 gateway (see "The bucket media"). Both values render the same files: the chart and the API tell them apart. The `infrared` Application does not carry it, since the install's values file moves `summaryvideo.store` both ways and a value carried there would win over it. Empty, the chart's `volume`, renders as before the field existed; without `.Stores` it changes nothing; `hack/render` refuses any other value |
+| `.StoresOrgLayout` | absent or `false`, `true` | the Installation's `status.storage.layout` is `org` (infrared-docs-internal ADR 0087 D2, D3): the operator sets it only once a migration between the stores' layouts has copied, verified and deleted every repository's files into the layout, never from the chart's `stores.orgLayout.enabled`, so Zot moves root only after its files. With `.Stores` and `.Registry`, Zot's repositories sit at the bucket's root (`zot-base`'s S3 driver has no `rootdirectory`, and Zot's pods carry an annotation naming the root, so a change of root rolls them), the platform's own are `platform/images/kpack-builder` and `platform/images/substrate/<name>`, and Substrate's test actors are `counter-v2` and `sandbox-v2`, located at `s3://ate-snapshots/platform/snapshots/` (see "The stores' org layout"). The `infrared` Application does not carry it |
+| `.RegistryPaused` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts is in its phases `Pausing`, `Copying` or `Rooting` (ADR 0087 D7): with `.Stores` and `.Registry`, Zot's Application renders `replicaCount: 0`, so no Zot process reads or writes the bucket while its files are copied, verified and deleted, and nothing else changes |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -109,7 +111,8 @@ array, exactly as the operator's environment carries them, `-forge` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
 `cloudflare-tunnel-credentials`); `-edge-proof-secret` (with `-edge gateway`
 and `-infrared-host`); `-network-policies`; `-registry-pulls` and
-`-stores-security`; `-metrics-storage`; and `-media-store`.
+`-stores-security`; `-metrics-storage`; `-media-store`; and
+`-stores-org-layout` and `-registry-paused`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -184,7 +187,14 @@ Application, its identities, its PreSync hook and its hourly copy, the store
 `infrared-stores` and its Application, the restore's copy, the stores' fence
 and the README, and only with `.Stores`; the `infrared` Application never
 carries it. The operator leaves it out of its data while it is unset or
-`volume` (`make verify` checks it).
+`volume` (`make verify` checks it). `.StoresOrgLayout` changes `zot-base`
+(no `rootdirectory`, its comment, and with `.RegistryPulls` the test actors'
+anonymous read), Zot's Application (an annotation and its comment), the
+builder and the builds README, the test actors' two hooks, the comments of
+Substrate's kustomization and of the `substrate-actors` Application, and the
+README, and only with `.Stores` and `.Registry`; `.RegistryPaused` changes
+Zot's `replicaCount` alone, and only with both. The operator leaves each out
+of its data while it is false (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -925,6 +935,46 @@ scripts/registry-pulls-check.sh <context> <org> <another org>    # ADR 0066 D3: 
 
 Each reads the registry as `infrared` when it refuses anonymous reads.
 
+### The stores' org layout
+
+With `.StoresOrgLayout` (the Installation's `status.storage.layout` `org`;
+infrared-docs-internal ADR 0087 D2, D3) every store keeps an org's files under
+`<store>/<org>/<kind>/`. The template renders the registry's part of it, with
+`.Stores` and `.Registry`:
+
+| What | Before the layout | In the layout |
+|---|---|---|
+| Zot's root | `/zot` in the bucket `registry`, which Zot's S3 store writes twice: `/buckets/registry/zot/zot/<repository>/` | the bucket's root, `/buckets/registry/<repository>/`: `zot-base`'s S3 driver names no `rootdirectory` |
+| A repository's name | `<org>/<product>`, and what a run publishes under it | `<org>/<kind>/<name>`, the kind `images`, `charts`, `artifacts` or `evidence`: the operator names them, and its rule for each org writes only there |
+| The builder | `platform/kpack-builder` | `platform/images/kpack-builder` |
+| The actor images | `platform/substrate/<name>` | `platform/images/substrate/<name>`; with `.RegistryPulls` anyone reads there alone |
+| The test actors | `counter-v1` and `sandbox-v1`, at `s3://ate-snapshots/platform/<template>/` | `counter-v2` and `sandbox-v2`, at `s3://ate-snapshots/platform/snapshots/`: an ActorTemplate is immutable, so a new location is a new version |
+
+The render follows the files, never the chart's value: the operator sets the
+layout only once a migration has moved every repository. While it moves them,
+`.RegistryPaused` stops Zot (`replicaCount: 0`, the only change), so no Zot
+process reads or writes the bucket; the stores' applier, the CronJob
+`stores/seaweedfs-paths` the operator starts a Job from, copies each
+repository to its new name, verifies the copy and only then deletes the old
+one, never a move in place. The layout then renders the new
+root, which Zot reads only when it starts: the pod annotation
+`infrared.darkshift.io/storage-root: s3://registry/` rolls the pod whenever the
+root changes, either way. Turning the chart's `stores.orgLayout.enabled` off
+moves every repository back the same way, and the render back after it.
+
+The test actors' hook makes the `-v2` templates and never deletes the `-v1`
+ones: deleting a template's actors has Substrate collect their snapshots, and
+nothing is deleted before its copy is verified at its new path (the owner,
+2026-11-17). The operator deletes the `-v1` templates and their actors once
+the applier has copied `platform/counter-v1/` and `platform/sandbox-v1/` to
+`platform/snapshots/` and verified every file there.
+
+`scripts/registry-check.sh`, `scripts/substrate-counter-test.sh` and
+`scripts/substrate-fence-check.sh` follow the layout the Installation reports:
+the copy goes to `<org>/images/registry-check`, the source is
+`platform/images/substrate/counter`, and the actors are made from the `-v2`
+templates.
+
 ### Agent Substrate
 
 With `.Stores`, `.Registry` and `.SubstrateCapable` together the template runs
@@ -952,9 +1002,9 @@ and its bundled Postgres.
 | What | Where |
 |---|---|
 | Records | The database `substrate` on the platform's Postgres, as the role `substrate` (`stores/postgres-substrate`), schema `public`, TLS as SeaweedFS's filers use it (`sslmode=require`). Its DSN is the Secret `ate-system/ate-api-server-secret-envvars`, made by an ExternalSecret through `infrared-stores`. |
-| Snapshots | The bucket `ate-snapshots`, as the S3 identity `ate-snapshots` (`stores/seaweedfs-s3-ate-snapshots`, copied to `ate-system/ate-s3-credentials` through `infrared-stores`), path-style at `http://seaweedfs-s3.stores.svc:8333`, for the API and atelet. A template's snapshots go under `platform/<template>/`. |
+| Snapshots | The bucket `ate-snapshots`, as the S3 identity `ate-snapshots` (`stores/seaweedfs-s3-ate-snapshots`, copied to `ate-system/ate-s3-credentials` through `infrared-stores`), path-style at `http://seaweedfs-s3.stores.svc:8333`, for the API and atelet. A template's snapshots go under `platform/<template>/`; in the stores' org layout under `platform/snapshots/` (see "The stores' org layout"). |
 | Substrate's images | ghcr (`ghcr.io/darkshiftio/substrate`), by digest; with `.SubstrateRegistry`, that registry path instead, by the same tags and digests: the kustomizations of `substrate` and `substrate-podcert` rename the vendored images (kustomize `images`), and the WorkerPool's image and the copy of the test actors' images name it directly. On GKE the nodes pull from Artifact Registry as their own service account; the copy into the registry inside the cluster reads with the pull secret, a registry token (`.RegistryToken`) there. With an `.ImagePullSecret`, the store `infrared-platform` copies that Secret into `podcertificate-controller-system`, `ate-system`, `ate-workers` and, for the copy of the test actors' images, `registry`; the workers pull with it through the ServiceAccount `default` of `ate-workers`, because a WorkerPool cannot name a pull secret. The router's Envoy (`envoyproxy/envoy`) and the SandboxConfig's pause image (`registry.k8s.io/pause`) are upstream's, by digest, and atelet fetches gVisor from Google's public bucket, as upstream's `gvisor-default` names it. |
-| Actor images | atelet pulls them itself, without a login and without the nodes' registry mirrors. It runs with `--gcp-auth-for-image-pulls=false` and `--localhost-registry-replacement=<Registry>`: an image named on `localhost` (or a loopback address) is pulled from the registry inside the cluster, over plain HTTP. A template names `localhost/platform/substrate/<image>:<tag>@sha256:...`, so an immutable template never holds the registry's address, and the pull takes the path the Substrate spike proved with its node registry. |
+| Actor images | atelet pulls them itself, without a login and without the nodes' registry mirrors. It runs with `--gcp-auth-for-image-pulls=false` and `--localhost-registry-replacement=<Registry>`: an image named on `localhost` (or a loopback address) is pulled from the registry inside the cluster, over plain HTTP. A template names `localhost/platform/substrate/<image>:<tag>@sha256:...` (in the stores' org layout `localhost/platform/images/substrate/...`), so an immutable template never holds the registry's address, and the pull takes the path the Substrate spike proved with its node registry. |
 
 The hooks do what Substrate's installer (`ate-setup`) does by hand, and each is
 safe to run again:
@@ -965,8 +1015,8 @@ safe to run again:
 | `substrate-prepare` (PreSync) | The pools `actor-id-jwt-pool` (ES256), `actor-id-ca-pool` and `actor-id-ca-certs` (its root alone), made once; the ConfigMap `ate-api-authentication`, which trusts the cluster's ServiceAccount tokens for the audience `api.ate-system.svc`, the issuer read from the cluster's discovery document; the label `ate.dev/substrate-version=<version>` on each node without one; then waits for Substrate's CRDs, the trust bundles, the Postgres, SeaweedFS's S3 gateway and the stores. |
 | CronJob `substrate-node-labels` | Every ten minutes, labels a node that joined since, so atelet runs there. |
 | `substrate-actors-wait` (PreSync) | Waits for the API, the router and Zot to answer. |
-| `substrate-images` (Sync, wave 1, in `registry`; with the test actors) | Copies the counter demo's image and the test actor's (`sandbox`) from ghcr to `<Registry>/platform/substrate/` with crane, as the registry's user `platform` (`registry/platform-push`, which the operator writes), then checks that each pulls by digest without a login. |
-| `substrate-templates` (Sync, wave 2; with the test actors) | Makes the atespace `platform` and the ActorTemplates `counter-v1` and `sandbox-v1` through the API, then waits for each golden snapshot. A template of the same name with other images fails the hook: templates are immutable, so a change is a new version in the name. |
+| `substrate-images` (Sync, wave 1, in `registry`; with the test actors) | Copies the counter demo's image and the test actor's (`sandbox`) from ghcr to `<Registry>/platform/substrate/` (in the stores' org layout `platform/images/substrate/`) with crane, as the registry's user `platform` (`registry/platform-push`, which the operator writes), then checks that each pulls by digest without a login. |
+| `substrate-templates` (Sync, wave 2; with the test actors) | Makes the atespace `platform` and the ActorTemplates `counter-v1` and `sandbox-v1` (in the stores' org layout `counter-v2` and `sandbox-v2`, and it leaves the `-v1` ones to the operator) through the API, then waits for each golden snapshot. A template of the same name with other images fails the hook: templates are immutable, so a change is a new version in the name. |
 
 The CAs are made with OpenSSL, in memory in the hook's own pod, in the formats
 Substrate's `localca` and `localjwtauthority` read: one Ed25519 root each,

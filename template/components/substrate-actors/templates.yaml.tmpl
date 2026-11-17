@@ -1,4 +1,7 @@
 [[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
+[[- /* The stores' org layout (StoresOrgLayout, ADR 0087 D3): templates of version 2, their images under platform/images/substrate/ and their snapshots under platform/snapshots/. */ -]]
+[[- $layout := and .Stores .Registry .StoresOrgLayout ]]
+[[- $v := "v1" ]][[ $repo := "platform/substrate" ]][[ if $layout ]][[ $v = "v2" ]][[ $repo = "platform/images/substrate" ]][[ end ]]
 [[- if and .Stores .SubstrateCapable .Registry $testActors -]]
 # =============================================================================
 # The platform's ActorTemplates, in the atespace platform.
@@ -12,19 +15,34 @@
 # means the name's version was not bumped.
 #
 #   template     image                                what for
-#   counter-v1   counter, Substrate's counter demo    the counter test: two
+#   counter-[[ $v ]]   counter, Substrate's counter demo    the counter test: two
 #                                                     counters, in memory and on
 #                                                     disk, through a suspend
-#   sandbox-v1   sandbox, Substrate's sandbox demo    the fence check: runs the
+#   sandbox-[[ $v ]]   sandbox, Substrate's sandbox demo    the fence check: runs the
 #                                                     command it is sent, from
 #                                                     inside an actor
 #
 # Each runs in gVisor (SandboxConfig gvisor-default) on the WorkerPool platform,
 # keeps a Full snapshot of memory and disk in SeaweedFS's bucket ate-snapshots,
+[[- if $layout ]]
+# under platform/snapshots/, the stores' org layout (infrared-docs-internal ADR
+# 0087 D3), and names its image on localhost, under [[ $repo ]]/, which
+# atelet pulls from the registry inside the cluster ([[ .Registry ]]) by digest.
+# No template carries an egress policy: an actor reaches nothing outside its
+# sandbox.
+#
+# Before the layout the templates were counter-v1 and sandbox-v1, located at
+# platform/counter-v1/ and platform/sandbox-v1/. This hook neither makes nor
+# deletes them: the Infrared operator deletes them and their actors only once
+# the stores' applier, the CronJob stores/seaweedfs-paths, has copied their
+# snapshots to platform/snapshots/ and verified each copy there, since nothing
+# is deleted before its copy is verified at its new path.
+[[- else ]]
 # under platform/<template>/, and names its image on localhost, which atelet
 # pulls from the registry inside the cluster ([[ .Registry ]]) by digest. No
 # template carries an egress policy: an actor reaches nothing outside its
 # sandbox.
+[[- end ]]
 #
 # The hook calls the API with grpcurl, as the ServiceAccount substrate-templates
 # (a token for the audience api.ate-system.svc), from a pod labelled
@@ -39,15 +57,15 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
 data:
-  counter-v1.json: |
+  counter-[[ $v ]].json: |
     {
       "actorTemplate": {
-        "metadata": {"atespace": "platform", "name": "counter-v1"},
+        "metadata": {"atespace": "platform", "name": "counter-[[ $v ]]"},
         "workerSelector": {"matchLabels": {"infrared.darkshift.io/worker-pool": "platform"}},
         "containers": [
           {
             "name": "counter",
-            "image": "localhost/platform/substrate/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698",
+            "image": "localhost/[[ $repo ]]/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698",
             "command": ["/ko-app/counter"],
             "wakeupProbe": {"httpGet": {"path": "/readyz", "port": 80}},
             "volumeMounts": [{"name": "data", "mountPath": "/home/counter"}]
@@ -58,20 +76,20 @@ data:
         "snapshotConfig": {
           "onPause": "SNAPSHOT_CONTENT_SCOPE_FULL",
           "onCommit": "SNAPSHOT_CONTENT_SCOPE_FULL",
-          "storageLocation": "s3://ate-snapshots/platform/counter-v1/"
+          "storageLocation": "s3://ate-snapshots/platform/[[ if $layout ]]snapshots[[ else ]]counter-v1[[ end ]]/"
         },
         "sandboxConfig": {"sandboxClass": "SANDBOX_CLASS_GVISOR", "configName": "gvisor-default"}
       }
     }
-  sandbox-v1.json: |
+  sandbox-[[ $v ]].json: |
     {
       "actorTemplate": {
-        "metadata": {"atespace": "platform", "name": "sandbox-v1"},
+        "metadata": {"atespace": "platform", "name": "sandbox-[[ $v ]]"},
         "workerSelector": {"matchLabels": {"infrared.darkshift.io/worker-pool": "platform"}},
         "containers": [
           {
             "name": "sandbox",
-            "image": "localhost/platform/substrate/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481",
+            "image": "localhost/[[ $repo ]]/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481",
             "env": [{"name": "PORT", "value": "80"}]
           }
         ],
@@ -79,7 +97,7 @@ data:
         "snapshotConfig": {
           "onPause": "SNAPSHOT_CONTENT_SCOPE_FULL",
           "onCommit": "SNAPSHOT_CONTENT_SCOPE_FULL",
-          "storageLocation": "s3://ate-snapshots/platform/sandbox-v1/"
+          "storageLocation": "s3://ate-snapshots/platform/[[ if $layout ]]snapshots[[ else ]]sandbox-v1[[ end ]]/"
         },
         "sandboxConfig": {"sandboxClass": "SANDBOX_CLASS_GVISOR", "configName": "gvisor-default"}
       }
@@ -304,7 +322,7 @@ spec:
 # Substrate's test actors are off: the install names substrate-test-actors among
 # the components it leaves out, as the Infrared chart does unless its value
 # substrate.testActors is true. They are the platform's only ActorTemplates, so
-# nothing is made here: no atespace, no ActorTemplate. sandbox-v1 runs any command
+# nothing is made here: no atespace, no ActorTemplate. sandbox-[[ $v ]] runs any command
 # it is sent, which is why they are off by default.
 [[- else -]]
 # Agent Substrate runs only where the operator's preflight found the cluster able

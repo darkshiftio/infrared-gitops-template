@@ -1,3 +1,5 @@
+[[- /* The stores' org layout (StoresOrgLayout, ADR 0087 D2): the platform's repositories under platform/images/. */ -]]
+[[- $layout := and .Stores .Registry .StoresOrgLayout -]]
 [[- if .BuildRegistry -]]
 [[ if .Registry -]]
 # =============================================================================
@@ -12,9 +14,16 @@
 #     kpack exists; wait.yaml holds the builder back until it does. No platform
 #     credential lives in builds, where an organization's gitops repo may create
 #     any object.
+[[- if $layout ]]
+#   - each organization's builds push under its own path, <org>/images/, as
+#     its own user, which writes only under its kinds there (the stores' org
+#     layout): the operator makes builds/registry-push-<org> and the
+#     ServiceAccount builds/builder-<org>, which its kpack Images name.
+[[- else ]]
 #   - each organization's builds push under its own path, <org>/, as its own
 #     user: the operator makes builds/registry-push-<org> and the
 #     ServiceAccount builds/builder-<org>, which its kpack Images name.
+[[- end ]]
 [[- if .RegistryPulls ]]
 # No one pulls without a login (the Infrared chart's tenancy.registryPulls): a
 # build pulls the builder as its organization's user, which reads platform/.
@@ -149,7 +158,7 @@ spec:
 # twice. This is also the order Paketo's own builder uses.
 #
 [[- if .Registry ]]
-# The builder image is pushed to [[ .Registry ]]/platform/kpack-builder, by
+# The builder image is pushed to [[ .Registry ]]/platform/[[ if $layout ]]images/[[ end ]]kpack-builder, by
 # address and over plain HTTP: the build tools fall back to HTTP only for a
 # private address, never for a name. Zot makes the repository on the first push.
 [[- else ]]
@@ -165,7 +174,7 @@ metadata:
   name: infrared-builder
 spec:
 [[- if .Registry ]]
-  tag: [[ .Registry ]]/platform/kpack-builder
+  tag: [[ .Registry ]]/platform/[[ if $layout ]]images/[[ end ]]kpack-builder
   serviceAccountRef:
     name: infrared-builder
     namespace: kpack
