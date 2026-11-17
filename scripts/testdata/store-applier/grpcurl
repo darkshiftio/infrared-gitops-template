@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# A fake grpcurl for scripts/store-applier-test.sh: the filer's and master's
+# calls the applier makes, on the pretend SeaweedFS in FAKE_STATE.
+# shellcheck source-path=SCRIPTDIR source=fake-lib.sh
+. "$(dirname "$0")/fake-lib.sh"
+method=""
+for a in "$@"; do method=$a; done
+case " $* " in
+  *" -plaintext "* | *" -cacert "*) ;;
+  *) echo "fake grpcurl: neither -plaintext nor TLS" >&2; exit 2 ;;
+esac
+req="$(cat)"
+called "grpcurl $method"
+case "$method" in
+  filer_pb.SeaweedFiler/ListEntries)
+    dir="$(jq -r .directory <<<"$req")"
+    start="$(jq -r '.startFromFileName // ""' <<<"$req")"
+    limit="$(jq -r '.limit // 1000' <<<"$req")"
+    omit="$(jq -r '.omitChunks // false' <<<"$req")"
+    [ -d "$STATE/fs$dir" ] || exit 0
+    n=0
+    # shellcheck disable=SC2012 # the test's names are plain
+    for name in $(ls -1A "$STATE/fs$dir" | LC_ALL=C sort); do
+      if [ -n "$start" ] && ! [ "$name" \> "$start" ]; then continue; fi
+      [ "$n" -lt "$limit" ] || break
+      jq -c '{entry: .}' <<<"$(entry_json "${dir%/}/$name" "$omit")"
+      n=$((n + 1))
+    done
+    ;;
+  filer_pb.SeaweedFiler/LookupDirectoryEntry)
+    p="$(jq -r '.directory + "/" + .name' <<<"$req")"
+    if [ -e "$STATE/fs$p" ]; then
+      jq -c '{entry: .}' <<<"$(entry_json "$p" false)"
+    else
+      printf 'ERROR:\n  Code: Unknown\n  Message: filer: no entry is found in filer store\n' >&2
+      exit 66
+    fi
+    ;;
+  filer_pb.SeaweedFiler/StreamMutateEntry)
+    # Each update must carry the entry's own chunks: an update that lists
+    # others would have the filer delete the copy's data.
+    jq -c . <<<"$req" | while IFS= read -r one; do
+      id="$(jq -r .requestId <<<"$one")"
+      p="$(jq -r '.updateRequest.directory + "/" + .updateRequest.entry.name' <<<"$one")"
+      if [ ! -f "$STATE/fs$p" ]; then
+        jq -cn --arg id "$id" '{requestId: $id, isLast: true, updateResponse: {}, error: "not found"}'
+      elif [ "$(jq -c '.updateRequest.entry.chunks // []' <<<"$one")" != "$(chunks_of "$p")" ]; then
+        called "update $p with other chunks"
+        jq -cn --arg id "$id" '{requestId: $id, isLast: true, updateResponse: {}, error: "the update lists other chunks than the entry has"}'
+      else
+        set_mtime "$p" "$(jq -r .updateRequest.entry.attributes.mtime <<<"$one")"
+        called "update $p mtime $(jq -r .updateRequest.entry.attributes.mtime <<<"$one")"
+        jq -cn --arg id "$id" '{requestId: $id, isLast: true, updateResponse: {}}'
+      fi
+    done
+    ;;
+  master_pb.Seaweed/VolumeList)
+    cat "$STATE/volumes.json"
+    ;;
+  *)
+    echo "fake grpcurl: no method $method" >&2
+    exit 64
+    ;;
+esac

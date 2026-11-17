@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# A fake kubectl for scripts/store-applier-test.sh: get and a merge patch of
+# the ConfigMaps in FAKE_STATE/cm, with the API's optimistic concurrency.
+# FAKE_STALE_AFTER: after that many patches of the journal, its id changes, as
+# a new migration's would.
+# shellcheck source-path=SCRIPTDIR source=fake-lib.sh
+. "$(dirname "$0")/fake-lib.sh"
+[ "$1" = -n ] && [ "$2" = stores ] || { echo "fake kubectl: not in stores: $*" >&2; exit 2; }
+verb=$3 kind=$4 name=$5
+[ "$kind" = configmap ] || { echo "fake kubectl: $kind" >&2; exit 2; }
+f="$STATE/cm/$name.json"
+case "$verb" in
+  get)
+    if [ ! -f "$f" ]; then
+      echo "Error from server (NotFound): configmaps \"$name\" not found" >&2
+      exit 1
+    fi
+    cat "$f"
+    ;;
+  patch)
+    [ "$6 $7 $8" = "--type merge --patch-file" ] || { echo "fake kubectl: patch $*" >&2; exit 2; }
+    patch="$9"
+    [ -f "$f" ] || { echo "Error from server (NotFound): configmaps \"$name\" not found" >&2; exit 1; }
+    want_rv="$(jq -r '.metadata.resourceVersion // ""' "$patch")"
+    if [ -n "$want_rv" ] && [ "$want_rv" != "$(jq -r .metadata.resourceVersion "$f")" ]; then
+      echo "Error from server (Conflict): Operation cannot be fulfilled on configmaps \"$name\": the object has been modified" >&2
+      exit 1
+    fi
+    jq --slurpfile p "$patch" '.data = ((.data // {}) + $p[0].data) | .metadata.resourceVersion = ((.metadata.resourceVersion | tonumber) + 1 | tostring)' \
+      "$f" >"$f.new"
+    mv "$f.new" "$f"
+    called "patch $name $(jq -r '.data | keys | join(",")' "$patch")"
+    if [ "$name" = infrared-store-moves ] && [ -n "${FAKE_STALE_AFTER:-}" ] \
+      && [ "$(grep -c '^patch infrared-store-moves' "$STATE/calls")" -ge "$FAKE_STALE_AFTER" ]; then
+      jq '.data.id = "20991231T000000Z" | .metadata.resourceVersion = ((.metadata.resourceVersion | tonumber) + 1 | tostring)' "$f" >"$f.new"
+      mv "$f.new" "$f"
+      called "a new migration took the journal"
+    fi
+    ;;
+  *)
+    echo "fake kubectl: $verb" >&2
+    exit 2
+    ;;
+esac

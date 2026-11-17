@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# A fake weed for scripts/store-applier-test.sh: weed shell's commands the
+# applier runs, on the pretend SeaweedFS in FAKE_STATE. fs.configure merges a
+# rule into what is there (as SeaweedFS's AddLocationConf does) and prints the
+# rules with every field, as SeaweedFS does; fs.rm without -r refuses a
+# folder that holds anything.
+# shellcheck source-path=SCRIPTDIR source=fake-lib.sh
+. "$(dirname "$0")/fake-lib.sh"
+[ "${1:-}" = shell ] || { echo "fake weed: $*" >&2; exit 2; }
+conf="$STATE/conf.json"
+[ -f "$conf" ] || echo '{"locations": []}' >"$conf"
+print_conf() {
+  jq '{version: 0, locations: [.locations[] | {locationPrefix, collection: (.collection // ""), replication: (.replication // ""),
+      ttl: (.ttl // ""), diskType: "", fsync: false, volumeGrowthCount: (.volumeGrowthCount // 0), readOnly: (.readOnly // false),
+      dataCenter: "", rack: "", dataNode: "", maxFileNameLength: 0, disableChunkDeletion: false, wormGracePeriodSeconds: "0",
+      wormRetentionTimeSeconds: "0"}]}' "$conf"
+  echo
+}
+rc=0
+while IFS= read -r line; do
+  # shellcheck disable=SC2086 # the command's words
+  set -- $line
+  [ $# -gt 0 ] || continue
+  called "weed $line"
+  cmd=$1
+  shift
+  case "$cmd" in
+    fs.configure)
+      prefix="" apply=false delete=false fields='{}'
+      for a in "$@"; do
+        case "$a" in
+          -locationPrefix=*) prefix="${a#-locationPrefix=}" ;;
+          -apply) apply=true ;;
+          -delete) delete=true ;;
+          -ttl=*) fields="$(jq -c --arg v "${a#-ttl=}" '. + {ttl: $v}' <<<"$fields")" ;;
+          -replication=*) fields="$(jq -c --arg v "${a#-replication=}" '. + {replication: $v}' <<<"$fields")" ;;
+          -volumeGrowthCount=*) fields="$(jq -c --argjson v "${a#-volumeGrowthCount=}" '. + {volumeGrowthCount: $v}' <<<"$fields")" ;;
+          -readOnly) fields="$(jq -c '. + {readOnly: true}' <<<"$fields")" ;;
+          *) echo "error: fake fs.configure: $a" >&2; rc=1 ;;
+        esac
+      done
+      if [ -n "$prefix" ] && [ "$apply" = true ]; then
+        if [ "$delete" = true ]; then
+          jq --arg p "$prefix" '.locations |= map(select(.locationPrefix != $p))' "$conf" >"$conf.new"
+        else
+          # Merge into the rule there: what is set wins, a bool is OR'ed.
+          jq --arg p "$prefix" --argjson f "$fields" '
+            (.locations | map(.locationPrefix) | index($p)) as $i
+            | if $i == null then .locations += [{locationPrefix: $p} + $f]
+              else .locations[$i] = (.locations[$i] + ($f | with_entries(select(.value != "" and .value != 0))))
+                | .locations[$i].readOnly = ((.locations[$i].readOnly // false) or ($f.readOnly // false)) end' "$conf" >"$conf.new"
+        fi
+        mv "$conf.new" "$conf"
+      fi
+      print_conf
+      ;;
+    fs.rm)
+      recursive=false
+      for a in "$@"; do
+        case "$a" in
+          -r | -rf | -fr) recursive=true ;;
+          -*) ;;
+          *)
+            if [ ! -e "$STATE/fs$a" ]; then
+              echo "rm: $a: filer: no entry is found in filer store"
+            elif [ -d "$STATE/fs$a" ] && [ "$recursive" = false ] && [ -n "$(ls -A "$STATE/fs$a")" ]; then
+              echo "rm: $a: fail to delete non-empty folder"
+            else
+              rm -r "$STATE/fs$a"
+              rm_meta "$a"
+              called "removed $a"
+            fi
+            ;;
+        esac
+      done
+      ;;
+    fs.ls) ls -1A "$STATE/fs$1" 2>/dev/null || true ;;
+    lock | unlock) ;;
+    volume.vacuum) ;;
+    *)
+      echo "unknown command: $cmd" >&2
+      rc=1
+      ;;
+  esac
+done
+exit "$rc"

@@ -3,6 +3,13 @@
 # stores: the S3 keys and the wait for Postgres (prepare.yaml), the S3
 # identities, and with backups the hourly copy (backup.yaml). Every object names
 # its own namespace.
+[[- if or .StorePaths .StoresMigration ]]
+#
+# With the stores' path rules or a migration between the stores' layouts, the
+# stores' applier too (paths.yaml), its scripts the ConfigMap
+# seaweedfs-paths-scripts, named by its content so its Jobs run the scripts
+# they were made with.
+[[- end ]]
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -13,6 +20,15 @@ resources:
 [[- end ]]
 [[- if and .Backup.Bucket .Restore.Point ]]
   - restore-wait.yaml
+[[- end ]]
+[[- if or .StorePaths .StoresMigration ]]
+  - paths.yaml
+configMapGenerator:
+  - name: seaweedfs-paths-scripts
+    namespace: stores
+    files:
+      - scripts/store-paths.sh
+      - scripts/store-journal.sh
 [[- end ]]
 [[- else -]]
 # The platform's own stores are off (INFRARED_STORES), so this component holds

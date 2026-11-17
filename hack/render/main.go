@@ -354,6 +354,26 @@ type Data struct {
 	// the default, renders as before the field existed, and an operator leaves
 	// it out of the data.
 	RegistryPaused bool `json:"RegistryPaused,omitempty"`
+	// StorePaths is the operator's INFRARED_STORES_POLICIES, the Infrared
+	// chart's stores.policies.enabled, on an install with the platform's
+	// stores (infrared-docs-internal ADR 0087 D10): the template renders the
+	// stores' applier, the CronJob stores/seaweedfs-paths, which applies the
+	// path rules the operator writes to stores/infrared-store-paths, daily and
+	// in each Job the operator starts from it, and carries out the journal of
+	// a migration between the stores' layouts (see "The stores' applier").
+	// False, the default, renders as before the field existed, and an
+	// operator leaves it out of the data.
+	StorePaths bool `json:"StorePaths,omitempty"`
+	// StoresMigration is the operator's: a migration between the stores'
+	// layouts runs (the Installation's status.storage.migration has a phase
+	// other than Done), or another move it drives through the journal
+	// stores/infrared-store-moves. The migration starts the applier's Jobs
+	// from the CronJob stores/seaweedfs-paths by name, so with the stores the
+	// CronJob renders even without StorePaths, its own schedule suspended
+	// while files move: only the operator's Jobs run then. False, the
+	// default, renders as before the field existed, and an operator leaves it
+	// out of the data.
+	StoresMigration bool `json:"StoresMigration,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -718,6 +738,10 @@ func main() {
 		"StoresOrgLayout: the registry in the stores' org layout, Zot at the bucket's root and the platform's repositories under platform/images/ (the Installation's status.storage.layout org)")
 	flag.BoolVar(&d.RegistryPaused, "registry-paused", false,
 		"RegistryPaused: Zot stopped, no replica, while a migration between the stores' layouts moves its files")
+	flag.BoolVar(&d.StorePaths, "store-paths", false,
+		"StorePaths: the stores' applier of the path rules, the CronJob stores/seaweedfs-paths (INFRARED_STORES_POLICIES)")
+	flag.BoolVar(&d.StoresMigration, "stores-migration", false,
+		"StoresMigration: a migration between the stores' layouts runs, which needs the applier's CronJob, its schedule suspended")
 	flag.Parse()
 
 	if dataFile != "" {
@@ -817,6 +841,8 @@ func mergeDataFile(d *Data, path string) error {
 		"media-store":       func() { d.MediaStore = explicit.MediaStore },
 		"stores-org-layout": func() { d.StoresOrgLayout = explicit.StoresOrgLayout },
 		"registry-paused":   func() { d.RegistryPaused = explicit.RegistryPaused },
+		"store-paths":       func() { d.StorePaths = explicit.StorePaths },
+		"stores-migration":  func() { d.StoresMigration = explicit.StoresMigration },
 	}
 	for name, apply := range overrides {
 		if set[name] {

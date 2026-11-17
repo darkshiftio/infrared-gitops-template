@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# A fake curl for scripts/store-applier-test.sh: SeaweedFS's S3 gateway, a get
+# and a CopyObject, on the pretend SeaweedFS in FAKE_STATE, and the volume
+# servers' /status. FAKE_COPY_CORRUPT (a pattern of keys) writes a copy that
+# differs; FAKE_COPY_FAIL answers 500; FAKE_KILL_AFTER_COPIES kills the run
+# (FAKE_MAIN_PID) after that many copies.
+# shellcheck disable=SC2254 # FAKE_COPY_FAIL and FAKE_COPY_CORRUPT are patterns
+# shellcheck source-path=SCRIPTDIR source=fake-lib.sh
+. "$(dirname "$0")/fake-lib.sh"
+method=GET out=- wfmt="" fail=false config="" url="" copy_source="" none_match=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -sS | -s | -S) ;;
+    -f) fail=true ;;
+    -o) out=$2; shift ;;
+    -w) wfmt=$2; shift ;;
+    -X) method=$2; shift ;;
+    -m | --aws-sigv4) shift ;;
+    -K) config=$2; shift ;;
+    -H)
+      case "$2" in
+        "x-amz-copy-source: "*) copy_source="${2#x-amz-copy-source: }" ;;
+        "If-None-Match: *") none_match=true ;;
+        *) echo "fake curl: header $2" >&2; exit 2 ;;
+      esac
+      shift
+      ;;
+    http://*) url=$1 ;;
+    *) echo "fake curl: argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+body="$STATE/curl.body.$$"
+: >"$body"
+code=200
+case "$url" in
+  http://seaweedfs-s3.stores.svc:8333/*)
+    # Every S3 call signs with an identity's keys.
+    grep -qE '^user = "[^:"]+:[^:"]+"$' "$config" || { echo "fake curl: no S3 keys in $config" >&2; exit 2; }
+    key="${url#http://seaweedfs-s3.stores.svc:8333/}"
+    dst="/buckets/$key"
+    if [ "$method" = GET ]; then
+      if [ -f "$STATE/fs$dst" ]; then cat "$STATE/fs$dst" >"$body"; else code=404; fi
+      called "s3 get $dst"
+    elif [ "$method" = PUT ] && [ -n "$copy_source" ]; then
+      src="/buckets/${copy_source#/}"
+      if [ ! -f "$STATE/fs$src" ]; then
+        code=404
+      elif [ "$none_match" = true ] && [ -e "$STATE/fs$dst" ]; then
+        code=412
+      elif [ -n "${FAKE_COPY_FAIL:-}" ] && case "$dst" in $FAKE_COPY_FAIL) true ;; *) false ;; esac; then
+        code=500
+        printf '<Error><Code>InternalError</Code></Error>' >"$body"
+      else
+        mkdir -p "$(dirname "$STATE/fs$dst")"
+        if [ -n "${FAKE_COPY_CORRUPT:-}" ] && case "$dst" in $FAKE_COPY_CORRUPT) true ;; *) false ;; esac; then
+          { cat "$STATE/fs$src"; printf 'X'; } >"$STATE/fs$dst"
+        else
+          cat "$STATE/fs$src" >"$STATE/fs$dst"
+        fi
+        set_mtime "$dst" "$(date +%s)"
+        printf '<CopyObjectResult><ETag>"x"</ETag></CopyObjectResult>' >"$body"
+        called "s3 copy $src $dst"
+        if [ -n "${FAKE_KILL_AFTER_COPIES:-}" ]; then
+          copies=$(($(grep -c '^s3 copy ' "$STATE/calls") + 0))
+          if [ "$copies" -ge "$FAKE_KILL_AFTER_COPIES" ]; then
+            called "killed the run"
+            kill -KILL "$FAKE_MAIN_PID"
+          fi
+        fi
+      fi
+    else
+      echo "fake curl: $method $url" >&2
+      exit 2
+    fi
+    ;;
+  http://*/status)
+    id="${url#http://}"
+    id="${id%/status}"
+    if [ -f "$STATE/status/$id.json" ]; then cat "$STATE/status/$id.json" >"$body"; else code=404; fi
+    ;;
+  *)
+    echo "fake curl: $url" >&2
+    exit 2
+    ;;
+esac
+if [ "$fail" = true ] && [ "$code" -ge 400 ]; then
+  rm -f "$body"
+  echo "curl: (22) The requested URL returned error: $code" >&2
+  exit 22
+fi
+if [ "$out" = - ]; then cat "$body"; else cat "$body" >"$out"; fi
+rm -f "$body"
+if [ "$wfmt" = '%{http_code}' ]; then printf '%s' "$code"; fi

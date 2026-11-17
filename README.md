@@ -96,6 +96,8 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.MediaStore` | absent or ``, `both`, `objectStore` | the operator's `INFRARED_MEDIA_STORE`, the Infrared chart's `summaryvideo.store` (infrared-docs-internal ADR 0087 D4 and D7): with `.Stores`, Infrared's API keeps its videos and pictures in SeaweedFS's bucket `media`, which the S3 identity `media` alone reaches and only the API holds, beside `storage-reader`, which lists each bucket for the storage views; media joins the hourly copy and the restore, and the stores' fence admits the API's pods to the S3 gateway (see "The bucket media"). Both values render the same files: the chart and the API tell them apart. The `infrared` Application does not carry it, since the install's values file moves `summaryvideo.store` both ways and a value carried there would win over it. Empty, the chart's `volume`, renders as before the field existed; without `.Stores` it changes nothing; `hack/render` refuses any other value |
 | `.StoresOrgLayout` | absent or `false`, `true` | the Installation's `status.storage.layout` is `org` (infrared-docs-internal ADR 0087 D2, D3): the operator sets it only once a migration between the stores' layouts has copied, verified and deleted every repository's files into the layout, never from the chart's `stores.orgLayout.enabled`, so Zot moves root only after its files. With `.Stores` and `.Registry`, Zot's repositories sit at the bucket's root (`zot-base`'s S3 driver has no `rootdirectory`, and Zot's pods carry an annotation naming the root, so a change of root rolls them), the platform's own are `platform/images/kpack-builder` and `platform/images/substrate/<name>`, and Substrate's test actors are `counter-v2` and `sandbox-v2`, located at `s3://ate-snapshots/platform/snapshots/` (see "The stores' org layout"). The `infrared` Application does not carry it |
 | `.RegistryPaused` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts is in its phases `Pausing`, `Copying` or `Rooting` (ADR 0087 D7): with `.Stores` and `.Registry`, Zot's Application renders `replicaCount: 0`, so no Zot process reads or writes the bucket while its files are copied, verified and deleted, and nothing else changes |
+| `.StorePaths` | absent or `false`, `true` | the operator's `INFRARED_STORES_POLICIES`, the Infrared chart's `stores.policies.enabled` (ADR 0087 D10): with `.Stores`, the stores' applier, the CronJob `stores/seaweedfs-paths`, which applies the path rules the operator writes to `stores/infrared-store-paths`, daily and in each Job the operator starts from it (see "The stores' applier") |
+| `.StoresMigration` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts runs (the Installation's `status.storage.migration` has a phase other than `Done`) or another move it drives through the journal `stores/infrared-store-moves`: the migration starts the applier's Jobs from the CronJob by its name, so with `.Stores` the CronJob renders even without `.StorePaths`, its own schedule suspended, so only the operator's Jobs run while files move |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -111,8 +113,9 @@ array, exactly as the operator's environment carries them, `-forge` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
 `cloudflare-tunnel-credentials`); `-edge-proof-secret` (with `-edge gateway`
 and `-infrared-host`); `-network-policies`; `-registry-pulls` and
-`-stores-security`; `-metrics-storage`; `-media-store`; and
-`-stores-org-layout` and `-registry-paused`.
+`-stores-security`; `-metrics-storage`; `-media-store`;
+`-stores-org-layout` and `-registry-paused`; and `-store-paths` and
+`-stores-migration`.
 
 The zero value of every newer field renders exactly the files the template
 rendered before the field existed, with one exception, decided on 2026-10-06:
@@ -194,7 +197,11 @@ builder and the builds README, the test actors' two hooks, the comments of
 Substrate's kustomization and of the `substrate-actors` Application, and the
 README, and only with `.Stores` and `.Registry`; `.RegistryPaused` changes
 Zot's `replicaCount` alone, and only with both. The operator leaves each out
-of its data while it is false (`make verify` checks it).
+of its data while it is false (`make verify` checks it). `.StorePaths` and
+`.StoresMigration` render the applier (`components/seaweedfs/paths.yaml` and
+its two scripts) into the SeaweedFS component and change the README, and only
+with `.Stores`; the two differ only in the CronJob's `suspend`. The operator
+leaves each out of its data while it is false (`make verify` checks it).
 
 ### What the operator does after rendering
 
@@ -956,7 +963,8 @@ layout only once a migration has moved every repository. While it moves them,
 process reads or writes the bucket; the stores' applier, the CronJob
 `stores/seaweedfs-paths` the operator starts a Job from, copies each
 repository to its new name, verifies the copy and only then deletes the old
-one, never a move in place. The layout then renders the new
+one, never a move in place (see "The stores' applier"). The layout then
+renders the new
 root, which Zot reads only when it starts: the pod annotation
 `infrared.darkshift.io/storage-root: s3://registry/` rolls the pod whenever the
 root changes, either way. Turning the chart's `stores.orgLayout.enabled` off
@@ -974,6 +982,88 @@ the applier has copied `platform/counter-v1/` and `platform/sandbox-v1/` to
 the copy goes to `<org>/images/registry-check`, the source is
 `platform/images/substrate/counter`, and the actors are made from the `-v2`
 templates.
+
+### The stores' applier
+
+With `.Stores` and `.StorePaths` (the Infrared chart's `stores.policies.enabled`)
+or `.StoresMigration` (a migration between the stores' layouts runs), the
+template renders the stores' applier (infrared-docs-internal ADR 0087 D5 to
+D7, D10): the CronJob `stores/seaweedfs-paths`
+(`components/seaweedfs/paths.yaml`), which carries out the two contracts the
+operator holds, format 1 (its `internal/controller/storage_policies.go` and
+`storage_moves.go`). The operator starts a Job from it whenever either wants
+something (`seaweedfs-paths-<hash>`, `seaweedfs-moves-<want>`) and waits for
+it by name; it also runs daily at 03:17 UTC, putting back a rule changed by
+hand, except while a migration runs (`.StoresMigration`: `suspend: true`), so
+that only the operator's Jobs run while files move. `concurrencyPolicy:
+Forbid`, `backoffLimit: 0`: a failed run is a result the operator reads.
+
+| Contract | What a run does |
+|---|---|
+| `stores/infrared-store-paths` (`format`, `hash`, `rules`, `purge`, `pruneLogDays`) | Refuses it unless the hash is its keys' and every line is an org's kind, a deleted org's media or snapshots, or the platform's other files. Each rule not exactly as wanted at its prefix is deleted, then written whole (`fs.configure` merges into a rule, and an empty TTL never clears one); a rule as wanted is left alone. The rules it wrote before (`-applied`'s `rules`) and no longer wanted are deleted, and no other rule. Each purge prefix is removed (`fs.rm -r`), a deliberate deletion, and looked up to be gone. `/topics/.system/log/<day>/` older than `pruneLogDays` is pruned. Then `stores/infrared-store-paths-applied`: `format`, `hash`, `at`, `result`, `message`, the `rules` it holds and the prefixes `purged`. |
+| `stores/infrared-store-moves` (the journal) | When its `wantHash` hashes its `id`, `seq` and `want`, and has no outcome: each want in turn (`measure`, `copy <n>`, `delete <n>`, `vacuum`), each step a line of `state.<n>`, then the `outcome`. |
+
+Every move is a copy, a verification and only then a deletion, never a move
+in place (no `fs.mv`, no rename): nothing is deleted before its copy is
+verified at its new path (the owner, 2026-11-17).
+
+- **copy** records `copying`, read back, before the first file. Each of the
+  source's files the destination lacks is copied as new data, S3 CopyObject
+  with `If-None-Match: *`, which writes new chunks and never over a file; a
+  destination file of the same size and SHA-256 keeps its data; one that
+  differs is never written over (`mismatch`). Each copy then takes its
+  source's modification time, which Zot takes as the push time, through the
+  filer (`StreamMutateEntry`, the entry as it is, its chunks untouched, only
+  the time changed). `copied` counts the source's files the destination holds.
+- **verify**, right after: the same files on both sides, each of the same
+  size, SHA-256, bytes read and time, every `blobs/sha256/<hex>` of SHA-256
+  `<hex>`, and every one of the source's files compared: `verified` with the
+  counts and the listing's digest, else `mismatch`.
+- **delete** takes a move whose last step of this migration is `verified`, as
+  the journal reads at that moment, and whose copy still holds every file left
+  at the source at the same size and time (a repository's, as many files and
+  bytes as were verified); it removes the source's files one by one, then its
+  own folders if empty (`fs.rm` without `-r`, which the filer refuses for a
+  folder that holds anything). Else `failed`, and nothing is removed.
+- **measure** counts each move's files at its source and destination, the
+  free space (the least, over the volume servers, of a server's free disk less
+  a tenth of its disk, times the servers, over the bucket's copies), and the
+  repositories found below `from`. **vacuum** compacts the bucket's volumes
+  with a tenth or more deleted.
+
+A repository's own files are those directly in its folder and every file
+under its `blobs/`, `.uploads/` and `.sync/`; any other folder is another
+repository's. The journal may carry `scope: tree`, an addition to format 1 that
+an operator from before it never writes: a move then owns every file below its
+folder, and its destination may hold others' files, which it leaves alone and
+does not count. That is the `-v1` test actors' snapshots, copied to
+`platform/snapshots/` (moves `counter-v1/atespaces` and `sandbox-v1/atespaces`
+to `atespaces`, from `/buckets/ate-snapshots/platform/` to
+`/buckets/ate-snapshots/platform/snapshots/`). Deleting the `-v1`
+templates and their actors through Substrate's API, once both are verified,
+is the operator's (a later slice of the build), which asks for no applier
+delete of them: Substrate collects their prefixes.
+
+Two containers, each with one kind of credential, meet in an `emptyDir`:
+
+| Container | Holds | Does |
+|---|---|---|
+| `journal`, a sidecar (an init container that restarts) | the pod's only Kubernetes token, for the Role `seaweedfs-paths`: get `infrared-store-paths`; get and patch `infrared-store-paths-applied` and `infrared-store-moves`, by name | reads the three ConfigMaps at the start, then writes the applier's own keys and no other: each write carries the `resourceVersion` it read and is read back, and one on a journal whose `id` changed is refused (stale), which stops the run |
+| `weed` | SeaweedFS's `weed` (copied from its pinned image) and grpcurl, in `alpine/k8s` for `jq` and `curl`; the S3 keys of the identities `registry` and `ate-snapshots`; under mutual TLS the security config, the CA's certificate and the client certificate that the Job `seaweedfs-buckets` mounts; no token | the work: `weed shell`, the filer's and master's gRPC (TLS or plain as the stores run), S3 to the gateway, signed with curl's `--aws-sigv4` |
+
+Both run in `stores`, inside the stores' fence, which admits the namespace's
+own pods to every server: the applier needs no new door. Under
+`.StoresSecurity` it never uses the filer's HTTP, whose tokens it holds no key
+for.
+
+`scripts/store-applier-test.sh` runs the two scripts as the template renders
+them against a pretend SeaweedFS and API (`scripts/testdata/store-applier`):
+the path rules, the refusals, and every step of a migration, among them that
+a destination file that differs is never written over, that a copy that
+fails or does not match leaves the source and is never deleted, that a stopped
+run resumes, that a delete whose copy changed since its verification deletes
+nothing, and that a journal another migration took stops the run. `make
+verify` runs it. A real SeaweedFS is the proof on kind (P2).
 
 ### Agent Substrate
 

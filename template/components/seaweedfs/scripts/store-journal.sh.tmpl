@@ -1,0 +1,228 @@
+[[- if and .Stores (or .StorePaths .StoresMigration) -]]
+#!/bin/bash
+# =============================================================================
+# store-journal: the stores' applier's way to the Kubernetes API.
+# =============================================================================
+# The CronJob stores/seaweedfs-paths runs two containers (paths.yaml). This
+# one, the sidecar journal, holds the pod's only Kubernetes token and nothing
+# of SeaweedFS's; the container weed holds SeaweedFS's client certificate and
+# S3 keys and no token. They meet in the emptyDir /work:
+#
+#   in/paths.json    stores/infrared-store-paths' data, as the operator wrote it
+#   in/applied.json  stores/infrared-store-paths-applied's data
+#   in/moves.json    stores/infrared-store-moves' data, the migration's journal
+#   ready            written once the three are read (a ConfigMap that does not
+#                    exist leaves its file out); error says why they could not be
+#   req/<n>          a request of the container weed: its op, then its
+#                    arguments, a line each, then its value
+#   res/<n>          the answer: ok, stale <id> or error <why>, then a value
+#
+# The ops, each on a key the applier writes and on no other (the operator's
+# keys are the operator's):
+#
+#   append state.<n> <id> <line>   appends the line to the journal's key, if
+#                                  the journal's id is still <id>
+#   put measured|outcome <id>      sets the key to the value, the same way
+#   get state.<n> <id>             answers the key's value, the same way
+#   applied                        merges the value, a JSON object of the
+#                                  keys format, hash, at, result, message,
+#                                  rules and purged, into
+#                                  infrared-store-paths-applied
+#
+# Every write carries the resourceVersion it read, so a concurrent writer is a
+# conflict and the write is tried again on what is there now, and every write
+# is read back before it is answered ok: a step of a move is recorded before
+# the container weed takes it. A journal whose id changed is another
+# migration's: the answer is stale, and nothing is written.
+#
+# It runs as a sidecar (an init container that restarts), which the kubelet
+# stops once the container weed has ended. Restarted, it answers from the
+# first request without an answer, never one twice, and reads the ConfigMaps
+# again only if it had not yet.
+# =============================================================================
+set -uo pipefail
+umask 077
+WORK="${WORK:-/work}"
+NS="${NAMESPACE:-stores}"
+PATHS_CM=infrared-store-paths
+APPLIED_CM=infrared-store-paths-applied
+MOVES_CM=infrared-store-moves
+mkdir -p "$WORK/in" "$WORK/req" "$WORK/res" "$WORK/tmp"
+tmp="$WORK/tmp/journal"
+mkdir -p "$tmp"
+
+log() { printf 'journal: %s\n' "$*" >&2; }
+
+# read_data <ConfigMap> <file>: writes the ConfigMap's data as JSON to file;
+# absent, the file is left out. Fails on any other error.
+read_data() {
+  local err=$tmp/read.err
+  if kubectl -n "$NS" get configmap "$1" -o json >"$tmp/read.json" 2>"$err"; then
+    jq -c '.data // {}' "$tmp/read.json" >"$2.new"
+    mv "$2.new" "$2"
+    return 0
+  fi
+  if grep -q 'NotFound\|not found' "$err"; then
+    rm -f "$2"
+    return 0
+  fi
+  log "reading the ConfigMap $NS/$1: $(head -c 300 "$err")"
+  return 1
+}
+
+# The three ConfigMaps, read once at the start; the container weed waits for
+# ready before it does anything.
+if [ ! -e "$WORK/ready" ]; then
+  start_error=""
+  tries=0
+  until read_data "$PATHS_CM" "$WORK/in/paths.json" && read_data "$APPLIED_CM" "$WORK/in/applied.json" \
+    && read_data "$MOVES_CM" "$WORK/in/moves.json"; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 30 ]; then
+      start_error="the ConfigMaps in $NS could not be read"
+      break
+    fi
+    sleep 2
+  done
+  if [ -n "$start_error" ]; then
+    printf '%s\n' "$start_error" >"$WORK/error"
+  fi
+  : >"$WORK/ready"
+  log "read $PATHS_CM, $APPLIED_CM and $MOVES_CM${start_error:+ (failed: $start_error)}"
+fi
+
+# answer <n> <status> [value file]
+answer() {
+  { printf '%s\n' "$2"; if [ -n "${3:-}" ]; then cat "$3"; fi; } >"$WORK/res/.$1"
+  mv "$WORK/res/.$1" "$WORK/res/$1"
+}
+
+# patch_journal <n> <key> <id> <mode> <value file>: mode append adds the line
+# in the value file to the key, put sets the key to the value. Answers.
+patch_journal() {
+  local n=$1 key=$2 id=$3 mode=$4 value=$5 attempt=0 rv cur want
+  while :; do
+    attempt=$((attempt + 1))
+    if ! kubectl -n "$NS" get configmap "$MOVES_CM" -o json >"$tmp/cm.json" 2>"$tmp/cm.err"; then
+      answer "$n" "error the journal $NS/$MOVES_CM could not be read: $(head -c 200 "$tmp/cm.err" | tr '\n' ' ')"
+      return
+    fi
+    cur="$(jq -r '.data.id // ""' "$tmp/cm.json")"
+    if [ "$cur" != "$id" ]; then
+      answer "$n" "stale $cur"
+      return
+    fi
+    rv="$(jq -r '.metadata.resourceVersion' "$tmp/cm.json")"
+    if [ "$mode" = append ]; then
+      # A line already last (a request answered once already, by a journal
+      # that stopped before its answer) is not added twice.
+      if jq -e --rawfile line "$value" --arg key "$key" \
+        '((.data[$key] // "") | rtrimstr("\n") | split("\n") | last) == ($line | rtrimstr("\n"))' "$tmp/cm.json" >/dev/null; then
+        answer "$n" ok
+        return
+      fi
+      jq -c --rawfile line "$value" --arg key "$key" --arg rv "$rv" \
+        '{metadata: {resourceVersion: $rv}, data: {($key): ((.data[$key] // "") + ($line | rtrimstr("\n")) + "\n")}}' \
+        "$tmp/cm.json" >"$tmp/patch.json"
+    else
+      jq -c -n --rawfile v "$value" --arg key "$key" --arg rv "$rv" '{metadata: {resourceVersion: $rv}, data: {($key): $v}}' >"$tmp/patch.json"
+    fi
+    want="$(jq -r --arg key "$key" '.data[$key]' "$tmp/patch.json")"
+    if kubectl -n "$NS" patch configmap "$MOVES_CM" --type merge --patch-file "$tmp/patch.json" >/dev/null 2>"$tmp/patch.err"; then
+      # Read back: the key holds what was written, and the id is the same.
+      if kubectl -n "$NS" get configmap "$MOVES_CM" -o json >"$tmp/back.json" 2>/dev/null \
+        && [ "$(jq -r '.data.id // ""' "$tmp/back.json")" = "$id" ] \
+        && [ "$(jq -r --arg key "$key" '.data[$key] // ""' "$tmp/back.json")" = "$want" ]; then
+        answer "$n" ok
+        return
+      fi
+    elif ! grep -qi 'conflict\|has been modified' "$tmp/patch.err"; then
+      answer "$n" "error the journal $NS/$MOVES_CM could not be written: $(head -c 200 "$tmp/patch.err" | tr '\n' ' ')"
+      return
+    fi
+    if [ "$attempt" -ge 20 ]; then
+      answer "$n" "error the journal $NS/$MOVES_CM changed under every one of 20 writes"
+      return
+    fi
+    sleep 1
+  done
+}
+
+# get_journal <n> <key> <id>: answers the key's value.
+get_journal() {
+  local n=$1 key=$2 id=$3
+  if ! kubectl -n "$NS" get configmap "$MOVES_CM" -o json >"$tmp/cm.json" 2>"$tmp/cm.err"; then
+    answer "$n" "error the journal $NS/$MOVES_CM could not be read: $(head -c 200 "$tmp/cm.err" | tr '\n' ' ')"
+    return
+  fi
+  if [ "$(jq -r '.data.id // ""' "$tmp/cm.json")" != "$id" ]; then
+    answer "$n" "stale $(jq -r '.data.id // ""' "$tmp/cm.json")"
+    return
+  fi
+  jq -r --arg key "$key" '.data[$key] // ""' "$tmp/cm.json" >"$tmp/value"
+  answer "$n" ok "$tmp/value"
+}
+
+# put_applied <n> <value file>: merges the applier's keys into
+# infrared-store-paths-applied, then reads them back.
+put_applied() {
+  local n=$1 value=$2
+  if ! jq -e 'type == "object" and (keys - ["format", "hash", "at", "result", "message", "rules", "purged"] | length == 0)
+      and ([.[] | type] | all(. == "string"))' "$value" >/dev/null 2>&1; then
+    answer "$n" "error the applied value holds a key the applier does not write"
+    return
+  fi
+  jq -c '{data: .}' "$value" >"$tmp/patch.json"
+  if ! kubectl -n "$NS" patch configmap "$APPLIED_CM" --type merge --patch-file "$tmp/patch.json" >/dev/null 2>"$tmp/patch.err"; then
+    answer "$n" "error $NS/$APPLIED_CM could not be written: $(head -c 200 "$tmp/patch.err" | tr '\n' ' ')"
+    return
+  fi
+  if kubectl -n "$NS" get configmap "$APPLIED_CM" -o json >"$tmp/back.json" 2>/dev/null \
+    && jq -e --slurpfile v "$value" '.data as $d | $v[0] | to_entries | all($d[.key] == .value)' "$tmp/back.json" >/dev/null; then
+    answer "$n" ok
+  else
+    answer "$n" "error $NS/$APPLIED_CM does not read back as written"
+  fi
+}
+
+# One request at a time, in order, from the first without an answer, until
+# the pod ends: the kubelet stops the sidecar once the container weed has, so
+# it never ends by itself, which would have it started again.
+tick=0.2
+sleep "$tick" 2>/dev/null || tick=1
+seq=1
+while [ -e "$WORK/res/$(printf '%06d' "$seq")" ]; do seq=$((seq + 1)); done
+told=""
+while :; do
+  n="$(printf '%06d' "$seq")"
+  req="$WORK/req/$n"
+  if [ ! -e "$req" ]; then
+    if [ -e "$WORK/done" ] && [ -z "$told" ]; then
+      log "the container weed is done; $((seq - 1)) requests answered"
+      told=1
+    fi
+    sleep "$tick"
+    continue
+  fi
+  op="$(sed -n 1p "$req")"
+  key="$(sed -n 2p "$req")"
+  id="$(sed -n 3p "$req")"
+  sed -n '4,$p' "$req" >"$tmp/value"
+  case "$op:$key" in
+    append:state.[0-9]*)
+      case "${key#state.}" in
+        *[!0-9]*) answer "$n" "error the key $key is not one the applier writes" ;;
+        *) patch_journal "$n" "$key" "$id" append "$tmp/value" ;;
+      esac
+      ;;
+    put:measured | put:outcome) patch_journal "$n" "$key" "$id" put "$tmp/value" ;;
+    get:state.[0-9]*) get_journal "$n" "$key" "$id" ;;
+    applied:*) put_applied "$n" "$tmp/value" ;;
+    *) answer "$n" "error the request $op $key is not one the journal takes" ;;
+  esac
+  seq=$((seq + 1))
+done
+[[- else -]]
+# The stores' applier is off: no path rules (INFRARED_STORES_POLICIES) and no
+# migration between the stores' layouts, so nothing runs this.
+[[- end ]]

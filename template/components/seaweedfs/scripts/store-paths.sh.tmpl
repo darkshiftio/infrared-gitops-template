@@ -1,0 +1,860 @@
+[[- if and .Stores (or .StorePaths .StoresMigration) -]]
+#!/bin/bash
+# =============================================================================
+# store-paths: the stores' applier (infrared-docs-internal ADR 0087 D5 to D7,
+# D10), in the container weed of the CronJob stores/seaweedfs-paths.
+# =============================================================================
+# It holds SeaweedFS's client certificate and S3 keys and no Kubernetes token:
+# the sidecar journal (store-journal.sh) reads the ConfigMaps for it, at the
+# start, and writes what it records, through /work. Each run does both of the
+# operator's contracts, in this order (the operator's
+# internal/controller/storage_policies.go and storage_moves.go, format 1):
+#
+# The path rules, from stores/infrared-store-paths:
+#   - each rule is made exactly what is wanted at its prefix: a rule that is
+#     not is deleted, then written whole (fs.configure merges into a rule, and
+#     an empty TTL never clears one); a rule that is, is left alone;
+#   - the rules it wrote before (stores/infrared-store-paths-applied, rules)
+#     that are no longer wanted are deleted, and no other rule;
+#   - each purge prefix, a deleted org's media or snapshots, is removed
+#     (fs.rm -r): a deliberate deletion, not a move;
+#   - the filer's log, /topics/.system/log/<day>/, is pruned of days older
+#     than pruneLogDays;
+#   - what it did goes to infrared-store-paths-applied.
+#
+# The journal of a migration between the stores' layouts, stores/infrared-store-
+# moves, when it wants something not yet done, each want in turn:
+#   measure     each move's files and bytes at its source and destination, the
+#               store's free space, and the repositories found
+#   copy <n>    copying is recorded, and read back, before the first file is
+#               copied. Each of the source's files the destination lacks is
+#               copied as new data (S3 CopyObject, which writes new chunks),
+#               and never over a destination file (If-None-Match: *); a
+#               destination file of the same size and SHA-256 keeps its data.
+#               Each copy then takes its source's modification time through
+#               the filer (UpdateEntry with the entry as it is, its chunks
+#               untouched), since Zot takes it as the push time. A destination
+#               file that differs is never written over: mismatch. Then it
+#               verifies: the same files on both sides (for a tree move, each
+#               of the source's at the destination), each of the same size,
+#               SHA-256, bytes read and modification time, and every
+#               blobs/sha256/<hex> of SHA-256 <hex>: verified, with the counts
+#               and the listing, else mismatch. Nothing of the source changes.
+#   delete <n>  only a move whose last step of this migration is verified, as
+#               the journal reads at that moment, and whose copy still holds
+#               every one of the source's files at the same size and time:
+#               its source's own files are removed, file by file, never a
+#               folder with what is in it; else failed, and nothing is removed
+#   vacuum      the bucket's volumes are vacuumed
+# then the outcome. No file is ever moved or renamed in place. A run that
+# stops before its outcome is asked again; each step reads what is there, so
+# it resumes where the files and the journal are.
+#
+# A repository's own files (scope repository, the registry's) are those
+# directly in its folder and every file under its blobs/, .uploads/ and
+# .sync/ folders; any other folder in it is another repository's. A tree move
+# (scope tree, a template's snapshots) owns every file below its folder, and
+# its destination may hold others' files too, which it leaves alone.
+# =============================================================================
+set -euo pipefail
+umask 077
+WORK="${WORK:-/work}"
+WEED="${WEED:-/tools/weed}"
+GRPCURL="${GRPCURL:-/tools/grpcurl}"
+FILER_GRPC="${FILER_GRPC:-seaweedfs-filer-client.stores:18888}"
+MASTER_GRPC="${MASTER_GRPC:-seaweedfs-master.stores:19333}"
+S3_ENDPOINT="${S3_ENDPOINT:-http://seaweedfs-s3.stores.svc:8333}"
+GRPC_TLS="${GRPC_TLS:-false}"
+BUCKET_COPIES="${BUCKET_COPIES:-2}"
+VACUUM_GARBAGE="${VACUUM_GARBAGE:-0.1}"
+JOURNAL_WAIT="${JOURNAL_WAIT:-600}"
+tmp="$WORK/tmp/weed"
+mkdir -p "$tmp" "$WORK/req" "$WORK/res"
+# The sidecar stops answering once this container has ended.
+trap ': >"$WORK/done"' EXIT
+
+log() { printf '%s\n' "$*"; }
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+oneline() { printf '%s' "$*" | tr '\n\t' '  ' | cut -c1-400; }
+tick=0.2
+sleep "$tick" 2>/dev/null || tick=1
+
+# --- The sidecar journal --------------------------------------------------------
+JSEQ=0
+JREPLY=""
+# journal <op> <key> <id> [value file]: one request; the answer's first line in
+# JREPLY, the rest in $tmp/jvalue. 0 ok, 3 stale, 1 anything else.
+journal() {
+  JSEQ=$((JSEQ + 1))
+  local n deadline
+  n="$(printf '%06d' "$JSEQ")"
+  {
+    printf '%s\n%s\n%s\n' "$1" "$2" "$3"
+    if [ -n "${4:-}" ]; then cat "$4"; fi
+  } >"$WORK/req/.$n"
+  mv "$WORK/req/.$n" "$WORK/req/$n"
+  deadline=$((SECONDS + JOURNAL_WAIT))
+  while [ ! -e "$WORK/res/$n" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      JREPLY="error the journal did not answer within $JOURNAL_WAIT seconds"
+      return 1
+    fi
+    sleep "$tick"
+  done
+  JREPLY="$(head -n 1 "$WORK/res/$n")"
+  sed -n '2,$p' "$WORK/res/$n" >"$tmp/jvalue"
+  case "$JREPLY" in
+    ok) return 0 ;;
+    stale*) return 3 ;;
+    *) return 1 ;;
+  esac
+}
+
+# --- SeaweedFS ------------------------------------------------------------------
+# weed_shell: the commands on stdin, through weed shell, at most an hour.
+weed_shell() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 3600 "$WEED" shell
+  else
+    "$WEED" shell
+  fi
+}
+
+# grpc <address> <service/method>: one call, the request(s) on stdin, the
+# answer(s) on stdout, JSON.
+grpc() {
+  if [ "$GRPC_TLS" = true ]; then
+    "$GRPCURL" -max-time 3600 -cacert "$GRPC_CA" -cert "$GRPC_CERT" -key "$GRPC_KEY" -d @ "$1" "$2"
+  else
+    "$GRPCURL" -max-time 3600 -plaintext -d @ "$1" "$2"
+  fi
+}
+
+# The S3 identities' keys, for curl, in files only this container reads.
+printf 'user = "%s:%s"\n' "${S3_REGISTRY_ACCESS_KEY_ID:-}" "${S3_REGISTRY_SECRET_ACCESS_KEY:-}" >"$tmp/s3-registry.curl"
+printf 'user = "%s:%s"\n' "${S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:-}" "${S3_ATE_SNAPSHOTS_SECRET_ACCESS_KEY:-}" >"$tmp/s3-ate-snapshots.curl"
+
+# key_of <filer path>: the bucket and key of a path under /buckets/.
+bucket_of() { local p=${1#/buckets/}; printf '%s' "${p%%/*}"; }
+key_of() { local p=${1#/buckets/}; printf '%s' "${p#*/}"; }
+
+# hash_object <filer path>: "<sha256> <bytes>" of the file, read through S3.
+hash_object() {
+  local bucket key fifo=$tmp/hash.fifo wcpid rc=0
+  bucket="$(bucket_of "$1")"
+  key="$(key_of "$1")"
+  rm -f "$fifo" "$tmp/hash.count"
+  mkfifo "$fifo"
+  wc -c <"$fifo" >"$tmp/hash.count" &
+  wcpid=$!
+  curl -sS -f --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" "$S3_ENDPOINT/$bucket/$key" 2>"$tmp/hash.err" \
+    | tee "$fifo" | sha256sum >"$tmp/hash.sum" || rc=$?
+  wait "$wcpid" || rc=1
+  [ "$rc" = 0 ] || return 1
+  printf '%s %s\n' "$(cut -d' ' -f1 <"$tmp/hash.sum")" "$(tr -d ' ' <"$tmp/hash.count")"
+}
+
+# copy_object <from path> <to path>: a new copy of the file, never over one:
+# prints copied, or exists when the destination has a file there.
+copy_object() {
+  local bucket code
+  bucket="$(bucket_of "$1")"
+  code="$(curl -sS -o "$tmp/copy.out" -w '%{http_code}' -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" \
+    -H "x-amz-copy-source: /$bucket/$(key_of "$1")" -H "If-None-Match: *" \
+    "$S3_ENDPOINT/$bucket/$(key_of "$2")" 2>"$tmp/copy.err")" || code=000
+  case "$code" in
+    200)
+      if grep -q '<Error>' "$tmp/copy.out"; then return 1; fi
+      echo copied
+      ;;
+    412) echo exists ;;
+    *) return 1 ;;
+  esac
+}
+
+# list_dir <dir> <out> [full]: the entries of a directory, one JSON object a
+# line, every page; without full, without their chunks. A directory that does
+# not exist has none.
+list_dir() {
+  local dir=${1%/} out=$2 omit=true start="" count
+  if [ "${3:-}" = full ]; then omit=false; fi
+  : >"$out"
+  while :; do
+    jq -cn --arg d "${dir:-/}" --arg s "$start" --argjson o "$omit" \
+      '{directory: $d, startFromFileName: $s, inclusiveStartFrom: false, limit: 1000, omitChunks: $o}' \
+      | grpc "$FILER_GRPC" filer_pb.SeaweedFiler/ListEntries >"$tmp/page.json" 2>"$tmp/page.err" || return 1
+    jq -c '.entry' "$tmp/page.json" >"$tmp/page.lines" || return 1
+    cat "$tmp/page.lines" >>"$out"
+    count="$(wc -l <"$tmp/page.lines" | tr -d ' ')"
+    if [ "$count" -lt 1000 ]; then return 0; fi
+    start="$(tail -n 1 "$tmp/page.lines" | jq -r '.name')"
+  done
+}
+
+# walk <dir> <scope> <out>: the files a move owns below <dir>, sorted, a line
+# each: "<path below dir>\t<size>\t<mtime>\t<mtimeNs>"; and in <out>.dirs the
+# folders below <dir> it read, deepest first. Scope repository: the files
+# directly in <dir> and every file under its blobs/, .uploads/ and .sync/;
+# tree: every file below <dir>.
+walk() {
+  local root=${1%/} scope=$2 out=$3 rel
+  : >"$out.unsorted"
+  : >"$out.dirs.unsorted"
+  printf '\n' >"$tmp/walk.queue"
+  while [ -s "$tmp/walk.queue" ]; do
+    : >"$tmp/walk.next"
+    while IFS= read -r rel <&3; do
+      list_dir "$root${rel:+/$rel}" "$tmp/walk.dir" || return 1
+      jq -r --arg rel "$rel" 'select((.isDirectory // false) | not)
+        | [(if $rel == "" then .name else $rel + "/" + .name end), (.attributes.fileSize // "0"),
+           (.attributes.mtime // "0"), ((.attributes.mtimeNs // 0) | tostring)] | @tsv' "$tmp/walk.dir" >>"$out.unsorted"
+      jq -r --arg rel "$rel" --arg scope "$scope" 'select(.isDirectory // false) | .name as $n
+        | select($scope == "tree" or $rel != "" or $n == "blobs" or $n == ".uploads" or $n == ".sync")
+        | if $rel == "" then $n else $rel + "/" + $n end' "$tmp/walk.dir" >>"$tmp/walk.next"
+    done 3<"$tmp/walk.queue"
+    cat "$tmp/walk.next" >>"$out.dirs.unsorted"
+    mv "$tmp/walk.next" "$tmp/walk.queue"
+  done
+  LC_ALL=C sort "$out.unsorted" >"$out"
+  awk -F/ '{ print NF "\t" $0 }' "$out.dirs.unsorted" | LC_ALL=C sort -rn | cut -f2- >"$out.dirs"
+}
+
+# safe_paths <listing>: every path is of the characters S3 keys and weed shell
+# take as they are, with no empty, . or .. segment.
+safe_paths() {
+  local bad
+  bad="$(cut -f1 "$1" | awk '!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/ || /(^|\/)\.\.?(\/|$)/ { print; exit }')"
+  if [ -n "$bad" ]; then
+    SAFE_WHY="a file name the applier does not take: $bad"
+    return 1
+  fi
+}
+
+# join_tsv <source listing> <destination listing>: each source file, with the
+# destination's size and time at the same path, or "-":
+# "<path>\t<size>\t<mtime>\t<mtimeNs>\t<dest size>\t<dest mtime>".
+join_tsv() {
+  # The destination read first, by its name: an empty one is still the
+  # destination (NR == FNR would take the source for it).
+  awk -F'\t' -v OFS='\t' -v dst="$2" 'FILENAME == dst { d[$1] = $2 OFS $3; next } { print $1, $2, $3, $4, (($1 in d) ? d[$1] : "-" OFS "-") }' "$2" "$1"
+}
+
+# counts <listing>: "<files> <bytes>".
+counts() { awk -F'\t' '{ n++; b += $2 } END { printf "%d %.0f\n", n, b }' "$1"; }
+
+# --- The path rules ---------------------------------------------------------------
+PATHS_FAILED=""
+paths_failed() { PATHS_FAILED="$(oneline "$1")"; log "the path rules: $PATHS_FAILED"; }
+
+# rule_json <flags...>: the fields a rule line's flags set, as fs.configure
+# keeps them.
+rule_json() {
+  local f j='{}'
+  for f in "$@"; do
+    case "$f" in
+      -ttl=*) j="$(jq -c --arg v "${f#-ttl=}" '. + {ttl: $v}' <<<"$j")" ;;
+      -replication=*) j="$(jq -c --arg v "${f#-replication=}" '. + {replication: $v}' <<<"$j")" ;;
+      -volumeGrowthCount=*) j="$(jq -c --argjson v "${f#-volumeGrowthCount=}" '. + {volumeGrowthCount: $v}' <<<"$j")" ;;
+      -readOnly) j="$(jq -c '. + {readOnly: true}' <<<"$j")" ;;
+    esac
+  done
+  jq -c -S . <<<"$j"
+}
+
+# read_conf <out>: the filer's path rules, as {prefix: fields set}.
+read_conf() {
+  printf 'fs.configure\n' | weed_shell >"$tmp/conf.out" 2>"$tmp/conf.err" || return 1
+  jq -s -c '.[0].locations // [] | map({key: .locationPrefix, value: (del(.locationPrefix)
+      | with_entries(select(.value != "" and .value != 0 and .value != "0" and .value != false and .value != null
+                            and .value != [] and .value != {})))}) | from_entries' "$tmp/conf.out" >"$1"
+}
+
+apply_paths() {
+  local p="$WORK/in/paths.json" format hash want_hash rules purge prune line prefix flags want cur
+  local message wrote=0 kept=0 removed=0 pruned=0 day cutoff
+  if [ ! -e "$p" ]; then
+    log "no $p: stores/infrared-store-paths does not exist, so there are no path rules to apply"
+    return 0
+  fi
+  format="$(jq -r '.format // ""' "$p")"
+  hash="$(jq -r '.hash // ""' "$p")"
+  : >"$tmp/held"
+  : >"$tmp/purged"
+  if [ "$format" != 1 ]; then
+    paths_failed "the path rules' format is \"$format\", and this applier takes 1"
+  else
+    want_hash="$(jq -j '"format=" + .format + "\nrules:\n" + (.rules // "") + "purge:\n" + (.purge // "") + "pruneLogDays=" + (.pruneLogDays // "") + "\n"' "$p" \
+      | sha256sum | cut -d' ' -f1)"
+    [ "$want_hash" = "$hash" ] || paths_failed "the path rules' hash is $hash, and their keys hash to $want_hash"
+  fi
+  rules="$(jq -r '.rules // ""' "$p")"
+  purge="$(jq -r '.purge // ""' "$p")"
+  prune="$(jq -r '.pruneLogDays // ""' "$p")"
+
+  # Each line checked before anything is applied: a prefix of an org and a
+  # kind, or the platform's other files, and the flags the operator writes.
+  : >"$tmp/want.json.lines"
+  if [ -z "$PATHS_FAILED" ]; then
+    while IFS= read -r line <&3; do
+      [ -n "$line" ] || continue
+      # shellcheck disable=SC2086 # the line's fields
+      set -- $line
+      prefix=$1
+      shift
+      if ! printf '%s\n' "$prefix" | grep -qE '^/(buckets/(registry|media)/[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z]+(-[a-z]+)*/|buckets/ate-snapshots/[a-z0-9]([-a-z0-9]*[a-z0-9])?/snapshots/atespaces/[a-z0-9]([-a-z0-9]*[a-z0-9])?/actors/|topics/)$'; then
+        paths_failed "the rule \"$line\" is at a prefix that is no org's kind and not the platform's other files"
+        break
+      fi
+      if [ "$#" = 0 ]; then
+        paths_failed "the rule \"$line\" sets nothing"
+        break
+      fi
+      for flags in "$@"; do
+        if ! printf '%s\n' "$flags" | grep -qE '^(-ttl=[0-9]{1,3}[mhdwMy]|-replication=[0-9]{3}|-volumeGrowthCount=[0-9]{1,3}|-readOnly)$'; then
+          paths_failed "the rule \"$line\" has a flag this applier does not take: $flags"
+          break 2
+        fi
+      done
+      jq -cn --arg k "$prefix" --argjson v "$(rule_json "$@")" --arg flags "$*" '{key: $k, value: $v, flags: $flags}' >>"$tmp/want.json.lines"
+    done 3<<<"$rules"
+  fi
+  if [ -z "$PATHS_FAILED" ]; then
+    while IFS= read -r line <&3; do
+      [ -n "$line" ] || continue
+      if ! printf '%s\n' "$line" | grep -qE '^/buckets/(ate-snapshots|media)/[a-z0-9]([-a-z0-9]*[a-z0-9])?/$' \
+        || printf '%s\n' "$line" | grep -qE '^/buckets/[a-z-]+/(platform|ate-golden)/$'; then
+        paths_failed "the purge prefix \"$line\" is not a deleted org's media or snapshots"
+        break
+      fi
+    done 3<<<"$purge"
+    case "$prune" in
+      "" | [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | [1-9][0-9][0-9][0-9]) ;;
+      *) paths_failed "pruneLogDays is \"$prune\", not a number of days" ;;
+    esac
+  fi
+
+  if [ -z "$PATHS_FAILED" ]; then
+    jq -s -c 'map({key, value: .value}) | from_entries' "$tmp/want.json.lines" >"$tmp/want.json"
+    jq -r '(.rules // "") | split("\n")[] | select(. != "")' "$WORK/in/applied.json" 2>/dev/null >"$tmp/previous" || : >"$tmp/previous"
+    if ! read_conf "$tmp/conf.json"; then
+      paths_failed "the filer's path rules could not be read: $(head -c 300 "$tmp/conf.err")"
+    fi
+  fi
+  if [ -z "$PATHS_FAILED" ]; then
+    # Deleted, then written whole: each wanted rule that is not exactly so.
+    # Deleted: each rule written before that is no longer wanted.
+    : >"$tmp/configure"
+    while IFS= read -r line <&3; do
+      prefix="$(jq -r .key <<<"$line")"
+      want="$(jq -c -S .value <<<"$line")"
+      cur="$(jq -c -S --arg k "$prefix" '.[$k] // empty' "$tmp/conf.json")"
+      if [ "$cur" = "$want" ]; then
+        kept=$((kept + 1))
+        continue
+      fi
+      if [ -n "$cur" ]; then
+        printf 'fs.configure -locationPrefix=%s -delete -apply\n' "$prefix" >>"$tmp/configure"
+      fi
+      printf 'fs.configure -locationPrefix=%s %s -apply\n' "$prefix" "$(jq -r '.flags' <<<"$line")" >>"$tmp/configure"
+      wrote=$((wrote + 1))
+    done 3<"$tmp/want.json.lines"
+    while IFS= read -r prefix <&3; do
+      [ -n "$prefix" ] || continue
+      if jq -e --arg k "$prefix" 'has($k)' "$tmp/want.json" >/dev/null; then continue; fi
+      if jq -e --arg k "$prefix" 'has($k)' "$tmp/conf.json" >/dev/null; then
+        printf 'fs.configure -locationPrefix=%s -delete -apply\n' "$prefix" >>"$tmp/configure"
+        removed=$((removed + 1))
+      fi
+    done 3<"$tmp/previous"
+    if [ -s "$tmp/configure" ] && ! weed_shell <"$tmp/configure" >"$tmp/configure.out" 2>"$tmp/configure.err"; then
+      paths_failed "fs.configure failed: $(head -c 300 "$tmp/configure.err")"
+    fi
+    # Read back: every wanted rule exactly so, every removed one gone.
+    if read_conf "$tmp/conf.json"; then
+      while IFS= read -r line <&3; do
+        prefix="$(jq -r .key <<<"$line")"
+        if [ "$(jq -c -S --arg k "$prefix" '.[$k] // empty' "$tmp/conf.json")" != "$(jq -c -S .value <<<"$line")" ] && [ -z "$PATHS_FAILED" ]; then
+          paths_failed "the rule at $prefix reads back as $(jq -c --arg k "$prefix" '.[$k] // "none"' "$tmp/conf.json")"
+        fi
+      done 3<"$tmp/want.json.lines"
+      # What it holds now: what it wrote or wrote before, as the filer has it.
+      { jq -r 'keys[]' "$tmp/want.json"; cat "$tmp/previous"; } | LC_ALL=C sort -u | while IFS= read -r prefix; do
+        if jq -e --arg k "$prefix" 'has($k)' "$tmp/conf.json" >/dev/null; then printf '%s\n' "$prefix"; fi
+      done >"$tmp/held"
+    else
+      [ -n "$PATHS_FAILED" ] || paths_failed "the filer's path rules could not be read back: $(head -c 300 "$tmp/conf.err")"
+      cp "$tmp/previous" "$tmp/held"
+    fi
+  fi
+
+  # A deleted org's prefixes: removed, then looked up to be gone.
+  if [ -z "$PATHS_FAILED" ]; then
+    while IFS= read -r prefix <&3; do
+      [ -n "$prefix" ] || continue
+      printf 'fs.rm -r %s\n' "${prefix%/}" | weed_shell >"$tmp/rm.out" 2>&1 || true
+      list_dir "${prefix%/}" "$tmp/purge.dir" || { paths_failed "$prefix could not be listed after its removal"; break; }
+      if [ -s "$tmp/purge.dir" ] || jq -cn --arg d "$(dirname "${prefix%/}")" --arg n "$(basename "${prefix%/}")" '{directory: $d, name: $n}' \
+        | grpc "$FILER_GRPC" filer_pb.SeaweedFiler/LookupDirectoryEntry >/dev/null 2>"$tmp/lookup.err"; then
+        paths_failed "$prefix is still there after its removal: $(head -c 200 "$tmp/rm.out")"
+        break
+      fi
+      if ! grep -q 'no entry is found\|not found\|NotFound' "$tmp/lookup.err"; then
+        paths_failed "$prefix could not be looked up after its removal: $(head -c 200 "$tmp/lookup.err")"
+        break
+      fi
+      printf '%s\n' "$prefix" >>"$tmp/purged"
+      log "purged $prefix"
+    done 3<<<"$purge"
+  fi
+
+  # The filer's log takes no TTL: its days older than pruneLogDays go.
+  if [ -z "$PATHS_FAILED" ] && [ -n "$prune" ]; then
+    cutoff=$(($(date -u +%s) - prune * 86400))
+    cutoff="$(date -u -d "@$cutoff" +%Y-%m-%d 2>/dev/null || date -u -r "$cutoff" +%Y-%m-%d)"
+    if list_dir /topics/.system/log "$tmp/log.dir"; then
+      : >"$tmp/prune"
+      for day in $(jq -r 'select(.isDirectory // false) | .name' "$tmp/log.dir"); do
+        if printf '%s\n' "$day" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' && [ "$day" \< "$cutoff" ]; then
+          printf 'fs.rm -r /topics/.system/log/%s\n' "$day" >>"$tmp/prune"
+          pruned=$((pruned + 1))
+        fi
+      done
+      if [ -s "$tmp/prune" ]; then weed_shell <"$tmp/prune" >/dev/null 2>"$tmp/prune.err" || paths_failed "the filer's log could not be pruned: $(head -c 200 "$tmp/prune.err")"; fi
+    else
+      paths_failed "the filer's log could not be listed"
+    fi
+  fi
+
+  if [ -n "$PATHS_FAILED" ]; then
+    message="$PATHS_FAILED"
+  else
+    message="$((wrote + kept)) rules held ($wrote written, $kept as they were), $removed removed, $(grep -c . "$tmp/purged" || true) prefixes purged, $pruned days of the filer's log pruned"
+  fi
+  jq -n --arg hash "$hash" --arg at "$(now)" --arg result "$([ -n "$PATHS_FAILED" ] && echo failed || echo applied)" \
+    --arg message "$message" --rawfile rules "$tmp/held" --rawfile purged "$tmp/purged" \
+    '{format: "1", hash: $hash, at: $at, result: $result, message: $message, rules: $rules, purged: $purged}' >"$tmp/applied.json"
+  if ! journal applied - - "$tmp/applied.json"; then
+    log "infrared-store-paths-applied could not be written: $JREPLY"
+    return 1
+  fi
+  log "the path rules: $message"
+  [ -z "$PATHS_FAILED" ]
+}
+
+# --- The migration's journal -------------------------------------------------------
+ID=""
+WANT_HASH=""
+MOVES_FAILED=""
+
+# stop_run <why>: the run cannot go on; its outcome says so, when the journal
+# takes it, and nothing more is copied or deleted.
+stop_run() {
+  MOVES_FAILED="$(oneline "$1")"
+  log "the journal: failed: $MOVES_FAILED"
+  printf '%s %s failed %s\n' "$WANT_HASH" "$(now)" "$MOVES_FAILED" >"$tmp/outcome"
+  journal put outcome "$ID" "$tmp/outcome" || log "the outcome could not be written: $JREPLY"
+  exit 1
+}
+
+# step <n> <step and its fields>: appends "<id> <step ...>" to move n's state,
+# read back before it returns. A journal of another migration stops the run
+# without an outcome; one that cannot be written, with one.
+step() {
+  printf '%s %s\n' "$ID" "$(oneline "$2")" >"$tmp/step"
+  log "move $1: $2"
+  journal append "state.$1" "$ID" "$tmp/step" && return 0
+  if [ "$?" = 3 ]; then
+    log "the journal is another migration's now ($JREPLY): this run stops"
+    exit 1
+  fi
+  stop_run "move $1's step could not be recorded: $JREPLY"
+}
+
+# move <n>: sets SRC and DST, the move's folders (no trailing slash), from
+# the journal; a move whose folders lie one in the other is refused.
+move() {
+  local line
+  line="$(awk -v n="$1" '$1 == n { print; exit }' "$tmp/moves")"
+  [ -n "$line" ] || return 1
+  SRC="$FROM$(cut -d' ' -f2 <<<"$line")"
+  DST="$TO$(cut -d' ' -f3 <<<"$line")"
+  case "$DST/" in "$SRC/"*) return 1 ;; esac
+  case "$SRC/" in "$DST/"*) return 1 ;; esac
+}
+
+# copy_move <n>: copies move n's files, sets their times, then verifies.
+copy_move() {
+  local n=$1 p size mtime ns dsize dmtime r hs hd files bytes
+  if ! move "$n"; then
+    step "$n" "failed $(now) there is no move $n in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  step "$n" "copying $(now)"
+  walk "$SRC" "$SCOPE" "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if ! safe_paths "$tmp/src"; then
+    step "$n" "failed $(now) $SAFE_WHY"
+    return 0
+  fi
+  walk "$DST" "$SCOPE" "$tmp/dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  join_tsv "$tmp/src" "$tmp/dst" >"$tmp/joined"
+  [ "$(grep -c . "$tmp/joined" || true)" = "$(grep -c . "$tmp/src" || true)" ] || stop_run "move $n's listings do not join"
+  : >"$tmp/times"
+  while IFS=$'\t' read -r p size mtime ns dsize dmtime <&3; do
+    if [ "$dsize" = - ]; then
+      if ! r="$(copy_object "$SRC/$p" "$DST/$p")"; then
+        step "$n" "failed $(now) $p could not be copied: HTTP $(head -c 100 "$tmp/copy.out" | tr -d '\n') $(head -c 100 "$tmp/copy.err")"
+        return 0
+      fi
+    else
+      r=exists
+    fi
+    if [ "$r" = exists ]; then
+      # A file at the destination already: it keeps its data only if it is
+      # the source's, and is never written over.
+      if ! hs="$(hash_object "$SRC/$p")" || ! hd="$(hash_object "$DST/$p")"; then
+        step "$n" "failed $(now) $p could not be read: $(head -c 200 "$tmp/hash.err")"
+        return 0
+      fi
+      if [ "$hs" != "$hd" ]; then
+        step "$n" "mismatch $(now) $p at the destination is another file (SHA-256 and bytes ${hd% *} ${hd#* }, the source's ${hs% *} ${hs#* }): it is not written over"
+        return 0
+      fi
+    fi
+    printf '%s\t%s\t%s\n' "$p" "$mtime" "$ns" >>"$tmp/times"
+  done 3<"$tmp/joined"
+  if ! set_times "$DST" "$tmp/times"; then
+    step "$n" "failed $(now) the copies' modification times could not be set: $SET_TIMES_WHY"
+    return 0
+  fi
+  walk "$DST" "$SCOPE" "$tmp/dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  join_tsv "$tmp/src" "$tmp/dst" | awk -F'\t' -v OFS='\t' '$5 != "-" { print $1, $2 }' >"$tmp/held.copies"
+  read -r files bytes <<<"$(counts "$tmp/held.copies")"
+  step "$n" "copied $(now) $files $bytes"
+  verify_move "$n"
+}
+
+# set_times <dir> <list>: each "<path>\t<mtime>\t<mtimeNs>" below dir takes
+# that modification time, through the filer: the entry as it is, its chunks
+# untouched, only the time changed.
+SET_TIMES_WHY=""
+set_times() {
+  local dir=${1%/} d total sent
+  : >"$tmp/updates"
+  awk -F'\t' '{ p = $1; sub(/\/[^\/]*$/, "", p); if (p == $1) p = ""; print p }' "$2" | LC_ALL=C sort -u >"$tmp/times.dirs"
+  while IFS= read -r d <&3; do
+    list_dir "$dir${d:+/$d}" "$tmp/times.entries" full || { SET_TIMES_WHY="$dir/$d could not be listed"; return 1; }
+    awk -F'\t' -v d="$d" '{ p = $1; n = p; sub(/^.*\//, "", n); sub(/\/[^\/]*$/, "", p); if (p == $1) p = "";
+        if (p == d) print n "\t" $2 "\t" $3 }' "$2" \
+      | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: [.[1], (.[2] | tonumber)]}) | from_entries' >"$tmp/times.want"
+    jq -c --slurpfile want "$tmp/times.want" --arg dir "$dir${d:+/$d}" '.name as $n | select($want[0][$n]) | select((.isDirectory // false) | not)
+      | {updateRequest: {directory: $dir, entry: (.attributes.mtime = $want[0][$n][0] | .attributes.mtimeNs = $want[0][$n][1])}}' \
+      "$tmp/times.entries" >>"$tmp/updates"
+  done 3<"$tmp/times.dirs"
+  total="$(grep -c . "$tmp/updates" || true)"
+  if [ "$total" != "$(grep -c . "$2" || true)" ]; then
+    SET_TIMES_WHY="$total of $(grep -c . "$2" || true) copies found to set"
+    return 1
+  fi
+  # In batches of 200, one stream each; every answer without an error.
+  sent=0
+  while [ "$sent" -lt "$total" ]; do
+    sed -n "$((sent + 1)),$((sent + 200))p" "$tmp/updates" | jq -c --argjson base "$sent" -s 'to_entries[] | .value + {requestId: ($base + .key + 1)}' >"$tmp/batch"
+    if ! grpc "$FILER_GRPC" filer_pb.SeaweedFiler/StreamMutateEntry <"$tmp/batch" >"$tmp/batch.out" 2>"$tmp/batch.err"; then
+      SET_TIMES_WHY="$(head -c 200 "$tmp/batch.err")"
+      return 1
+    fi
+    if [ "$(jq -s '[.[] | select((.error // "") == "")] | length' "$tmp/batch.out")" != "$(grep -c . "$tmp/batch")" ]; then
+      SET_TIMES_WHY="$(jq -r 'select((.error // "") != "") | .error' "$tmp/batch.out" | head -n 1)"
+      return 1
+    fi
+    sent=$((sent + 200))
+  done
+}
+
+# verify_move <n>: the copy is the source, file by file.
+verify_move() {
+  local n=$1 p size mtime ns dsize dmtime hs hd extra files bytes listing
+  walk "$SRC" "$SCOPE" "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  walk "$DST" "$SCOPE" "$tmp/dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ "$SCOPE" = repository ]; then
+    extra="$(join_tsv "$tmp/dst" "$tmp/src" | awk -F'\t' '$5 == "-" { print $1; exit }')"
+    if [ -n "$extra" ]; then
+      step "$n" "mismatch $(now) the destination holds $extra, which the source does not"
+      return 0
+    fi
+  fi
+  join_tsv "$tmp/src" "$tmp/dst" >"$tmp/joined"
+  [ "$(grep -c . "$tmp/joined" || true)" = "$(grep -c . "$tmp/src" || true)" ] || stop_run "move $n's listings do not join"
+  : >"$tmp/listing"
+  while IFS=$'\t' read -r p size mtime ns dsize dmtime <&3; do
+    if [ "$dsize" = - ]; then
+      step "$n" "mismatch $(now) $p is not at the destination"
+      return 0
+    fi
+    if [ "$dsize" != "$size" ]; then
+      step "$n" "mismatch $(now) $p is $size bytes at the source and $dsize at the destination"
+      return 0
+    fi
+    if [ "$dmtime" != "$mtime" ]; then
+      step "$n" "mismatch $(now) $p was modified at $mtime at the source and $dmtime at the destination"
+      return 0
+    fi
+    if ! hs="$(hash_object "$SRC/$p")" || ! hd="$(hash_object "$DST/$p")"; then
+      step "$n" "failed $(now) $p could not be read: $(head -c 200 "$tmp/hash.err")"
+      return 0
+    fi
+    if [ "$hs" != "$hd" ]; then
+      step "$n" "mismatch $(now) $p differs: SHA-256 and bytes ${hs% *} ${hs#* } at the source, ${hd% *} ${hd#* } at the destination"
+      return 0
+    fi
+    case "$p" in
+      blobs/sha256/*)
+        if [ "${hs% *}" != "${p#blobs/sha256/}" ]; then
+          step "$n" "mismatch $(now) $p holds content of SHA-256 ${hs% *}, not its name"
+          return 0
+        fi
+        ;;
+    esac
+    printf '%s %s %s %s\n' "$p" "$size" "${hs% *}" "$mtime" >>"$tmp/listing"
+  done 3<"$tmp/joined"
+  read -r files bytes <<<"$(counts "$tmp/src")"
+  # Every one of the source's files was compared, or nothing is verified.
+  if [ "$(grep -c . "$tmp/listing" || true)" != "$files" ]; then
+    step "$n" "mismatch $(now) $(grep -c . "$tmp/listing" || true) of the source's $files files were compared"
+    return 0
+  fi
+  listing="$(LC_ALL=C sort "$tmp/listing" | sha256sum | cut -d' ' -f1)"
+  step "$n" "verified $(now) $files $bytes $listing"
+}
+
+# delete_move <n>: the source's own files, only for a verified move whose copy
+# still holds them.
+delete_move() {
+  local n=$1 last vfiles vbytes left removed d dfiles dbytes
+  if ! move "$n"; then
+    step "$n" "failed $(now) there is no move $n in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  # What the journal says now, not what it said when the run started.
+  journal get "state.$n" "$ID" || {
+    if [ "$?" = 3 ]; then log "the journal is another migration's now ($JREPLY): this run stops"; exit 1; fi
+    stop_run "move $n's steps could not be read: $JREPLY"
+  }
+  last="$(awk -v id="$ID" '$1 == id' "$tmp/jvalue" | tail -n 1)"
+  if [ "$(cut -d' ' -f2 <<<"$last")" != verified ]; then
+    step "$n" "failed $(now) not verified: its last step is \"$(cut -d' ' -f2- <<<"$last")\", so nothing of it is deleted"
+    return 0
+  fi
+  vfiles="$(cut -d' ' -f4 <<<"$last")"
+  vbytes="$(cut -d' ' -f5 <<<"$last")"
+  walk "$SRC" "$SCOPE" "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  walk "$DST" "$SCOPE" "$tmp/dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  read -r dfiles dbytes <<<"$(counts "$tmp/dst")"
+  # The copy is still what was verified: for a repository its own files, as
+  # many and as large; and every file left at the source is at the
+  # destination at the same size and time.
+  if [ "$SCOPE" = repository ] && { [ "$dfiles" != "$vfiles" ] || [ "$dbytes" != "$vbytes" ]; }; then
+    step "$n" "failed $(now) its copy holds $dfiles files and $dbytes bytes, and $vfiles and $vbytes were verified: nothing of it is deleted"
+    return 0
+  fi
+  left="$(join_tsv "$tmp/src" "$tmp/dst" | awk -F'\t' '$5 != $2 || $6 != $3 { print $1; exit }')"
+  if [ -n "$left" ]; then
+    step "$n" "failed $(now) $left at the source is not at the destination as verified: nothing of it is deleted"
+    return 0
+  fi
+  removed="$(grep -c . "$tmp/src" || true)"
+  if [ "$removed" -gt 0 ]; then
+    if ! safe_paths "$tmp/src"; then
+      step "$n" "failed $(now) $SAFE_WHY"
+      return 0
+    fi
+    # File by file, never a folder with what is in it: 100 paths a command.
+    cut -f1 "$tmp/src" | awk -v src="$SRC" 'NR % 100 == 1 { if (NR > 1) print line; line = "fs.rm" } { line = line " " src "/" $0 } END { if (NR) print line }' >"$tmp/rm"
+    weed_shell <"$tmp/rm" >"$tmp/rm.out" 2>&1 || true
+    walk "$SRC" "$SCOPE" "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+    if [ -s "$tmp/src" ]; then
+      step "$n" "failed $(now) $(grep -c . "$tmp/src") of the source's files are still there after their deletion: $(head -c 200 "$tmp/rm.out")"
+      return 0
+    fi
+    # Then its own folders, deepest first, each only if empty: the filer
+    # refuses a folder that holds anything (fs.rm without -r).
+    : >"$tmp/rmdir"
+    while IFS= read -r d <&3; do
+      printf 'fs.rm %s/%s\n' "$SRC" "$d" >>"$tmp/rmdir"
+    done 3<"$tmp/src.dirs"
+    printf 'fs.rm %s\n' "$SRC" >>"$tmp/rmdir"
+    weed_shell <"$tmp/rmdir" >/dev/null 2>&1 || true
+  fi
+  step "$n" "deleted $(now) $removed"
+}
+
+# free_bytes: what the store takes before a volume server turns its volumes
+# read-only, every copy counted: the least, over the volume servers, of a
+# server's free disk less a tenth of its disk, times the servers, divided by
+# the bucket's copies.
+free_bytes() {
+  local id least="" servers=0 all free avail
+  printf '{}\n' | grpc "$MASTER_GRPC" master_pb.Seaweed/VolumeList >"$tmp/topology.json" 2>"$tmp/topology.err" || return 1
+  for id in $(jq -r '.. | objects | select(has("dataNodeInfos")) | .dataNodeInfos[] | .id' "$tmp/topology.json"); do
+    curl -sS -f -m 60 "http://$id/status" >"$tmp/status.json" 2>"$tmp/status.err" || return 1
+    all="$(jq -r '[.DiskStatuses[]?.all // 0] | add // 0 | floor' "$tmp/status.json")"
+    free="$(jq -r '[.DiskStatuses[]?.free // 0] | add // 0 | floor' "$tmp/status.json")"
+    avail=$((free - all / 10))
+    if [ "$avail" -lt 0 ]; then avail=0; fi
+    if [ -z "$least" ] || [ "$avail" -lt "$least" ]; then least=$avail; fi
+    servers=$((servers + 1))
+  done
+  [ "$servers" -gt 0 ] || return 1
+  echo $((least * servers / BUCKET_COPIES))
+}
+
+# find_repositories: every repository below FROM (a folder holding
+# index.json), none below TO where TO is below FROM, and not SeaweedFS's own
+# .uploads at a bucket's root.
+find_repositories() {
+  local rel dir below=false
+  case "$TO" in "$FROM"?*) below=true ;; esac
+  printf '\n' >"$tmp/find.queue"
+  while [ -s "$tmp/find.queue" ]; do
+    : >"$tmp/find.next"
+    while IFS= read -r rel <&3; do
+      dir="${FROM%/}${rel:+/$rel}"
+      list_dir "$dir" "$tmp/find.dir" || return 1
+      local repo=false
+      if jq -e -s 'any(.[]; (.isDirectory // false | not) and .name == "index.json")' "$tmp/find.dir" >/dev/null; then
+        repo=true
+        if [ -n "$rel" ]; then printf 'found %s\n' "$rel"; fi
+      fi
+      jq -r --arg rel "$rel" --argjson repo "$repo" --arg from "$FROM" --arg to "$TO" --argjson below "$below" 'select(.isDirectory // false) | .name as $n
+        | select(($repo and ($n == "blobs" or $n == ".uploads" or $n == ".sync")) | not)
+        | select(($rel == "" and $n == ".uploads" and ($from | test("^/buckets/[^/]+/$"))) | not)
+        | (if $rel == "" then $n else $rel + "/" + $n end) as $p
+        | select(($below and (($from + $p + "/") | startswith($to))) | not)
+        | $p' "$tmp/find.dir" >>"$tmp/find.next"
+    done 3<"$tmp/find.queue"
+    mv "$tmp/find.next" "$tmp/find.queue"
+  done
+}
+
+# measure: each move's own files at its source and destination, the free
+# space, and the repositories found.
+measure() {
+  local n free sf sb df db
+  free="$(free_bytes)" || stop_run "the volume servers' free space could not be read: $(head -c 200 "$tmp/topology.err" "$tmp/status.err" 2>/dev/null | tr '\n' ' ')"
+  {
+    printf 'want %s\nat %s\nfree %s\n' "$WANT_HASH" "$(now)" "$free"
+    while IFS=' ' read -r n _ <&4; do
+      move "$n" || stop_run "move $n's folders lie one in the other"
+      walk "$SRC" "$SCOPE" "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+      walk "$DST" "$SCOPE" "$tmp/dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+      read -r sf sb <<<"$(counts "$tmp/src")"
+      if [ "$SCOPE" = tree ]; then
+        # A tree's destination is shared: its files at the source's paths.
+        join_tsv "$tmp/src" "$tmp/dst" | awk -F'\t' -v OFS='\t' '$5 != "-" { print $1, $5 }' >"$tmp/dst.own"
+        read -r df db <<<"$(counts "$tmp/dst.own")"
+      else
+        read -r df db <<<"$(counts "$tmp/dst")"
+      fi
+      printf 'entry %s %s %s %s %s\n' "$n" "$sf" "$sb" "$df" "$db"
+    done 4<"$tmp/moves"
+    if [ "$SCOPE" = repository ]; then
+      find_repositories || stop_run "the repositories below $FROM could not be listed: $(head -c 200 "$tmp/page.err")"
+    fi
+  } >"$tmp/measured"
+  journal put measured "$ID" "$tmp/measured" || {
+    if [ "$?" = 3 ]; then log "the journal is another migration's now ($JREPLY): this run stops"; exit 1; fi
+    stop_run "the measure could not be recorded: $JREPLY"
+  }
+  log "measured: free $free, $(grep -c '^entry ' "$tmp/measured" || true) moves, $(grep -c '^found ' "$tmp/measured" || true) repositories found"
+}
+
+apply_moves() {
+  local j="$WORK/in/moves.json" format want_line note=""
+  if [ ! -e "$j" ]; then
+    log "no $j: stores/infrared-store-moves does not exist, so no migration's want to carry out"
+    return 0
+  fi
+  format="$(jq -r '.format // ""' "$j")"
+  if [ "$format" != 1 ]; then
+    log "the journal's format is \"$format\", and this applier takes 1: it is left alone"
+    return 0
+  fi
+  ID="$(jq -r '.id // ""' "$j")"
+  WANT_HASH="$(jq -r '.wantHash // ""' "$j")"
+  if [ -z "$WANT_HASH" ]; then
+    log "the journal wants nothing"
+    return 0
+  fi
+  if [ "$(jq -r '(.outcome // "") | split(" ")[0]' "$j")" = "$WANT_HASH" ]; then
+    log "the journal's want $WANT_HASH has its outcome already"
+    return 0
+  fi
+  if [ "$(jq -j '.id + "\n" + .seq + "\n" + (.want // "")' "$j" | sha256sum | cut -d' ' -f1)" != "$WANT_HASH" ]; then
+    stop_run "the journal's want does not hash to its wantHash"
+  fi
+  FROM="$(jq -r '.from // ""' "$j")"
+  TO="$(jq -r '.to // ""' "$j")"
+  SCOPE="$(jq -r '.scope // "repository"' "$j")"
+  case "$SCOPE" in repository | tree) ;; *) stop_run "the journal's scope is \"$SCOPE\", not repository or tree" ;; esac
+  for r in "$FROM" "$TO"; do
+    if ! printf '%s\n' "$r" | grep -qE '^/buckets/(registry|ate-snapshots)/([A-Za-z0-9._-]+/)*$' || printf '%s\n' "$r" | grep -qE '/\.\.?/'; then
+      stop_run "the journal's root \"$r\" is not a folder of the buckets registry or ate-snapshots"
+    fi
+  done
+  BUCKET="$(bucket_of "$FROM")"
+  [ "$(bucket_of "$TO")" = "$BUCKET" ] || stop_run "the journal moves from the bucket $BUCKET to $(bucket_of "$TO")"
+  # Its moves, each "<n> <source> <destination> ...", each name a folder below
+  # its root of the characters S3 keys take as they are.
+  jq -r '(.moves // "") | split("\n")[] | select(. != "")' "$j" >"$tmp/moves"
+  if awk '$1 !~ /^[1-9][0-9]*$/ || NF != 6 { bad = 1 } END { exit !bad }' "$tmp/moves" \
+    || cut -d' ' -f2,3 "$tmp/moves" | tr ' ' '\n' | awk '!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/ || /(^|\/)\.\.?(\/|$)/ { bad = 1 } END { exit !bad }'; then
+    stop_run "the journal holds a move that is not \"<n> <source> <destination> <kind> <tags> <dest>\" with folder names"
+  fi
+  log "the journal: migration $ID ($(jq -r '.direction // ""' "$j"), $SCOPE), $FROM to $TO, want $WANT_HASH"
+  while IFS= read -r want_line <&3; do
+    [ -n "$want_line" ] || continue
+    # shellcheck disable=SC2086 # the want's fields
+    set -- $want_line
+    case "$1:${2:-}" in
+      measure:) measure ;;
+      copy:[1-9]*) copy_move "$2" ;;
+      delete:[1-9]*) delete_move "$2" ;;
+      vacuum:)
+        if ! printf 'lock\nvolume.vacuum -collection=%s -garbageThreshold=%s\nunlock\n' "$BUCKET" "$VACUUM_GARBAGE" \
+          | weed_shell >"$tmp/vacuum.out" 2>&1; then
+          note="; the vacuum of $BUCKET did not finish: $(oneline "$(tail -c 200 "$tmp/vacuum.out")")"
+        fi
+        ;;
+      *) stop_run "the journal wants \"$want_line\", which this applier does not take" ;;
+    esac
+  done 3< <(jq -r '.want // ""' "$j")
+  printf '%s %s applied every want of seq %s%s\n' "$WANT_HASH" "$(now)" "$(jq -r '.seq // ""' "$j")" "$note" >"$tmp/outcome"
+  journal put outcome "$ID" "$tmp/outcome" || {
+    if [ "$?" = 3 ]; then log "the journal is another migration's now ($JREPLY): this run stops"; exit 1; fi
+    log "the outcome could not be written: $JREPLY"
+    return 1
+  }
+  log "the journal: applied every want of $WANT_HASH$note"
+}
+
+# --- The run ----------------------------------------------------------------------
+deadline=$((SECONDS + JOURNAL_WAIT))
+until [ -e "$WORK/ready" ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    log "the sidecar journal did not read the ConfigMaps within $JOURNAL_WAIT seconds"
+    exit 1
+  fi
+  sleep "$tick"
+done
+if [ -e "$WORK/error" ]; then
+  log "the sidecar journal could not read the ConfigMaps: $(cat "$WORK/error")"
+  exit 1
+fi
+rc=0
+apply_paths || rc=1
+apply_moves || rc=1
+exit "$rc"
+[[- else -]]
+# The stores' applier is off: no path rules (INFRARED_STORES_POLICIES) and no
+# migration between the stores' layouts, so nothing runs this.
+[[- end ]]

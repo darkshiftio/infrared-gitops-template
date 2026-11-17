@@ -1,0 +1,357 @@
+[[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
+[[- $mtls := and .StoresSecurity $certManager -]]
+[[- if and .Stores (or .StorePaths .StoresMigration) -]]
+# =============================================================================
+# The stores' applier (infrared-docs-internal ADR 0087 D5 to D7, D10).
+# =============================================================================
+# The CronJob seaweedfs-paths carries out what the Infrared operator wants of
+# SeaweedFS, in the contracts its internal/controller/storage_policies.go and
+# storage_moves.go set (format 1):
+#
+#   stores/infrared-store-paths          the path rules, a deleted org's prefixes
+#                                        and the filer log's age, which it
+#                                        applies; what it did goes to
+#                                        stores/infrared-store-paths-applied
+#   stores/infrared-store-moves          a migration's journal: measure, copy and
+#                                        verify, delete, vacuum, each step
+#                                        recorded before the next
+#
+# The operator starts a Job from it whenever either wants something (Jobs
+# seaweedfs-paths-<hash> and seaweedfs-moves-<want>), and waits for it by
+# name.
+[[- if .StoresMigration ]] A migration between the stores' layouts runs, so its own
+# schedule is suspended: only the operator's Jobs run while files move.
+[[- else ]] It also runs every day at 03:17 UTC, which puts back a rule
+# changed by hand. One run at a time: Forbid, and the operator starts none
+# while one runs.
+[[- end ]]
+#
+# No file is ever moved in place, nor deleted before its copy is verified at
+# its new path (the owner, 2026-11-17): a move copies each file as new data
+# (S3 CopyObject, never over a file), gives each copy its source's
+# modification time, verifies every file's size, SHA-256 and time, and only
+# then, asked to, deletes the source's files one by one. A copy that fails or
+# does not match leaves the source as it was. scripts/store-paths.sh says how.
+#
+# Two containers, each holding one kind of credential:
+#
+#   weed     SeaweedFS's own weed binary (copied from its pinned image) and
+#            grpcurl, in alpine/k8s for jq and curl: weed shell, the filer's
+#            and master's gRPC[[ if $mtls ]] under mutual TLS, with the security config and
+#            the client certificate seaweedfs-buckets mounts[[ else ]], plain[[ end ]], and S3 as the
+#            identities registry and ate-snapshots. No Kubernetes token.
+#   journal  a sidecar, the pod's only Kubernetes token: it reads the three
+#            ConfigMaps and writes the applier's own keys, its Role naming
+#            them and nothing else. Nothing of SeaweedFS's.
+#
+# Both run in stores, inside the stores' fence, which admits the namespace's
+# own pods to every SeaweedFS server.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seaweedfs-paths
+  namespace: stores
+automountServiceAccountToken: false
+---
+# Read the operator's path rules; read and write the applier's own keys of
+# what it applied and of the migration's journal. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: seaweedfs-paths
+  namespace: stores
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["infrared-store-paths"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["infrared-store-paths-applied", "infrared-store-moves"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: seaweedfs-paths
+  namespace: stores
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: seaweedfs-paths
+subjects:
+  - kind: ServiceAccount
+    name: seaweedfs-paths
+    namespace: stores
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: seaweedfs-paths
+  namespace: stores
+spec:
+  schedule: "17 3 * * *"
+  timeZone: Etc/UTC
+  suspend: [[ if .StoresMigration ]]true[[ else ]]false[[ end ]]
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seaweedfs-paths
+    spec:
+      # A run that fails is a result the operator reads, and asks again for
+      # (the daily run is tomorrow's): Kubernetes does not run it again.
+      backoffLimit: 0
+      # A migration's batch copies and verifies up to twenty repositories,
+      # reading every byte twice: twelve hours, then the run ends without its
+      # outcome, and the operator measures and asks again.
+      activeDeadlineSeconds: 43200
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: seaweedfs-paths
+        spec:
+          serviceAccountName: seaweedfs-paths
+          # The sidecar journal alone mounts a token, below.
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            # SeaweedFS's weed, a static binary, from the image seaweedfs.yaml pins.
+            - name: weed-binary
+              image: docker.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+              command: ["/bin/sh", "-ec", "cp /usr/bin/weed /tools/weed"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  memory: 64Mi
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+            # grpcurl v1.9.3 (fullstorydev), a static binary, for the filer's gRPC.
+            - name: grpcurl-binary
+              image: docker.io/fullstorydev/grpcurl:v1.9.3-alpine@sha256:4614424ed58e9b9837c48b6b8eadb9ef40491d5af3499bcc8b378e9c64a9e4a9
+              command: ["/bin/sh", "-ec", "cp /bin/grpcurl /tools/grpcurl"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  memory: 64Mi
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+            # The sidecar journal: the Kubernetes API, and no SeaweedFS
+            # credential. The kubelet stops it once the container weed ends.
+            - name: journal
+              # alpine/k8s 1.37.0: kubectl, jq and bash.
+              image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+              restartPolicy: Always
+              command: ["/bin/bash", "/scripts/store-journal.sh"]
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: WORK
+                  value: /work
+                - name: NAMESPACE
+                  value: stores
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+                - name: tmp
+                  mountPath: /tmp
+                - name: kube-api-access
+                  mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+                  readOnly: true
+          containers:
+            - name: weed
+              # alpine/k8s 1.37.0, for jq, curl and bash; weed and grpcurl come
+              # from the init containers above.
+              image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+              command: ["/bin/bash", "/scripts/store-paths.sh"]
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: WORK
+                  value: /work
+                - name: WEED
+                  value: /tools/weed
+                - name: GRPCURL
+                  value: /tools/grpcurl
+                # The cluster weed shell reaches, as the Job seaweedfs-buckets names it.
+                - name: WEED_CLUSTER_DEFAULT
+                  value: sw
+                - name: WEED_CLUSTER_SW_MASTER
+                  value: seaweedfs-master.stores:9333
+                - name: WEED_CLUSTER_SW_FILER
+                  value: seaweedfs-filer-client.stores:8888
+                - name: FILER_GRPC
+                  value: seaweedfs-filer-client.stores:18888
+                - name: MASTER_GRPC
+                  value: seaweedfs-master.stores:19333
+[[- if $mtls ]]
+                # gRPC under mutual TLS: the CA and the client certificate below.
+                - name: GRPC_TLS
+                  value: "true"
+                - name: GRPC_CA
+                  value: /usr/local/share/ca-certificates/ca/tls.crt
+                - name: GRPC_CERT
+                  value: /usr/local/share/ca-certificates/client/tls.crt
+                - name: GRPC_KEY
+                  value: /usr/local/share/ca-certificates/client/tls.key
+[[- else ]]
+                - name: GRPC_TLS
+                  value: "false"
+[[- end ]]
+                - name: S3_ENDPOINT
+                  value: http://seaweedfs-s3.stores.svc:8333
+                # The buckets a move copies within, as their own identities.
+                - name: S3_REGISTRY_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-s3-registry
+                      key: AWS_ACCESS_KEY_ID
+                - name: S3_REGISTRY_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-s3-registry
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: S3_ATE_SNAPSHOTS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-s3-ate-snapshots
+                      key: AWS_ACCESS_KEY_ID
+                - name: S3_ATE_SNAPSHOTS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweedfs-s3-ate-snapshots
+                      key: AWS_SECRET_ACCESS_KEY
+                # Every file is written [[ if .StoresSingleNode ]]once[[ else ]]twice[[ end ]]: the free space a move measures counts it.
+                - name: BUCKET_COPIES
+                  value: "[[ if .StoresSingleNode ]]1[[ else ]]2[[ end ]]"
+                # A vacuum compacts each volume with a tenth or more of it deleted.
+                - name: VACUUM_GARBAGE
+                  value: "0.1"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 1Gi
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+                - name: tmp
+                  mountPath: /tmp
+[[- if $mtls ]]
+                # The chart's security config: the gRPC certificates' paths, no key.
+                - name: security-config
+                  mountPath: /etc/seaweedfs/security.toml
+                  subPath: security.toml
+                  readOnly: true
+                # The paths it names for a client: the CA and the client
+                # certificate that cert-manager issues in stores.
+                - name: ca-cert
+                  mountPath: /usr/local/share/ca-certificates/ca/
+                  readOnly: true
+                - name: client-cert
+                  mountPath: /usr/local/share/ca-certificates/client/
+                  readOnly: true
+[[- end ]]
+          volumes:
+            - name: tools
+              emptyDir: {}
+            - name: scripts
+              configMap:
+                name: seaweedfs-paths-scripts
+            # The two containers' requests and answers, and the listings.
+            - name: work
+              emptyDir:
+                sizeLimit: 1Gi
+            - name: tmp
+              emptyDir: {}
+            # The ServiceAccount's token, for the sidecar journal alone.
+            - name: kube-api-access
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      expirationSeconds: 3600
+                      path: token
+                  - configMap:
+                      name: kube-root-ca.crt
+                      items:
+                        - key: ca.crt
+                          path: ca.crt
+                  - downwardAPI:
+                      items:
+                        - path: namespace
+                          fieldRef:
+                            fieldPath: metadata.namespace
+[[- if $mtls ]]
+            - name: security-config
+              configMap:
+                name: seaweedfs-security-config
+            - name: ca-cert
+              secret:
+                secretName: seaweedfs-ca-cert
+                # The CA's certificate alone: its key stays out of this pod.
+                items:
+                  - key: tls.crt
+                    path: tls.crt
+            - name: client-cert
+              secret:
+                secretName: seaweedfs-client-cert
+[[- end ]]
+[[- else if .Stores -]]
+# The stores' applier is off: the path rules are off (the Infrared chart's
+# stores.policies.enabled, INFRARED_STORES_POLICIES) and no migration between
+# the stores' layouts runs, so this file holds no objects.
+[[- else -]]
+# The platform's own stores are off (INFRARED_STORES): no applier.
+[[- end ]]

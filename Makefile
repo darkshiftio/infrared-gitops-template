@@ -123,6 +123,14 @@ MEDIA_STORE ?=
 # make render STORES=true REGISTRY=10.43.0.50:5000 STORES_ORG_LAYOUT=true
 STORES_ORG_LAYOUT ?= false
 REGISTRY_PAUSED   ?= false
+# STORE_PATHS: true renders the stores' applier, the CronJob
+# stores/seaweedfs-paths, which applies the operator's path rules
+# (INFRARED_STORES_POLICIES); STORES_MIGRATION: true renders it while a
+# migration between the stores' layouts runs, its schedule suspended (as the
+# operator's StorePaths and StoresMigration; ADR 0087 D7, D10). E.g.
+# make render STORES=true STORE_PATHS=true
+STORE_PATHS      ?= false
+STORES_MIGRATION ?= false
 
 .PHONY: render verify test vendor-argocd vendor-kpack clean
 
@@ -142,7 +150,8 @@ render:
 		-admission-policies=$(ADMISSION_POLICIES) -deny-logging=$(DENY_LOGGING) \
 		-argocd-restrict-default-project=$(ARGOCD_RESTRICT_DEFAULT_PROJECT) \
 		-build-caps '$(BUILD_CAPS)' -tenant-storage '$(TENANT_STORAGE)' -metrics-storage "$(METRICS_STORAGE)" \
-		-media-store "$(MEDIA_STORE)" -stores-org-layout=$(STORES_ORG_LAYOUT) -registry-paused=$(REGISTRY_PAUSED)
+		-media-store "$(MEDIA_STORE)" -stores-org-layout=$(STORES_ORG_LAYOUT) -registry-paused=$(REGISTRY_PAUSED) \
+		-store-paths=$(STORE_PATHS) -stores-migration=$(STORES_MIGRATION)
 
 ## verify: the gate CI runs
 verify:

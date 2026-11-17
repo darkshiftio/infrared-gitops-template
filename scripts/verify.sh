@@ -252,6 +252,17 @@
 #     Job unchanged; the pause renders Zot's replicaCount 0 and nothing else;
 #     against both off only those files change, and without the stores and
 #     the registry neither changes anything
+#   - the stores' applier (StorePaths and StoresMigration, ADR 0087 D5 to D7,
+#     D10): with the stores, the CronJob stores/seaweedfs-paths, daily and
+#     suspended while a migration runs, Forbid and no retries; its Role on the
+#     three ConfigMaps by name; the token in the sidecar journal alone, the S3
+#     keys and, under mutual TLS, the client certificate in the container weed
+#     alone; inside the stores' fence; only the applier's files change, and
+#     without the stores nothing; the scripts never move or rename a file, and
+#     scripts/store-applier-test.sh runs them against a pretend SeaweedFS and
+#     API: nothing deleted before its copy is verified at its new path, a
+#     failed or mismatched copy leaves the source, a stopped run resumes, and
+#     the path rules, purges and log prune as the operator's contract says
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
@@ -2873,6 +2884,134 @@ for c in zot builds substrate-actors; do
     bad "layout: components/$c does not build or pass kubeconform"
   fi
 done
+
+# --- The stores' applier (ADR 0087 D5 to D7, D10) ---------------------------------------
+# StorePaths (the operator's INFRARED_STORES_POLICIES, the chart's
+# stores.policies.enabled) and StoresMigration (a migration between the stores'
+# layouts runs, which starts the applier's Jobs by its CronJob's name) render,
+# with the stores, the CronJob stores/seaweedfs-paths: daily at 03:17 UTC, its
+# schedule suspended while a migration runs, one run at a time and none run
+# again by Kubernetes. Its Role gets infrared-store-paths, and gets and patches
+# infrared-store-paths-applied and infrared-store-moves, by name and nothing
+# else. The container weed (SeaweedFS's weed from its pinned image, grpcurl,
+# the S3 keys of the identities registry and ate-snapshots) mounts no
+# Kubernetes token; the sidecar journal alone does, and nothing of SeaweedFS's.
+# Under mutual TLS the container weed mounts what the Job seaweedfs-buckets
+# does, the CA's certificate alone of the CA; without cert-manager, plain gRPC.
+# It runs in stores, inside the stores' fence, which needs no new door. Against
+# the same render without them only the applier's files change; without the
+# stores, nothing. The scripts never move or rename a file; what they do is
+# scripts/store-applier-test.sh's, which runs them against a pretend SeaweedFS
+# and API: the owner's rule, nothing deleted before its copy is verified at its
+# new path, and the operator's two contracts.
+"$work/render" -out "$work/paths-alone" -cluster demo -flavor k3s -build-registry "" -store-paths -stores-migration >/dev/null
+[ -z "$(d3_diff "$work/k3s" "$work/paths-alone")" ] \
+  && ok "paths-alone: without the stores, the applier's fields change nothing" \
+  || bad "paths-alone: without the stores, the applier's fields change '$(d3_diff "$work/k3s" "$work/paths-alone")'"
+for v in paths:StorePaths migration:StoresMigration; do
+  yq -p json -o json '. + {"'"${v#*:}"'": true}' "$work/substrate.json" >"$work/${v%%:*}.json"
+  "$work/render" -out "$work/${v%%:*}" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/${v%%:*}.json" >/dev/null
+done
+want_paths="README.md components/seaweedfs/kustomization.yaml components/seaweedfs/paths.yaml"
+want_paths="$want_paths components/seaweedfs/scripts/store-journal.sh components/seaweedfs/scripts/store-paths.sh"
+[ "$(d3_diff "$work/pulls-open" "$work/paths")" = "$(words "$want_paths")" ] \
+  && [ "$(d3_diff "$work/pulls-open" "$work/migration")" = "$(words "$want_paths")" ] \
+  && [ "$(d3_diff "$work/paths" "$work/migration")" = components/seaweedfs/paths.yaml ] \
+  && ok "paths: renders what the applier off does, but $want_paths; a migration alone renders the same files, and differs only in paths.yaml" \
+  || bad "paths: differs from the applier off in '$(d3_diff "$work/pulls-open" "$work/paths")', want '$want_paths'"
+for v in paths migration; do
+  if kubectl kustomize "$work/$v/components/seaweedfs" >"$work/$v-seaweedfs.yaml" \
+    && kubeconform -strict -ignore-missing-schemas -summary "$work/$v-seaweedfs.yaml" >/dev/null; then
+    ok "$v: components/seaweedfs builds and passes kubeconform"
+  else
+    bad "$v: components/seaweedfs does not build or pass kubeconform"
+  fi
+done
+pb="$work/paths-seaweedfs.yaml"
+cj='select(.kind == "CronJob" and .metadata.name == "seaweedfs-paths")'
+pod="$cj | .spec.jobTemplate.spec.template.spec"
+[ "$(sel "$pb" "$cj | .metadata.namespace + \" \" + .spec.schedule + \" \" + .spec.timeZone + \" \" + .spec.concurrencyPolicy + \" \" + (.spec.suspend | tostring)")" \
+    = "stores 17 3 * * * Etc/UTC Forbid false" ] \
+  && [ "$(sel "$work/migration-seaweedfs.yaml" "$cj | .spec.suspend")" = true ] \
+  && [ "$(sel "$pb" "$cj | .spec.jobTemplate.metadata.labels[\"app.kubernetes.io/name\"] + \" \" + (.spec.jobTemplate.spec.backoffLimit | tostring)")" = "seaweedfs-paths 0" ] \
+  && [ "$(sel "$pb" "$pod | .serviceAccountName + \" \" + (.automountServiceAccountToken | tostring) + \" \" + .restartPolicy")" = "seaweedfs-paths false Never" ] \
+  && ok "paths: the CronJob stores/seaweedfs-paths runs daily at 03:17 UTC, one run at a time and none run again by Kubernetes, suspended while a migration runs" \
+  || bad "paths: the CronJob seaweedfs-paths is wrong: $(yq -o json -I0 "$cj | .spec | del(.jobTemplate)" "$pb")"
+[ "$(yq -o json -I0 'select(.kind == "Role" and .metadata.name == "seaweedfs-paths") | .rules' "$pb" | jq -c -S .)" \
+    = '[{"apiGroups":[""],"resourceNames":["infrared-store-paths"],"resources":["configmaps"],"verbs":["get"]},{"apiGroups":[""],"resourceNames":["infrared-store-paths-applied","infrared-store-moves"],"resources":["configmaps"],"verbs":["get","patch"]}]' ] \
+  && [ "$(sel "$pb" 'select(.kind == "RoleBinding" and .metadata.name == "seaweedfs-paths") | .roleRef.name + " " + (.subjects[] | .namespace + "/" + .name)')" = "seaweedfs-paths stores/seaweedfs-paths" ] \
+  && [ "$(sel "$pb" 'select(.kind == "ServiceAccount" and .metadata.name == "seaweedfs-paths") | .automountServiceAccountToken')" = false ] \
+  && ok "paths: its Role gets infrared-store-paths and patches infrared-store-paths-applied and infrared-store-moves, by name, and nothing else" \
+  || bad "paths: the applier's Role is $(yq -o json -I0 'select(.kind == "Role" and .metadata.name == "seaweedfs-paths") | .rules' "$pb")"
+# One kind of credential a container: the token for the sidecar alone.
+token_vol="$(sel "$pb" "$pod | .volumes[] | select(.projected.sources[]?.serviceAccountToken) | .name")"
+sw_image="docker.io/chrislusf/seaweedfs:$(sel "$work/paths/registry/clusters/demo-pl/components/seaweedfs.yaml" "$sw_v | .image.tag")"
+k8s_image="$(sed -n -E 's/^SUBSTRATE_K8S_IMAGE=//p' scripts/substrate-lib.sh)"
+grpcurl_image="$(sed -n -E 's/^SUBSTRATE_GRPCURL_IMAGE=//p' scripts/substrate-lib.sh)"
+[ -n "$token_vol" ] \
+  && [ "$(sel "$pb" "$pod | (.initContainers + .containers)[] | select(.volumeMounts[]?.name == \"$token_vol\") | .name")" = journal ] \
+  && [ "$(sel "$pb" "$pod | .initContainers[] | select(.name == \"journal\") | .restartPolicy + \" \" + .image")" = "Always $k8s_image" ] \
+  && [ "$(sel "$pb" "$pod | .initContainers[] | select(.name == \"journal\") | .volumeMounts[] | select(.name == \"$token_vol\") | .mountPath")" \
+    = /var/run/secrets/kubernetes.io/serviceaccount ] \
+  && [ -z "$(sel "$pb" "$pod | .initContainers[] | select(.name == \"journal\") | .env[]? | select(.valueFrom) | .name")" ] \
+  && [ "$(sel "$pb" "$pod | .containers[] | .name + \" \" + .image")" = "weed $k8s_image" ] \
+  && [ "$(sel "$pb" "$pod | .initContainers[] | select(.name == \"weed-binary\") | .image")" = "$sw_image" ] \
+  && [ "$(sel "$pb" "$pod | .initContainers[] | select(.name == \"grpcurl-binary\") | .image")" = "$grpcurl_image" ] \
+  && [ "$(yq -o json -I0 "$pod | .containers[0].env | map(select(.valueFrom) | .name + \"<-\" + .valueFrom.secretKeyRef.name + \"/\" + .valueFrom.secretKeyRef.key)" "$pb")" \
+    = '["S3_REGISTRY_ACCESS_KEY_ID<-seaweedfs-s3-registry/AWS_ACCESS_KEY_ID","S3_REGISTRY_SECRET_ACCESS_KEY<-seaweedfs-s3-registry/AWS_SECRET_ACCESS_KEY","S3_ATE_SNAPSHOTS_ACCESS_KEY_ID<-seaweedfs-s3-ate-snapshots/AWS_ACCESS_KEY_ID","S3_ATE_SNAPSHOTS_SECRET_ACCESS_KEY<-seaweedfs-s3-ate-snapshots/AWS_SECRET_ACCESS_KEY"]' ] \
+  && [ "$(sel "$pb" "$pod | .containers[0].env[] | select(.name == \"GRPC_TLS\" or .name == \"BUCKET_COPIES\") | .name + \"=\" + .value" | tr '\n' ' ')" = "GRPC_TLS=false BUCKET_COPIES=2 " ] \
+  && ok "paths: the container weed (SeaweedFS's pinned weed, the hooks' grpcurl and alpine/k8s) holds the S3 keys of registry and ate-snapshots and no token; the sidecar journal alone mounts the token, and nothing of SeaweedFS's" \
+  || bad "paths: the applier's containers mix their credentials: $(yq -o json -I0 "$pod | [.initContainers[], .containers[]] | map({name, image, mounts: [.volumeMounts[]?.name]})" "$pb")"
+scripts_cm="$(sel "$pb" 'select(.kind == "ConfigMap") | .metadata.name')"
+[[ "$scripts_cm" == seaweedfs-paths-scripts-* ]] \
+  && [ "$(sel "$pb" "$pod | .volumes[] | select(.name == \"scripts\") | .configMap.name")" = "$scripts_cm" ] \
+  && [ "$(sel "$pb" 'select(.kind == "ConfigMap") | .data | keys | join(" ")')" = "store-journal.sh store-paths.sh" ] \
+  && ok "paths: the scripts reach the pod as $scripts_cm, named by their content" \
+  || bad "paths: the scripts' ConfigMap is not the CronJob's: $scripts_cm"
+# Under mutual TLS, what seaweedfs-buckets mounts; without cert-manager, nothing.
+yq -p json -o json '. + {"StorePaths": true}' "$work/stores-sec.json" >"$work/paths-sec.json"
+yq -p json -o json '. + {"StorePaths": true}' "$work/stores-sec-no-cm.json" >"$work/paths-sec-no-cm.json"
+yq -p json -o json '. + {"StorePaths": true}' "$work/fence.json" >"$work/paths-fence.json"
+yq -p json -o json '. + {"StorePaths": true, "StoresSingleNode": true}' "$work/substrate.json" >"$work/paths-single.json"
+for v in paths-sec paths-sec-no-cm paths-single; do
+  "$work/render" -out "$work/$v" -cluster demo-pl -flavor k3s -build-registry "$zot_registry" -data "$work/$v.json" >/dev/null
+done
+"$work/render" -out "$work/paths-fence" -cluster demo-fn -flavor k3s -build-registry "$zot_registry" -data "$work/paths-fence.json" >/dev/null
+weed_env() { sel "$1/components/seaweedfs/paths.yaml" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == \"$2\") | .value"; }
+weed_mounts() { sel "$1/components/seaweedfs/paths.yaml" "$cj | .spec.jobTemplate.spec.template.spec.containers[0].volumeMounts[] | .name + \":\" + .mountPath" | tr '\n' ' '; }
+bucket_mounts() { sel "$1/components/seaweedfs/prepare.yaml" 'select(.kind == "Job" and .metadata.name == "seaweedfs-buckets") | .spec.template.spec.containers[0].volumeMounts[] | select(.name != "tmp") | .name + ":" + .mountPath' | tr '\n' ' '; }
+[ "$(weed_env "$work/paths-sec" GRPC_TLS) $(weed_env "$work/paths-sec" GRPC_CERT)" = "true /usr/local/share/ca-certificates/client/tls.crt" ] \
+  && [ "$(weed_mounts "$work/paths-sec")" = "tools:/tools scripts:/scripts work:/work tmp:/tmp $(bucket_mounts "$work/stores-sec")" ] \
+  && [ "$(sel "$work/paths-sec/components/seaweedfs/paths.yaml" "$cj | .spec.jobTemplate.spec.template.spec.volumes[] | select(.name == \"ca-cert\") | .secret.items[].key")" = tls.crt ] \
+  && [ "$(weed_env "$work/paths-sec-no-cm" GRPC_TLS)" = false ] && [ "$(weed_mounts "$work/paths-sec-no-cm")" = "tools:/tools scripts:/scripts work:/work tmp:/tmp " ] \
+  && [ "$(weed_env "$work/paths-single" BUCKET_COPIES)" = 1 ] \
+  && ok "paths-sec: under mutual TLS the container weed mounts what seaweedfs-buckets does, of the CA its certificate alone; without cert-manager, plain gRPC and no certificate; on one node a file is one copy" \
+  || bad "paths-sec: the applier's TLS is wrong: $(weed_mounts "$work/paths-sec")"
+if kubectl kustomize "$work/paths-sec/components/seaweedfs" >"$work/paths-sec-seaweedfs.yaml" \
+  && kubeconform -strict -ignore-missing-schemas -summary "$work/paths-sec-seaweedfs.yaml" >/dev/null; then
+  ok "paths-sec: components/seaweedfs builds and passes kubeconform"
+else
+  bad "paths-sec: components/seaweedfs does not build or pass kubeconform"
+fi
+[ "$(d3_diff "$work/fence" "$work/paths-fence")" = "$(words "${want_paths//demo-pl/demo-fn}")" ] \
+  && [ "$(yq -N -o json -I0 'select(.kind == "NetworkPolicy" and .metadata.namespace == "stores") | .spec.ingress[0]' "$work/paths-fence/components/postgres/fence.yaml")" \
+    = '{"from":[{"podSelector":{}}]}' ] \
+  && [ "$(sel "$work/paths-fence/components/seaweedfs/paths.yaml" "$cj | .metadata.namespace")" = stores ] \
+  && ok "paths-fence: fenced, the applier runs in stores, whose fence admits the namespace's own pods, and no fence changes" \
+  || bad "paths-fence: the applier and the stores' fence: '$(d3_diff "$work/fence" "$work/paths-fence")'"
+# The scripts: bash that parses, no move in place and no rename anywhere, and
+# what they do as the owner's rule and the contracts say.
+ps="$work/paths/components/seaweedfs/scripts"
+bash -n "$ps/store-paths.sh" && bash -n "$ps/store-journal.sh" \
+  && ! grep -nE 'fs\.mv|RenameEntry|mv\.from|cp\.from' "$ps/store-paths.sh" "$ps/store-journal.sh" \
+  && [ "$(grep -c -- '-H "If-None-Match: \*"' "$ps/store-paths.sh")" = 1 ] && [ "$(grep -c -- '-X PUT' "$ps/store-paths.sh")" = 1 ] \
+  && ok "paths: the applier's scripts parse, copy only with If-None-Match: *, and never move or rename a file (no fs.mv, no rename)" \
+  || bad "paths: the applier's scripts move, rename or overwrite"
+if scripts/store-applier-test.sh "$ps"; then
+  ok "paths: scripts/store-applier-test.sh: the applier keeps the owner's rule and the operator's contracts"
+else
+  bad "paths: scripts/store-applier-test.sh failed (above)"
+fi
 
 # --- The rest of the tenancy (ADR 0066 D4, D5, D6, D10) ---------------------------
 # TenantPods and TenantQuotas (the operator's INFRARED_TENANT_PODS and

@@ -1278,3 +1278,34 @@ func TestStoresLayoutFields(t *testing.T) {
 		}
 	}
 }
+
+// The stores' applier (infrared-docs-internal ADR 0087 D10): StorePaths, the
+// policies on, and StoresMigration, a migration that runs, each load from the
+// operator's Data by its Go name, absent is off, as an operator from before
+// them leaves them out, and the zero value is left out of the JSON.
+func TestStoreApplierFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	for body, want := range map[string][2]bool{
+		`{"clusterName": "c1", "Stores": true, "StorePaths": true, "StoresMigration": true}`: {true, true},
+		`{"clusterName": "c1", "Stores": true, "StoresMigration": true}`:                     {false, true},
+		`{"clusterName": "c1", "Stores": true, "StorePaths": true}`:                          {true, false},
+		`{"clusterName": "c1"}`: {false, false},
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var d Data
+		if err := mergeDataFile(&d, path); err != nil || d.StorePaths != want[0] || d.StoresMigration != want[1] {
+			t.Errorf("%s: loaded StorePaths %t, StoresMigration %t, %v; want %v", body, d.StorePaths, d.StoresMigration, err, want)
+		}
+	}
+	b, err := json.Marshal(Data{ClusterName: "c1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"StorePaths", "StoresMigration"} {
+		if strings.Contains(string(b), `"`+name+`"`) {
+			t.Errorf("the zero Data carries %s: %s", name, b)
+		}
+	}
+}
