@@ -220,7 +220,7 @@ ate_list() {
 }
 # router <port> [curl args...]: one HTTPS request to the router, naming an actor
 # that does not exist; prints "<curl's exit code> <HTTP status>". 0 and a status
-# mean the router let the client in; 35 or 56 with 000, that it refused it in
+# mean the router let the client in; 35, 55 or 56 with 000, that it refused it in
 # the TLS handshake after presenting a certificate CA verifies; 6, 7 or 28,
 # that nothing answered; 60, that its certificate did not verify.
 router() {
