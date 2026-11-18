@@ -430,6 +430,12 @@ yq -p json -o json '. + {
 # The test actors off: Substrate's Data with substrate-test-actors among the
 # components left out, as the Infrared chart hands it over by default.
 yq -p json -o json '.Disabled += ["substrate-test-actors"]' "$work/substrate.json" >"$work/substrate-off.json"
+# The agents' WorkerPool of runner.actors (infrared-docs-internal ADR 0089), on
+# a tainted node pool; its variant pulls with the install's pull secret.
+yq -p json -o json '. + {"AgentPool": {"Workers": 4, "CPU": "2500m", "Memory": "9Gi",
+    "RequestCPU": "625m", "RequestMemory": "2304Mi", "NodeSelector": {"darkshift.io/pool": "ci"},
+    "Tolerations": [{"Key": "darkshift.io/pool", "Operator": "Equal", "Value": "ci", "Effect": "NoSchedule"}]}}' \
+  "$work/substrate.json" >"$work/agents.json"
 # The code index on: Substrate's Data with the code index's image among
 # Infrared's own (INFRARED_IMAGES, code-index), as the Infrared chart hands it
 # over with codeIndex.enabled, the one install's shape with the code index; the
@@ -516,6 +522,7 @@ variants=(
   "registry-plain demo-rp k3s $zot_registry -stores -registry $zot_registry"
   "substrate demo-su k3s $zot_registry -data $work/substrate.json"
   "substrate-off demo-so k3s $zot_registry -data $work/substrate-off.json"
+  "agents demo-ag k3s $zot_registry -data $work/agents.json -pull-secret ghcr-pull"
   "substrate-plain demo-ss k3s - -stores -registry $zot_registry -substrate-capable"
   "substrate-pull demo-sl k3s - -stores -registry $zot_registry -substrate-capable -pull-secret ghcr-pull"
   "registry-token demo-rt k3s $zot_registry -data $work/registry-token.json"
@@ -895,9 +902,11 @@ for v in "${variants[@]}"; do
   chart_repo="$(sed -n -E 's/.*-chart-repo ([^ ]+).*/\1/p' <<<"${extra:-}")"
   sub_registry="$(sed -n -E 's/.*-substrate-registry ([^ ]+).*/\1/p' <<<"${extra:-}")"
   token_gsa="" token_host="" token_region="" token_role="" token_hostnet=""
+  agent_pool=""
   if [ -n "$data_file" ]; then
     chart_repo="$(jq -r '.infraredChartRepo // .InfraredChartRepo // ""' "$data_file")"
     sub_registry="$(jq -r '.SubstrateRegistry // ""' "$data_file")"
+    agent_pool="$(jq -c '.AgentPool // empty' "$data_file")"
     token_gsa="$(jq -r '.RegistryToken.GCPServiceAccount // ""' "$data_file")"
     token_host="$(jq -r '.RegistryToken.Registry // ""' "$data_file")"
     token_region="$(jq -r '.RegistryToken.AWSRegion // ""' "$data_file")"
@@ -2208,15 +2217,43 @@ for v in "${variants[@]}"; do
       && ok "$variant: the CAs and pools made once before their consumers (PreSync), the P-256 ones as upstream makes them, the grants after the DSNs and before the API (Sync -1), each after its waits" \
       || bad "$variant: Substrate's hooks are wrong"
     # No test actors at 1.0, whatever substrate-test-actors says: no
-    # WorkerPool, no ActorTemplate, no copy of their images, nothing in
-    # registry.
-    [ -z "$(sel "$sa" 'select(.kind == "WorkerPool") | .metadata.name')" ] \
+    # ActorTemplate, no copy of their images, nothing in registry; and no
+    # WorkerPool but the agents', with runner.actors (AgentPool).
+    [ -z "$(sel "$sa" 'select(.kind == "WorkerPool" and .metadata.name != "agents") | .metadata.name')" ] \
       && [ -z "$(for b in "$s" "$sa"; do sel "$b" 'select((.kind == "ConfigMap" and .metadata.name == "substrate-actor-templates") or (.kind == "Job" and (.metadata.name == "substrate-images" or .metadata.name == "substrate-templates"))) | .metadata.name'; done)" ] \
       && [ -z "$(sel "$sa" 'select(.metadata.namespace == "registry") | .kind')" ] \
       && [ -z "$(sel "$sa" 'select(.kind == "ServiceAccount" and .metadata.name == "default") | .metadata.name')" ] \
-      && [ ! -e "$out/components/substrate-actors/images.yaml" ] && [ ! -e "$out/components/substrate-actors/templates.yaml" ] && [ ! -e "$out/components/substrate-actors/workers.yaml" ] \
-      && ok "$variant: no WorkerPool and no test actors at Substrate 1.0$([ "$test_actors" = true ] || echo ", substrate-test-actors or not"): no ActorTemplate, no copy of images, nothing in registry" \
-      || bad "$variant: a WorkerPool or something of Substrate's test actors still renders"
+      && [ ! -e "$out/components/substrate-actors/images.yaml" ] && [ ! -e "$out/components/substrate-actors/templates.yaml" ] \
+      && ok "$variant: no test actors at Substrate 1.0$([ "$test_actors" = true ] || echo ", substrate-test-actors or not"): no ActorTemplate, no copy of images, nothing in registry, no WorkerPool but the agents'" \
+      || bad "$variant: a WorkerPool other than the agents' or something of Substrate's test actors still renders"
+    # The agents' WorkerPool (runner.actors): with AgentPool, gVisor workers of
+    # upstream's ateworker-gvisor, by the digest scripts/substrate-images.json
+    # pins, from the install's Substrate registry, labelled for the operator's
+    # templates, on the pool's nodes with its tolerations and sizes, pulling
+    # with the install's pull secret through a ServiceAccount of their own; and
+    # atelet tolerating the pool's taints too. Without it, no pool and no
+    # change to atelet.
+    pool='select(.kind == "WorkerPool" and .metadata.name == "agents")'
+    atelet_tol="$(line "$s" 'select(.kind == "DaemonSet" and .metadata.name == "atelet") | .spec.template.spec.tolerations[] | (.key // "*") + "=" + (.value // "") + ":" + (.effect // "")')"
+    if [ -z "$agent_pool" ]; then
+      [ -z "$(sel "$sa" "$pool | .metadata.name")" ] && ! holds_objects "$out/components/substrate-actors/workers.yaml" \
+        && [ "$atelet_tol" = "ate.dev/sandboxClass=:NoSchedule cloud.google.com/compute-class=:NoSchedule" ] \
+        && ok "$variant: no agents' WorkerPool without runner.actors, and atelet tolerates upstream's taints alone" \
+        || bad "$variant: an agents' WorkerPool, or atelet's tolerations, without runner.actors"
+    else
+      worker_ref="$(jq -r '.images["ateworker-gvisor"].ref' "$substrate_pins")"
+      want_image="${sub_registry:-ghcr.io/agent-substrate/substrate}/${worker_ref#ghcr.io/agent-substrate/substrate/}"
+      [ "$(line "$sa" "$pool | (.metadata.namespace, .metadata.labels[\"infrared.darkshift.io/worker-pool\"], .spec.replicas, .spec.workerImage, .spec.sandboxClasses[].name)")" \
+          = "ate-workers agents $(jq -r .Workers <<<"$agent_pool") $want_image gvisor" ] \
+        && [ "$(line "$sa" "$pool | .spec.template | ((.nodeSelector | to_entries[] | .key + \"=\" + .value), (.tolerations[] | .key + \"=\" + .value + \":\" + .effect + \" \" + .operator))")" \
+          = "darkshift.io/pool=ci darkshift.io/pool=ci:NoSchedule Equal" ] \
+        && [ "$(line "$sa" "$pool | .spec.template.resources | (.limits.cpu, .limits.memory, .requests.cpu, .requests.memory)")" = "2500m 9Gi 625m 2304Mi" ] \
+        && [ "$(line "$sa" "$pool | .spec.template.serviceAccountName")" = agents-worker ] \
+        && [ "$(line "$sa" 'select(.kind == "ServiceAccount" and .metadata.name == "agents-worker") | .metadata.namespace + " " + .imagePullSecrets[0].name')" = "ate-workers $pull_secret" ] \
+        && [ "$atelet_tol" = "ate.dev/sandboxClass=:NoSchedule cloud.google.com/compute-class=:NoSchedule darkshift.io/pool=ci:NoSchedule" ] \
+        && ok "$variant: the WorkerPool agents: $(jq -r .Workers <<<"$agent_pool") gVisor workers of $want_image on the pool's nodes, pulling as agents-worker, and atelet tolerating the pool's taint" \
+        || bad "$variant: the agents' WorkerPool or atelet's tolerations are wrong"
+    fi
   else
     left="$(for f in $sub_files; do holds_objects "$f" && echo "$f"; done || true)"
     [ -z "$left" ] && ok "$variant: Substrate is off, no objects of it" || bad "$variant: Substrate objects rendered without Stores, Registry and SubstrateCapable: $left"

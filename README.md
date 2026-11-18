@@ -98,6 +98,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.RegistryPaused` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts is in its phases `Pausing`, `Copying` or `Rooting` (ADR 0087 D7): with `.Stores` and `.Registry`, Zot's Application renders `replicaCount: 0`, so no Zot process reads or writes the bucket while its files are copied, verified and deleted, and nothing else changes |
 | `.StorePaths` | absent or `false`, `true` | the operator's `INFRARED_STORES_POLICIES`, the Infrared chart's `stores.policies.enabled` (ADR 0087 D10): with `.Stores`, the stores' applier, the CronJob `stores/seaweedfs-paths`, which applies the path rules the operator writes to `stores/infrared-store-paths`, daily and in each Job the operator starts from it (see "The stores' applier") |
 | `.StoresMigration` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts runs (the Installation's `status.storage.migration` has a phase other than `Done`) or another move it drives through the journal `stores/infrared-store-moves`: the migration starts the applier's Jobs from the CronJob by its name, so with `.Stores` the CronJob renders even without `.StorePaths`, its own schedule suspended, so only the operator's Jobs run while files move |
+| `.AgentPool` | absent, or `{Workers, CPU, Memory, RequestCPU, RequestMemory, NodeSelector, Tolerations}` | the operator's, from the Infrared chart's `runner.actors` (`INFRARED_AGENT_ACTORS`, on) and `runner.placement` (infrared-docs-internal ADR 0089): with Agent Substrate (`.Stores`, `.Registry`, `.SubstrateCapable`), the WorkerPool `agents` in `ate-workers`, where an org's agent steps run as actors: `Workers` warm gVisor workers, each with `CPU` and `Memory` at its limits and `RequestCPU` and `RequestMemory` as its requests, on the nodes `NodeSelector` picks with `Tolerations`, which atelet then tolerates too (see "The agents' WorkerPool"). Absent renders as before the field existed; `hack/render` refuses 0 or more than 64 workers, a size that is no quantity, a selector or toleration Kubernetes would not take |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -1199,6 +1200,24 @@ an install one minor release at a time (its version skew policy): vendor each
 release in turn. The API's and the identity provider's two replicas aside, the
 router, the egress gateway, the controller and the pod-certificate controller
 are one pod each.
+
+### The agents' WorkerPool
+
+With `.AgentPool` (the chart's `runner.actors` on, infrared-docs-internal ADR 0089) and Agent Substrate,
+`substrate-actors` renders the WorkerPool `agents` in `ate-workers` (`workers.yaml`): `.AgentPool.Workers` warm
+gVisor workers of upstream's `ateworker-gvisor`, by the digest `scripts/substrate-images.json` pins, from
+`.SubstrateRegistry` (so it is one of the images to copy there). Infrared's operator makes a template for each
+AgentRole that runs a step as an actor, which selects this pool by its label `infrared.darkshift.io/worker-pool:
+agents`, and an actor for each step's attempt. Each worker is sized for one step's actor and a little more, so it runs
+one step at a time, and asks for a quarter of that, as a runner Job's pod asks for a part of its limit. The workers run
+on the nodes of the runner placement (`.AgentPool.NodeSelector`, `.AgentPool.Tolerations`), and atelet's DaemonSet
+gets the same tolerations beside upstream's, so it runs there too. With `.ImagePullSecret`, the workers run as the
+ServiceAccount `agents-worker`, which lists the pull secret `pull-secrets.yaml` copies into `ate-workers`: a WorkerPool
+cannot name one, and a worker's identity is its pod's, whatever its ServiceAccount. Without `.AgentPool`, nothing of
+this renders and atelet keeps upstream's tolerations alone.
+
+Warm workers cost what they keep up: on a node pool that scales to zero, at least one node stays up while the pool
+names any worker.
 
 ### The code index
 

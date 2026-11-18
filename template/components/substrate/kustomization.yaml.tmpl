@@ -271,6 +271,35 @@ patches:
               - $patch: delete
                 name: image-credential-provider-config
 [[- end ]]
+[[- if .AgentPool ]]
+[[- if .AgentPool.Tolerations ]]
+  # atelet also runs on the nodes of the agents' WorkerPool (the chart's
+  # runner.actors, on the runner placement's nodes): it tolerates their taints,
+  # beside upstream's own.
+  - target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      name: atelet
+      namespace: ate-system
+    patch: |-
+[[- range .AgentPool.Tolerations ]]
+      - op: add
+        path: /spec/template/spec/tolerations/-
+        value:
+          [[ if .Key ]]key: [[ quote .Key ]][[ else ]]operator: Exists[[ end ]]
+[[- if and .Key .Operator ]]
+          operator: [[ .Operator ]]
+[[- end ]]
+[[- if .Value ]]
+          value: [[ quote .Value ]]
+[[- end ]]
+[[- if .Effect ]]
+          effect: [[ .Effect ]]
+[[- end ]]
+[[- end ]]
+[[- end ]]
+[[- end ]]
   # The router admits one client: Infrared's operator, by the SPIFFE ID of its
   # pod certificate from the pod-identity signer (the chart's infrared-operator
   # in [[ .InfraredNamespace ]]).

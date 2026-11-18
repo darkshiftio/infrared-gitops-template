@@ -372,6 +372,35 @@ type Data struct {
 	// default, renders as before the field existed, and an operator leaves it
 	// out of the data.
 	StoresMigration bool `json:"StoresMigration,omitempty"`
+	// AgentPool is the operator's from the Infrared chart's runner.actors
+	// (INFRARED_AGENT_ACTORS), on: with Agent Substrate, the template renders
+	// the WorkerPool agents in ate-workers, where an org's agent steps run as
+	// actors (infrared-docs-internal ADR 0089), on the runner placement's
+	// nodes (runner.placement), whose taints atelet then tolerates too (see
+	// "The agents' WorkerPool"). Nil, the default, renders as before the field
+	// existed, and an operator leaves it out of the data.
+	AgentPool *AgentPool `json:"AgentPool,omitempty"`
+}
+
+// AgentPool is the WorkerPool agents: Workers warm workers, each sized for one
+// step's actor (CPU and Memory its limits, RequestCPU and RequestMemory what
+// it asks for), on the nodes NodeSelector picks, with Tolerations.
+type AgentPool struct {
+	Workers       int32             `json:"Workers"`
+	CPU           string            `json:"CPU"`
+	Memory        string            `json:"Memory"`
+	RequestCPU    string            `json:"RequestCPU"`
+	RequestMemory string            `json:"RequestMemory"`
+	NodeSelector  map[string]string `json:"NodeSelector,omitempty"`
+	Tolerations   []Toleration      `json:"Tolerations,omitempty"`
+}
+
+// Toleration is a taint a pod tolerates, as Kubernetes spells one.
+type Toleration struct {
+	Key      string `json:"Key,omitempty"`
+	Operator string `json:"Operator,omitempty"`
+	Value    string `json:"Value,omitempty"`
+	Effect   string `json:"Effect,omitempty"`
 }
 
 // CloudIdentity is the chart's cloudIdentity: a Google service account bound
@@ -714,6 +743,8 @@ func main() {
 	flag.Var(jsonFlag[RegistryToken]{&d.RegistryToken, "registry-token"}, "registry-token",
 		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "awsHostNetwork": false (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
 	flag.StringVar(&d.RunningChartVersion, "running-chart-version", "", "RunningChartVersion: the rendering operator's chart version; image pins render only when it equals InfraredChartVersion (empty: always, as before)")
+	flag.Var(jsonFlag[*AgentPool]{&d.AgentPool, "agent-pool"}, "agent-pool",
+		`AgentPool, as the operator renders it from runner.actors: {"Workers": 4, "CPU": "2500m", "Memory": "9Gi", "RequestCPU": "625m", "RequestMemory": "2304Mi", "NodeSelector": {...} (optional), "Tolerations": [{"Key", "Operator", "Value", "Effect"}] (optional)} (empty: none)`)
 	flag.Var(jsonFlag[*CloudIdentity]{&d.CloudIdentity, "cloud-identity"}, "cloud-identity",
 		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
 	flag.BoolVar(&d.OIDC, "oidc", false, "OIDC: Infrared is the OpenID Connect provider of the install's own tools (INFRARED_OIDC); with -grafana-url and -infrared-host, Grafana signs people in through it")
@@ -821,6 +852,7 @@ func mergeDataFile(d *Data, path string) error {
 		"substrate-registry":     func() { d.SubstrateRegistry = explicit.SubstrateRegistry },
 		"registry-token":         func() { d.RegistryToken = explicit.RegistryToken },
 		"cloud-identity":         func() { d.CloudIdentity = explicit.CloudIdentity },
+		"agent-pool":             func() { d.AgentPool = explicit.AgentPool },
 		"running-chart-version":  func() { d.RunningChartVersion = explicit.RunningChartVersion },
 		"oidc":                   func() { d.OIDC = explicit.OIDC },
 		"grafana-url":            func() { d.GrafanaURL = explicit.GrafanaURL },
@@ -915,6 +947,7 @@ func validate(d Data) error {
 	}
 	errs = append(errs, validateRegistryToken(d.RegistryToken, d.ImagePullSecret)...)
 	errs = append(errs, validateCloudIdentity(d.CloudIdentity)...)
+	errs = append(errs, validateAgentPool(d.AgentPool)...)
 	if err := validateGrafanaURL(d.GrafanaURL); err != nil {
 		errs = append(errs, err)
 	}
@@ -929,6 +962,52 @@ func validate(d Data) error {
 		errs = append(errs, fmt.Errorf("MediaStore must be one of %q (the chart's summaryvideo.store; its volume is empty here), got %q", MediaStores, d.MediaStore))
 	}
 	return errors.Join(errs...)
+}
+
+// quantity is a Kubernetes resource quantity as the operator writes one: a
+// whole or decimal number, with or without a unit.
+var quantity = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$`)
+
+// labelKey and labelValue are a Kubernetes label's key and value.
+var (
+	labelKey   = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$`)
+	labelValue = regexp.MustCompile(`^([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$`)
+)
+
+// validateAgentPool checks the agents' WorkerPool: 1 to 64 workers, each
+// size a quantity, a node selector of labels, and tolerations as Kubernetes
+// takes them.
+func validateAgentPool(p *AgentPool) []error {
+	if p == nil {
+		return nil
+	}
+	var errs []error
+	if p.Workers < 1 || p.Workers > 64 {
+		errs = append(errs, fmt.Errorf("AgentPool.Workers must be 1 to 64, got %d", p.Workers))
+	}
+	for name, v := range map[string]string{"CPU": p.CPU, "Memory": p.Memory, "RequestCPU": p.RequestCPU, "RequestMemory": p.RequestMemory} {
+		if !quantity.MatchString(v) {
+			errs = append(errs, fmt.Errorf("AgentPool.%s must be a resource quantity, e.g. 2500m or 9Gi, got %q", name, v))
+		}
+	}
+	for k, v := range p.NodeSelector {
+		if !labelKey.MatchString(k) || !labelValue.MatchString(v) {
+			errs = append(errs, fmt.Errorf("AgentPool.NodeSelector must hold labels, got %q: %q", k, v))
+		}
+	}
+	for _, t := range p.Tolerations {
+		switch {
+		case t.Key != "" && !labelKey.MatchString(t.Key), !labelValue.MatchString(t.Value):
+			errs = append(errs, fmt.Errorf("AgentPool.Tolerations: a key and a value as a label's, got %q and %q", t.Key, t.Value))
+		case !slices.Contains([]string{"", "Equal", "Exists"}, t.Operator):
+			errs = append(errs, fmt.Errorf("AgentPool.Tolerations: an operator Equal or Exists, got %q", t.Operator))
+		case !slices.Contains([]string{"", "NoSchedule", "PreferNoSchedule", "NoExecute"}, t.Effect):
+			errs = append(errs, fmt.Errorf("AgentPool.Tolerations: an effect NoSchedule, PreferNoSchedule or NoExecute, got %q", t.Effect))
+		case t.Key == "" && t.Operator == "Equal":
+			errs = append(errs, errors.New("AgentPool.Tolerations: a toleration without a key tolerates every taint, with operator Exists"))
+		}
+	}
+	return errs
 }
 
 // validateTenancyCarry checks one of the tenancy's settings the infrared
