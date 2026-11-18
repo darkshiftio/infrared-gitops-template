@@ -2,6 +2,7 @@
 [[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
 [[- $mtls := and .StoresSecurity $certManager -]]
 [[- $media := and .Stores .MediaStore -]]
+[[- $substrate := and .Stores .SubstrateCapable .Registry -]]
 [[- if .Stores -]]
 # =============================================================================
 # Before SeaweedFS: its S3 keys, and the Postgres that holds its filer metadata.
@@ -91,7 +92,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["seaweedfs-s3-ate-snapshots", "seaweedfs-s3-registry"[[ if $media ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]][[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]][[ if .StoresSecurity ]], "seaweedfs-jwt"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-ate-snapshots"[[ if $substrate ]], "seaweedfs-s3-ate-snapshots-v1"[[ end ]], "seaweedfs-s3-registry"[[ if $media ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]][[ if .Backup.Bucket ]], "seaweedfs-s3-backup"[[ end ]][[ if $restore ]], "seaweedfs-s3-restore"[[ end ]][[ if .StoresSecurity ]], "seaweedfs-jwt"[[ end ]]]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -147,7 +148,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: IDENTITIES
-              value: "ate-snapshots registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]"
+              value: "ate-snapshots[[ if $substrate ]] ate-snapshots-v1[[ end ]] registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]"
             - name: WAIT_CRDS
               value: "[[ if .Backup.Bucket ]]externalsecrets.external-secrets.io[[ end ]][[ if $mtls ]][[ if .Backup.Bucket ]] [[ end ]]certificates.cert-manager.io issuers.cert-manager.io[[ end ]]"
             - name: WAIT_SERVICES

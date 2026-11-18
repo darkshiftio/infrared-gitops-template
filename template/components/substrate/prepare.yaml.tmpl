@@ -3,30 +3,39 @@
 # Before the control plane: what Substrate's installer does by hand.
 # =============================================================================
 # This PreSync hook does, in order, what ate-setup does before it applies the
-# control plane (cmd/ate-setup, prereqs.go, create.go, version.go), each step
-# safe to run again:
+# control plane (cmd/ate-setup, prereqs.go and create.go), each step safe to
+# run again:
 #
-#   1. The actor-identity pools, made once and never replaced:
-#        actor-id-jwt-pool   ES256 key the API signs actors' JWTs with
-#        actor-id-ca-pool    Ed25519 CA the API signs actors' certificates
-#                            with, as Substrate's localca reads it; its root
-#                            valid 365 days, its expiry in the annotation
-#                            infrared.darkshift.io/not-after
-#        actor-id-ca-certs   that CA's root alone, for the egress gateway
-#      OpenSSL makes the candidates in memory, in the hook's own pod; one it
-#      does not write goes with the pod.
-#   2. The API's authentication settings, the ConfigMap ate-api-authentication:
-#      it trusts the cluster's ServiceAccount tokens for the audience
-#      api.ate-system.svc, the issuer read from the cluster's discovery
-#      document.
-#   3. The label ate.dev/substrate-version=one-install-ce05e5d-7e86cab on every node that has none: atelet and
-#      the workers run only on labelled nodes. node-labels.yaml labels a node
-#      that joins later.
-#   4. Waits, up to half an hour, for Substrate's CRDs, the pod-certificate
-#      controller's trust bundles, the platform's Postgres and SeaweedFS's S3
-#      gateway, and the stores the ExternalSecrets copy through.
+#   1. The pools, made once and never replaced. Substrate 1.0 is a new
+#      install, so they are new ones under new names; the pools an install
+#      before it made (actor-id-jwt-pool, actor-id-ca-pool, actor-id-ca-certs)
+#      stay, unused:
+#        actor-id-jwt-pool-v1   ES256 key the API signs actors' JWTs with,
+#                               whose public half ate-idp-server serves
+#        actor-id-ca-pool-v1    ECDSA P-256 CA the API signs actors'
+#                               certificates with, as Substrate's localca reads
+#                               it (P-256, as upstream makes it since 1.0, so
+#                               relying parties outside accept it)
+#        actor-id-ca-certs-v1   that CA's root alone, for the egress gateway
+#        egress-mitm-ca-pool    ECDSA P-256 CA the egress gateway mints a
+#                               certificate per server name with, for an https
+#                               rule; ate-controller publishes its root as the
+#                               ClusterTrustBundle egress-mitm.ate.dev:mitm:
+#                               primary-bundle. Upstream's name: the controller
+#                               reads no other.
+#      Each CA's root is valid 365 days, its expiry in the annotation
+#      infrared.darkshift.io/not-after. OpenSSL makes the candidates in memory,
+#      in the hook's own pod; one it does not write goes with the pod.
+#   2. The API's authentication settings, the ConfigMap ate-api-authentication,
+#      as ate-setup writes them (strictly parsed at 1.0): one JWT provider, the
+#      cluster's ServiceAccount tokens for the audience api.ate-system.svc, the
+#      issuer read from the cluster's discovery document.
+#   3. Waits, up to half an hour, for Substrate's CRDs at ate.dev/v1, the
+#      pod-certificate controller's three trust bundles, the platform's
+#      Postgres and SeaweedFS's S3 gateway, and the stores the ExternalSecrets
+#      copy through.
 #
-# The hook prints the CA's expiry at every sync.
+# The hook prints each CA's expiry at every sync.
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
@@ -38,8 +47,7 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
     argocd.argoproj.io/sync-wave: "-10"
 ---
-# Read only, but for the nodes' label: CRDs, EndpointSlices,
-# ClusterSecretStores and ClusterTrustBundles; nodes, to label them.
+# Read only: CRDs, EndpointSlices, ClusterSecretStores and ClusterTrustBundles.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -61,10 +69,6 @@ rules:
   - apiGroups: ["certificates.k8s.io"]
     resources: ["clustertrustbundles"]
     verbs: ["get"]
-  # kubectl label reads the node before it patches it.
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -97,7 +101,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["actor-id-jwt-pool", "actor-id-ca-pool", "actor-id-ca-certs"]
+    resourceNames: ["actor-id-jwt-pool-v1", "actor-id-ca-pool-v1", "actor-id-ca-certs-v1", "egress-mitm-ca-pool"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -184,17 +188,25 @@ spec:
               # A PEM file's body is the base64 of its DER, as Go's JSON
               # encodes []byte.
               body() { sed '/^-----/d' "$1" | tr -d '\n'; }
-              mkdir actor-id-ca-pool actor-id-jwt-pool
-              openssl genpkey -algorithm ed25519 -out actor-id-ca-pool/tls.key
-              openssl req -x509 -new -config ca.cnf -key actor-id-ca-pool/tls.key -days 365 \
-                -subj "/CN=$(openssl rand -hex 16)" -out actor-id-ca-pool/tls.crt
-              printf '{"CAs":[{"ID":"1","SigningKeyPKCS8":"%s","RootCertificateDER":"%s"}],"ActiveForSigning":"1"}' \
-                "$(body actor-id-ca-pool/tls.key)" "$(body actor-id-ca-pool/tls.crt)" >actor-id-ca-pool/pool
-              openssl x509 -in actor-id-ca-pool/tls.crt -noout -enddate -dateopt iso_8601 | sed 's/^notAfter=//' >actor-id-ca-pool/not-after
+              # ca <pool>: an ECDSA P-256 CA pool as localca reads it (key
+              # pool, one CA with id 1, active for signing), and its root and
+              # key as tls.crt and tls.key.
+              ca() {
+                mkdir "$1"
+                openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out "$1/tls.key"
+                openssl req -x509 -new -config ca.cnf -key "$1/tls.key" -days 365 \
+                  -subj "/CN=$(openssl rand -hex 16)" -out "$1/tls.crt"
+                printf '{"CAs":[{"ID":"1","SigningKeyPKCS8":"%s","RootCertificateDER":"%s"}],"ActiveForSigning":"1"}' \
+                  "$(body "$1/tls.key")" "$(body "$1/tls.crt")" >"$1/pool"
+                openssl x509 -in "$1/tls.crt" -noout -enddate -dateopt iso_8601 | sed 's/^notAfter=//' >"$1/not-after"
+              }
+              ca actor-id-ca-pool-v1
+              ca egress-mitm-ca-pool
               # localjwtauthority's pool: one ES256 key, id 1, active for signing.
-              openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out actor-id-jwt-pool/key.pem
+              mkdir actor-id-jwt-pool-v1
+              openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out actor-id-jwt-pool-v1/key.pem
               printf '{"Authorities":[{"ID":"1","Algorithm":"ES256","SigningKeyPKCS8":"%s"}],"ActiveForSigning":"1"}' \
-                "$(body actor-id-jwt-pool/key.pem)" >actor-id-jwt-pool/pool
+                "$(body actor-id-jwt-pool-v1/key.pem)" >actor-id-jwt-pool-v1/pool
               echo "candidate pools made"
           securityContext:
             allowPrivilegeEscalation: false
@@ -217,12 +229,11 @@ spec:
           env:
             - name: HOME
               value: /tmp
-            - name: SUBSTRATE_VERSION
-              value: one-install-ce05e5d-7e86cab
+            # A CRD named <name>@<version> must also serve that version.
             - name: WAIT_CRDS
-              value: "workerpools.ate.dev sandboxconfigs.ate.dev externalsecrets.external-secrets.io"
+              value: "workerpools.ate.dev@v1 sandboxconfigs.ate.dev@v1 externalsecrets.external-secrets.io"
             - name: WAIT_BUNDLES
-              value: "servicedns.podcert.ate.dev:identity:primary-bundle podidentity.podcert.ate.dev:identity:primary-bundle"
+              value: "servicedns.podcert.ate.dev:identity:primary-bundle podidentity.podcert.ate.dev:identity:primary-bundle postgres.podcert.ate.dev:identity:primary-bundle"
             - name: WAIT_SERVICES
               value: "stores/postgres-rw stores/seaweedfs-s3"
             - name: WAIT_STORES
@@ -232,68 +243,69 @@ spec:
             - -ec
             - |
               present() { kubectl get secret "$1" -o name >/dev/null 2>&1; }
-              # 1. The actor-identity pools, made once and never replaced.
-              # Nothing prints a key.
-              if present actor-id-jwt-pool; then
-                echo "actor-id-jwt-pool exists; leaving it alone"
+              # 1. The pools, made once and never replaced. Nothing prints a key.
+              if present actor-id-jwt-pool-v1; then
+                echo "actor-id-jwt-pool-v1 exists; leaving it alone"
               else
                 kubectl create -f - >/dev/null <<EOF
               apiVersion: v1
               kind: Secret
               type: Opaque
               metadata:
-                name: actor-id-jwt-pool
+                name: actor-id-jwt-pool-v1
               data:
-                pool: $(base64 -w 0 </work/actor-id-jwt-pool/pool)
+                pool: $(base64 -w 0 </work/actor-id-jwt-pool-v1/pool)
               EOF
-                echo "created actor-id-jwt-pool"
+                echo "created actor-id-jwt-pool-v1"
               fi
-              if present actor-id-ca-pool; then
-                echo "actor-id-ca-pool exists; leaving it alone"
-              else
-                kubectl create -f - >/dev/null <<EOF
+              for pool in actor-id-ca-pool-v1 egress-mitm-ca-pool; do
+                if present "$pool"; then
+                  echo "$pool exists; leaving it alone"
+                else
+                  kubectl create -f - >/dev/null <<EOF
               apiVersion: v1
               kind: Secret
               type: kubernetes.io/tls
               metadata:
-                name: actor-id-ca-pool
+                name: $pool
                 labels:
                   infrared.darkshift.io/substrate-ca: "true"
                 annotations:
-                  infrared.darkshift.io/not-after: "$(cat /work/actor-id-ca-pool/not-after)"
+                  infrared.darkshift.io/not-after: "$(cat "/work/$pool/not-after")"
               data:
-                pool: $(base64 -w 0 </work/actor-id-ca-pool/pool)
-                tls.crt: $(base64 -w 0 </work/actor-id-ca-pool/tls.crt)
-                tls.key: $(base64 -w 0 </work/actor-id-ca-pool/tls.key)
+                pool: $(base64 -w 0 <"/work/$pool/pool")
+                tls.crt: $(base64 -w 0 <"/work/$pool/tls.crt")
+                tls.key: $(base64 -w 0 <"/work/$pool/tls.key")
               EOF
-                echo "created actor-id-ca-pool"
-              fi
-              expires="$(kubectl get secret actor-id-ca-pool -o jsonpath='{.metadata.annotations.infrared\.darkshift\.io/not-after}')"
-              echo "CA ate-system/actor-id-ca-pool expires ${expires:-on a date nobody recorded}"
-              # The pool's root alone (it holds one CA), which the egress
-              # gateway verifies actors' certificates against.
-              if present actor-id-ca-certs; then
-                echo "actor-id-ca-certs exists; leaving it alone"
+                  echo "created $pool"
+                fi
+                expires="$(kubectl get secret "$pool" -o jsonpath='{.metadata.annotations.infrared\.darkshift\.io/not-after}')"
+                echo "CA ate-system/$pool expires ${expires:-on a date nobody recorded}"
+              done
+              # The actor CA's root alone (its pool holds one CA), which the
+              # egress gateway verifies actors' certificates against.
+              if present actor-id-ca-certs-v1; then
+                echo "actor-id-ca-certs-v1 exists; leaving it alone"
               else
                 kubectl create -f - >/dev/null <<EOF
               apiVersion: v1
               kind: Secret
               type: Opaque
               metadata:
-                name: actor-id-ca-certs
+                name: actor-id-ca-certs-v1
               data:
-                ca.crt: $(kubectl get secret actor-id-ca-pool -o jsonpath='{.data.tls\.crt}')
+                ca.crt: $(kubectl get secret actor-id-ca-pool-v1 -o jsonpath='{.data.tls\.crt}')
               EOF
-                echo "created actor-id-ca-certs"
+                echo "created actor-id-ca-certs-v1"
               fi
 
               # 2. The API's authentication settings, as ate-setup writes them
-              # (buildAuthenticationConfig): an issuer inside the cluster is
+              # (kubernetesJWTProvider): an issuer inside the cluster is
               # reached with the pod's own CA and token.
               issuer="$(kubectl get --raw /.well-known/openid-configuration | jq -r '.issuer // ""')"
               [ -n "$issuer" ] || { echo "the cluster publishes no ServiceAccount issuer" >&2; exit 1; }
               {
-                printf 'actorIdentityJWTProvider: kubernetes\njwtProviders:\n- name: kubernetes\n  issuer: %s\n  audiences: [api.ate-system.svc]' "$issuer"
+                printf 'jwtProviders:\n- name: kubernetes\n  issuer: %s\n  audiences:\n  - api.ate-system.svc' "$issuer"
                 case "$issuer" in
                   https://kubernetes.default.svc | https://kubernetes.default.svc.cluster.local)
                     printf '\n  certificateAuthorityFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
@@ -309,17 +321,15 @@ spec:
                 echo "ate-api-authentication trusts $issuer (a running API reads it at its next start)"
               fi
 
-              # 3. The nodes' label: a node that has one keeps it, as ate-setup
-              # leaves it (an upgrade moves it node by node).
-              for node in $(kubectl get nodes -l '!ate.dev/substrate-version' -o name); do
-                kubectl label "$node" "ate.dev/substrate-version=$SUBSTRATE_VERSION" >/dev/null
-                echo "labelled $node ate.dev/substrate-version=$SUBSTRATE_VERSION"
-              done
-              echo "$(kubectl get nodes -l "ate.dev/substrate-version=$SUBSTRATE_VERSION" -o name | wc -l | tr -d ' ') of $(kubectl get nodes -o name | wc -l | tr -d ' ') nodes run Substrate $SUBSTRATE_VERSION"
-
-              # 4. Waits. Each list is space-separated; an empty one waits for nothing.
+              # 3. Waits. Each list is space-separated; an empty one waits for nothing.
               established() {
-                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+                name="${1%@*}"
+                [ "$(kubectl get crd "$name" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ] || return 1
+                [ "$name" = "$1" ] && return 0
+                case " $(kubectl get crd "$name" -o jsonpath='{.spec.versions[*].name}' 2>/dev/null) " in
+                  *" ${1#*@} "*) return 0 ;;
+                esac
+                return 1
               }
               answering() {
                 kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \

@@ -1,13 +1,15 @@
 [[- if and .Stores .SubstrateCapable .Registry -]]
-# The OTLP settings every control plane component reads through envFrom, in
-# place of upstream's ate-otel-config.yaml, which names GKE's managed collector.
-# This install runs no OpenTelemetry collector, so the endpoint is empty: atelet
-# starts no relay for the workers, the controller gives the workers no
-# endpoint, and the router's Envoy traces nothing (each is how Substrate reads
-# an empty endpoint). The components' Prometheus metrics stay on port 9090.
+# The control plane's settings, none of them secret, in place of what
+# Substrate's installer writes by hand (cmd/ate-setup, apienv.go and
+# create.go) and of upstream's ate-otel-config.yaml.
 #
-# Wave -1: every container here names it in envFrom, and does not start
-# without it.
+# Wave -1: every container here reads them, and none starts without them.
+#
+# The OTLP settings every control plane component reads through envFrom. This
+# install runs no OpenTelemetry collector, so the endpoint is empty: the
+# controller gives the workers no endpoint, and the router's Envoy traces
+# nothing (each is how Substrate reads an empty endpoint). The components'
+# Prometheus metrics stay on port 9090.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,8 +19,54 @@ metadata:
     argocd.argoproj.io/sync-wave: "-1"
 data:
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
+---
+# The API's settings, which it reads through envFrom and its objectstore-plugin
+# sidecar by key:
+#
+#   ATE_API_POSTGRES_OWNER_ROLE, ATE_API_POSTGRES_READ_WRITE_ROLE
+#       the NOLOGIN roles the two logins take (SET ROLE) on the platform's
+#       Postgres (components/postgres/substrate-v1.yaml); the DSNs are in the
+#       Secret ate-api-server-secret-envvars (credentials.yaml)
+#   ATE_API_ACTOR_JWT_ISSUER
+#       the issuer of actor JWTs: ate-idp-server's Service idp, which serves
+#       the keys relying parties check them with (upstream's default)
+#   ATE_API_SNAPSHOT_LOCATION
+#       the one cluster-wide snapshot location, s3://ate-snapshots/v1: an
+#       atespace's snapshots go under v1/atespaces/<atespace>/. No template
+#       names a location of its own (that is a preview feature at 1.0).
+#   ATE_API_SNAPSHOT_TRANSFER_SERVICE_ACCOUNT
+#       empty: it names a Google service account for snapshots on GCS, and S3
+#       transfers with the sidecars' own keys
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ate-api-server-envvars
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  ATE_API_POSTGRES_OWNER_ROLE: substrate_v1_owner
+  ATE_API_POSTGRES_READ_WRITE_ROLE: substrate_v1_readwrite
+  ATE_API_ACTOR_JWT_ISSUER: https://idp.ate-system.svc
+  ATE_API_SNAPSHOT_LOCATION: s3://ate-snapshots/v1
+  ATE_API_SNAPSHOT_TRANSFER_SERVICE_ACCOUNT: ""
+---
+# The API's config file (--config-file), as ate-setup writes it on a new
+# install: log level info.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ate-api-config
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  apiconfig.textproto: |
+    logging: {
+      level: "info"
+    }
 [[- else -]]
 # Agent Substrate runs only where the operator's preflight found the cluster able
 # to host it, with the platform's own stores and the registry inside the
-# cluster: no telemetry settings.
+# cluster: no settings.
 [[- end ]]

@@ -357,10 +357,11 @@ spec:
 [[- end ]][[ end ]]
 [[- end ]]
 [[- if and .Stores .Registry $testActors ]]
-          # Substrate's test actors are on (substrate.testActors). With the
-          # stores and a registry the chart leaves them out unless it is true,
-          # naming substrate-test-actors among the components left out, which
-          # is never carried above; so adoption keeps them on only with it.
+          # The chart's substrate.testActors is true. With the stores and a
+          # registry the chart names substrate-test-actors among the
+          # components left out unless it is, which is never carried above;
+          # so adoption keeps the setting only with this. Agent Substrate 1.0
+          # has no test actors, so the template renders nothing for it.
           substrate:
             testActors: true
 [[- end ]]

@@ -2,12 +2,10 @@
 [[- $backups := and .Stores .Backup.Bucket .Copies.Recipients -]]
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
-[[- $testActors := not (contains " substrate-test-actors " $disabled) -]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
 [[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
 [[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey (not $tunnel) -]]
 [[- $layout := and .Stores .Registry .StoresOrgLayout -]]
-[[- $actorsV := "v1" ]][[ if $layout ]][[ $actorsV = "v2" ]][[ end -]]
 # [[ .GitopsRepoName ]]
 
 The gitops repo for **[[ .OrgName ]]**'s Infrared management cluster
@@ -56,13 +54,9 @@ components/
   zot/                     the registry inside the cluster: its waits, the base of its config, its S3 keys
 [[- if .SubstrateCapable ]]
   substrate-crds/          Agent Substrate's CRDs and the admission policy on SandboxConfigs, vendored and pinned
-  substrate-podcert/       its pod-certificate controller, and the hook that makes its two CAs
-  substrate/               its control plane (API, controller, atelet, router, egress), vendored and pinned, and its fence
-[[- if $testActors ]]
-  substrate-actors/        the platform's worker pool, its actor images and its ActorTemplates
-[[- else ]]
-  substrate-actors/        the platform's worker pool; Substrate's test actors are off
-[[- end ]]
+  substrate-podcert/       its pod-certificate controller, and the hook that makes its three CAs
+  substrate/               its control plane (API, identity provider, controller, atelet, router, egress), vendored and pinned, and its fence
+  substrate-actors/        the namespace of the platform's worker pools, none yet
 [[- end ]]
 [[- end ]]
 [[- if and (or $backups .MediaStore) (not .Registry) ]]
@@ -144,20 +138,16 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 [[- if .SubstrateCapable ]]
 [[- if not (contains " substrate-crds " $disabled) ]]
-| 20 | `substrate-crds` | Agent Substrate's CRDs: WorkerPool, SandboxConfig, CSIDriverConfig |
+| 20 | `substrate-crds` | Agent Substrate's CRDs at `ate.dev/v1`: WorkerPool, SandboxConfig, CSIDriverConfig |
 [[- end ]]
 [[- if not (contains " substrate-podcert " $disabled) ]]
-| 21 | `substrate-podcert` | Substrate's pod-certificate controller and its two CAs (namespace `podcertificate-controller-system`) |
+| 21 | `substrate-podcert` | Substrate's pod-certificate controller and its three CAs (namespace `podcertificate-controller-system`) |
 [[- end ]]
 [[- if not (contains " substrate " $disabled) ]]
-| 22 | `substrate` | Substrate's control plane (namespace `ate-system`): records in the Postgres database `substrate`, snapshots in the bucket `ate-snapshots`; only Infrared's operator reaches its API and router |
+| 22 | `substrate` | Substrate 1.0's control plane (namespace `ate-system`): records in the Postgres database `substrate_v1`, snapshots in the bucket `ate-snapshots` under `v1/`; Infrared's operator is its API's one bootstrap owner and its router's one client |
 [[- end ]]
 [[- if not (contains " substrate-actors " $disabled) ]]
-[[- if $testActors ]]
-| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`), the actor images copied to `[[ .Registry ]]/platform/[[ if $layout ]]images/[[ end ]]substrate/`, and the ActorTemplates `counter-[[ $actorsV ]]` and `sandbox-[[ $actorsV ]]` in the atespace `platform`[[ if $layout ]], their snapshots under `platform/snapshots/` in the bucket `ate-snapshots`[[ end ]] |
-[[- else ]]
-| 23 | `substrate-actors` | the WorkerPool `platform` (namespace `ate-workers`). Substrate's test actors, the ActorTemplates `counter-[[ $actorsV ]]` and `sandbox-[[ $actorsV ]]`, are off: the Installation names `substrate-test-actors` among its disabled components, as the Infrared chart does unless its value `substrate.testActors` is true |
-[[- end ]]
+| 23 | `substrate-actors` | the namespace `ate-workers` of the platform's worker pools; none runs there yet |
 [[- end ]]
 [[- end ]]
 [[- end ]]

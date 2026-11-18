@@ -8,6 +8,8 @@
 [[- $mtls := and .StoresSecurity $certManager ]]
 [[- /* The bucket media (MediaStore, the chart's summaryvideo.store): the API's videos and pictures. */ -]]
 [[- $media := and .Stores .MediaStore ]]
+[[- /* Agent Substrate 1.0's snapshots, under v1/ in ate-snapshots, as an identity of its own. */ -]]
+[[- $substrate := and .Stores .SubstrateCapable .Registry ]]
 [[- if not $on -]]
 # seaweedfs is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
@@ -318,7 +320,7 @@ spec:
             # The gateway reads the identities file once, at start: a new set of
             # identities is a new value here, so the gateways roll.
             podAnnotations:
-              infrared.darkshift.io/s3-identities: ate-snapshots registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]
+              infrared.darkshift.io/s3-identities: ate-snapshots[[ if $substrate ]] ate-snapshots-v1[[ end ]] registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]
             extraEnvironmentVars:
               S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:
                 secretKeyRef:
@@ -328,6 +330,16 @@ spec:
                 secretKeyRef:
                   name: seaweedfs-s3-ate-snapshots
                   key: AWS_SECRET_ACCESS_KEY
+[[- if $substrate ]]
+              S3_ATE_SNAPSHOTS_V1_ACCESS_KEY_ID:
+                secretKeyRef:
+                  name: seaweedfs-s3-ate-snapshots-v1
+                  key: AWS_ACCESS_KEY_ID
+              S3_ATE_SNAPSHOTS_V1_SECRET_ACCESS_KEY:
+                secretKeyRef:
+                  name: seaweedfs-s3-ate-snapshots-v1
+                  key: AWS_SECRET_ACCESS_KEY
+[[- end ]]
               S3_REGISTRY_ACCESS_KEY_ID:
                 secretKeyRef:
                   name: seaweedfs-s3-registry

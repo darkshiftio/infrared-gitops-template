@@ -1,22 +1,34 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Sourced by substrate-counter-test.sh and substrate-fence-check.sh.
+# Sourced by substrate-serve-check.sh and substrate-fence-check.sh.
 # =============================================================================
-# Both talk to Agent Substrate on a cluster this template installed it on, from
-# the one place inside the cluster its NetworkPolicies admit besides Infrared's
-# operator: a pod in ate-system labelled infrared.darkshift.io/substrate-client
-# (components/substrate/network-policies.yaml). A port-forward would not do: it
-# enters the pod without crossing any NetworkPolicy, so it proves nothing.
+# Both talk to Agent Substrate 1.0 on a cluster this template installed it on,
+# from the one place inside the cluster its NetworkPolicies admit besides
+# Infrared's operator: a pod in ate-system labelled
+# infrared.darkshift.io/substrate-client (components/substrate/
+# network-policies.yaml). A port-forward would not do: it enters the pod
+# without crossing any NetworkPolicy, so it proves nothing.
 #
 # client_job <name> <script>: runs <script> (sh) in a Job of that name in
-# ate-system, as the ServiceAccount substrate-check, with:
-#   ate <method>     one call to the API (gRPC, ateapi.Control/<method>), the
-#                    request JSON on stdin, the answer on stdout; grpcurl exits
-#                    64 plus the gRPC code
-#   ROUTER           the router's URL, http://atenet-router.ate-system.svc
-#   AWS_*            the S3 identity ate-snapshots's keys and SeaweedFS's S3
-#                    endpoint, for aws s3api
-#   kubectl          as substrate-check: the caller grants what it needs
+# ate-system, as the ServiceAccount substrate-check, which no access policy
+# names and which is not the API's bootstrap owner, with:
+#   ate <method>       one call to the API (gRPC, substrate.ateapi.v1.Control/
+#                      <method>) as substrate-check, its token for the audience
+#                      api.ate-system.svc; the request JSON on stdin, the answer
+#                      on stdout; grpcurl exits 64 plus the gRPC code
+#   ate_anon <method>  the same with no token
+#   ate_list           the services the API lists by reflection (open to any
+#                      caller it authenticates)
+#   router <port> [curl args...]
+#                      one HTTPS request to the router's Service on that port
+#                      (443 or 8444), naming an actor that does not exist;
+#                      prints curl's exit code and the HTTP status. The pod's
+#                      own certificate from the pod-identity signer, whose
+#                      SPIFFE ID is
+#                      spiffe://cluster.local/ns/ate-system/sa/substrate-check,
+#                      is $POD_CERT, to pass with --cert and --key
+#   CA                 the service-DNS trust bundle, which every Substrate
+#                      server's certificate chains to
 # then prints the Job's log and returns 0 when it succeeded. Every command names
 # the context, never the current one.
 # =============================================================================
@@ -32,34 +44,21 @@ die() {
   exit 1
 }
 
-# preflight <ActorTemplate>: the context answers, Substrate runs there, and so
-# does the test actor the check needs. Substrate's test actors (counter-v1 and
-# sandbox-v1, in the stores' org layout counter-v2 and sandbox-v2) are off by default: the install turns them on with the Infrared
-# chart's value substrate.testActors (true), and the template then makes them in
-# the substrate-actors Application.
+# preflight: the context answers, and Substrate 1.0 runs there: its API's
+# Deployment, and its WorkerPool CRD serving ate.dev/v1.
 preflight() {
-  local template=$1
   command -v kubectl >/dev/null || die "missing tool: kubectl"
   command -v jq >/dev/null || die "missing tool: jq"
   k get --raw /readyz >/dev/null 2>&1 || die "context $CTX does not answer"
   k -n ate-system get deployment ate-api-server >/dev/null 2>&1 || die "no Substrate on $CTX (ate-system/ate-api-server)"
-  k -n ate-system get configmap substrate-actor-templates -o jsonpath='{.data}' 2>/dev/null | jq -e --arg f "$template.json" 'has($f)' >/dev/null 2>&1 \
-    || die "no ActorTemplate $template on $CTX. This check needs Substrate's test actors, which are off by default: set the Infrared chart's value substrate.testActors to true for this install, and run it again once the substrate-actors Application has synced"
+  case " $(k get crd workerpools.ate.dev -o jsonpath='{.spec.versions[*].name}' 2>/dev/null) " in
+    *" v1 "*) ;;
+    *) die "Substrate on $CTX is not 1.0: its WorkerPool CRD does not serve ate.dev/v1" ;;
+  esac
 }
 
-# test_template <actor>: the ActorTemplate of the test actor <actor> (counter
-# or sandbox) that the install makes: <actor>-v2 in the stores' org layout
-# (README, "The stores' org layout"), whose templates the substrate-actors
-# Application then lists, and <actor>-v1 before it.
-test_template() {
-  if k -n ate-system get configmap substrate-actor-templates -o jsonpath='{.data}' 2>/dev/null | jq -e --arg f "$1-v2.json" 'has($f)' >/dev/null 2>&1; then
-    echo "$1-v2"
-  else
-    echo "$1-v1"
-  fi
-}
-
-# The ServiceAccount the client Jobs run as; the caller adds Roles to it.
+# The ServiceAccount the client Jobs run as: no Kubernetes role, and nothing in
+# Substrate.
 client_account() {
   k apply -f - >/dev/null <<EOF
 apiVersion: v1
@@ -125,15 +124,10 @@ spec:
           env:
             - name: HOME
               value: /tmp
-            - name: ROUTER
-              value: http://atenet-router.ate-system.svc
-            - name: AWS_REGION
-              value: us-east-1
-            - name: AWS_ENDPOINT_URL
-              value: http://seaweedfs-s3.stores.svc:8333
-          envFrom:
-            - secretRef:
-                name: ate-s3-credentials
+            - name: CA
+              value: /run/ate-ca/trust-bundle.pem
+            - name: POD_CERT
+              value: /run/pod-identity/credential-bundle.pem
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -151,6 +145,9 @@ spec:
               readOnly: true
             - name: ate-token
               mountPath: /run/ate-token
+              readOnly: true
+            - name: pod-identity
+              mountPath: /run/pod-identity
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -176,6 +173,15 @@ spec:
                   audience: api.ate-system.svc
                   expirationSeconds: 900
                   path: token
+        # A client certificate the router does not admit: the pod-identity
+        # signer's, for this pod's ServiceAccount.
+        - name: pod-identity
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
         - name: tmp
           emptyDir: {}
 EOF
@@ -194,20 +200,36 @@ EOF
 # The sh functions every client script starts with.
 client_preamble() {
   cat <<'EOF'
-# ate <method>: one call to Substrate's API, the request on stdin. The token is
-# read at each call and never put on a command line.
+# ate <method>: one call to Substrate's API as this pod's ServiceAccount, the
+# request on stdin. The token is read at each call and never put on a command
+# line.
 ate() {
-  ATE_TOKEN="$(cat /run/ate-token/token)" /tools/grpcurl -max-time 120 \
-    -cacert /run/ate-ca/trust-bundle.pem -H 'authorization: Bearer ${ATE_TOKEN}' -expand-headers \
-    -d @ api.ate-system.svc:443 "ateapi.Control/$1"
+  ATE_TOKEN="$(cat /run/ate-token/token)" /tools/grpcurl -max-time 60 \
+    -cacert "$CA" -H 'authorization: Bearer ${ATE_TOKEN}' -expand-headers \
+    -d @ api.ate-system.svc:443 "substrate.ateapi.v1.Control/$1"
 }
-# actor_ref <atespace> <name>: the ObjectRef JSON of an actor.
-actor_ref() { printf '{"actor":{"atespace":"%s","name":"%s"}}' "$1" "$2"; }
-# remove_actor <atespace> <name>: Substrate deletes only a suspended actor, so
-# suspend it first (nothing happens when it sleeps already).
-remove_actor() {
-  actor_ref "$1" "$2" | ate SuspendActor >/dev/null 2>&1 || true
-  actor_ref "$1" "$2" | ate DeleteActor >/dev/null 2>&1 || echo "warning: the actor $1/$2 was not deleted" >&2
+# ate_anon <method>: the same call, with no credential at all.
+ate_anon() {
+  /tools/grpcurl -max-time 60 -cacert "$CA" -d @ api.ate-system.svc:443 "substrate.ateapi.v1.Control/$1"
+}
+# ate_list: the services the API lists by reflection, as this pod.
+ate_list() {
+  ATE_TOKEN="$(cat /run/ate-token/token)" /tools/grpcurl -max-time 60 \
+    -cacert "$CA" -H 'authorization: Bearer ${ATE_TOKEN}' -expand-headers \
+    api.ate-system.svc:443 list
+}
+# router <port> [curl args...]: one HTTPS request to the router, naming an actor
+# that does not exist; prints "<curl's exit code> <HTTP status>". 0 and a status
+# mean the router let the client in; 35 or 56 with 000, that it refused it in
+# the TLS handshake after presenting a certificate CA verifies; 6, 7 or 28,
+# that nothing answered; 60, that its certificate did not verify.
+router() {
+  port=$1
+  shift
+  rc=0
+  status="$(curl -sS -m 10 --cacert "$CA" "$@" -o /dev/null -w '%{http_code}' \
+    -H 'ate-target-actor: substrate-check/none' "https://atenet-router.ate-system.svc:$port/" 2>/tmp/curl.err)" || rc=$?
+  echo "$rc ${status:-000}"
 }
 EOF
 }
@@ -219,6 +241,5 @@ cleanup_client() {
     k -n ate-system delete job "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
     k -n ate-system delete configmap "$name" --ignore-not-found >/dev/null 2>&1 || true
   done
-  k -n ate-workers delete rolebinding,role substrate-check --ignore-not-found >/dev/null 2>&1 || true
   k -n ate-system delete serviceaccount substrate-check --ignore-not-found >/dev/null 2>&1 || true
 }

@@ -1,6 +1,4 @@
 [[- $r := .RegistryRetention -]]
-[[- /* Agent Substrate's test actors run here, whose images atelet pulls with no login. */ -]]
-[[- $actors := .SubstrateCapable ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $actors = false ]][[ end ]][[ end -]]
 [[- /* The stores' org layout (StoresOrgLayout, ADR 0087 D2): Zot at the bucket's root, the platform's repositories under platform/images/. */ -]]
 [[- $layout := and .Stores .Registry .StoresOrgLayout -]]
 [[- if and .Stores .Registry -]]
@@ -59,13 +57,6 @@
 #            operator's rule for it reading for others as "**" does, which is
 #            for no one. Every signed-in user reads platform/: kpack's builder,
 #            which each organization's builds run as its own user.
-[[- if and $actors $layout ]]
-#            Anyone reads platform/images/substrate/: Agent Substrate's test
-#            actors, which atelet pulls with no login.
-[[- else if $actors ]]
-#            Anyone reads platform/substrate/: Agent Substrate's test actors,
-#            which atelet pulls with no login.
-[[- end ]]
 #            A zone's pods pull as their organization's user: the operator
 #            writes the Secret zot-pull into each zone and lists it on its
 #            default ServiceAccount. Only user platform writes under platform/,
@@ -150,14 +141,7 @@ data:
               "policies": [
                 {"users": ["platform"], "actions": ["read", "create", "update", "delete"]}
               ]
-            }[[ if $actors ]],
-            "platform/[[ if $layout ]]images/[[ end ]]substrate/**": {
-              "anonymousPolicy": ["read"],
-              "defaultPolicy": ["read"],
-              "policies": [
-                {"users": ["platform"], "actions": ["read", "create", "update", "delete"]}
-              ]
-            }[[ end ]]
+            }
 [[- else ]]
             "**": {
               "anonymousPolicy": ["read"],

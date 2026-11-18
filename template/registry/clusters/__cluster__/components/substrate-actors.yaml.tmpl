@@ -1,31 +1,13 @@
 [[- $on := true ]][[ range .Disabled ]][[ if eq . "substrate-actors" ]][[ $on = false ]][[ end ]][[ end ]]
-[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if not $on -]]
 # substrate-actors is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
 [[- else if and .Stores .SubstrateCapable .Registry -]]
-[[- if $testActors -]]
-# The platform's own actors on Agent Substrate (components/substrate-actors):
-# the WorkerPool platform in the namespace ate-workers, three warm gVisor
-# workers; a Sync hook that copies the counter demo's image and the test
-# actor's into the registry inside the cluster ([[ .Registry ]], under
-# platform/[[ if .StoresOrgLayout ]]images/[[ end ]]substrate/), where atelet pulls them; and a Sync hook that makes the
-# atespace platform and its ActorTemplates, then waits for each one's golden
-# snapshot. Wave 23, after the control plane (22).
-#
-# The counter test and the fence check (scripts/substrate-*.sh in the template)
-# run against these.
-[[- else -]]
-# The platform's own actors on Agent Substrate (components/substrate-actors):
-# the WorkerPool platform in the namespace ate-workers, three warm gVisor
-# workers. Wave 23, after the control plane (22).
-#
-# Substrate's test actors, the ActorTemplates counter-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]] and sandbox-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]] that the
-# counter test and the fence check (scripts/substrate-*.sh in the template) run
-# against, are off: the Installation names substrate-test-actors among its
-# disabled components, as the Infrared chart does unless its value
-# substrate.testActors is true.
-[[- end ]]
+# The namespace of the platform's worker pools on Agent Substrate
+# (components/substrate-actors), ate-workers, with its wait and, where the
+# install names one, its copy of the pull secret. Wave 23, after the control
+# plane (22). Substrate 1.0 runs no WorkerPool here yet; the agents' pool comes
+# with its own setting.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -52,7 +34,7 @@ spec:
       prune: true
       selfHeal: true
     # Worker pods run as root with the capabilities gVisor needs, unconfined,
-    # on the node's /run/ateom.
+    # on the node's own paths.
     managedNamespaceMetadata:
       labels:
         pod-security.kubernetes.io/enforce: privileged

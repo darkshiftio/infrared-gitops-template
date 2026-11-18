@@ -1,0 +1,115 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# Before the API: the grants its records need, on the platform's Postgres.
+# =============================================================================
+# Substrate 1.0 keeps its records in the database substrate_v1, which the
+# platform's Postgres makes (components/postgres/substrate-v1.yaml): the NOLOGIN
+# role substrate_v1_owner owns it and its schema substrate, the NOLOGIN role
+# substrate_v1_readwrite uses them, and each has a login. CloudNativePG makes
+# the roles, the database and the schema; nothing in it grants on objects. So
+# this Sync hook, in wave -1, once the API's DSNs are copied (-2) and before the
+# API starts (0), signs in as the owner's login, takes the owner role and makes
+# the grants upstream's docs/guides/postgres.md asks of a database an install
+# provides itself (pkg/postgressetup/setup.sql): the schema closed to PUBLIC
+# and open to the read/write role, and the owner's default privileges, so that
+# every table, sequence, routine and type the API's migrations make as the
+# owner is the read/write role's to use. It grants the same on what exists
+# already. Every statement is idempotent, so it runs at every sync, and it
+# waits first, up to half an hour, until the login signs in and the schema is
+# the owner's.
+#
+# Its one credential is the owner's DSN, from the API's Secret
+# ate-api-server-secret-envvars (credentials.yaml); its pod has no Kubernetes
+# token. The image is the platform's Postgres's own, for psql.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: substrate-grants
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it, waiting again.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: grants
+          # PostgreSQL 18.6, the platform's Postgres's image (components/postgres/cluster.yaml), for psql.
+          image: ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie@sha256:f89a40f4d74aa6e0900917eaf6299b125a6382eb02fd4ee5d46f55bcbf7e5726
+          env:
+            - name: HOME
+              value: /tmp
+            - name: OWNER
+              value: substrate_v1_owner
+            - name: READWRITE
+              value: substrate_v1_readwrite
+            - name: SCHEMA
+              value: substrate
+            - name: DSN
+              valueFrom:
+                secretKeyRef:
+                  name: ate-api-server-secret-envvars
+                  key: ATE_API_POSTGRES_OWNER_CONNECTION_STRING
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # ready: the login signs in, and the schema exists and is the owner's.
+              ready() {
+                [ "$(psql "$DSN" -X -At -v ON_ERROR_STOP=1 \
+                  -c "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = '$SCHEMA'" 2>/tmp/err)" = "$OWNER" ]
+              }
+              until ready; do
+                echo "waiting for the login to sign in and the schema $SCHEMA to be $OWNER's: $(tail -n 1 /tmp/err)"
+                sleep 5
+              done
+              psql "$DSN" -X -q -v ON_ERROR_STOP=1 <<SQL
+              SET ROLE $OWNER;
+              REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+              REVOKE ALL ON SCHEMA $SCHEMA FROM PUBLIC;
+              GRANT USAGE ON SCHEMA $SCHEMA TO $READWRITE;
+              ALTER DEFAULT PRIVILEGES FOR ROLE $OWNER IN SCHEMA $SCHEMA GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO $READWRITE;
+              ALTER DEFAULT PRIVILEGES FOR ROLE $OWNER IN SCHEMA $SCHEMA GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO $READWRITE;
+              ALTER DEFAULT PRIVILEGES FOR ROLE $OWNER IN SCHEMA $SCHEMA GRANT EXECUTE ON ROUTINES TO $READWRITE;
+              ALTER DEFAULT PRIVILEGES FOR ROLE $OWNER IN SCHEMA $SCHEMA GRANT USAGE ON TYPES TO $READWRITE;
+              GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA $SCHEMA TO $READWRITE;
+              GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA $SCHEMA TO $READWRITE;
+              GRANT EXECUTE ON ALL ROUTINES IN SCHEMA $SCHEMA TO $READWRITE;
+              SQL
+              echo "the schema $SCHEMA is $OWNER's, closed to PUBLIC, and $READWRITE's to use: its tables, sequences, routines and types, made now or later"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no grants to make.
+[[- end ]]

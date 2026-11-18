@@ -1,12 +1,15 @@
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # Agent Substrate's CRDs (the `substrate-crds` Application, wave 20): WorkerPool,
-# SandboxConfig and CSIDriverConfig, and the ValidatingAdmissionPolicy that
-# every SandboxConfig passes, so the gVisor one the control plane applies
-# (wave 22) is checked too. Both files are upstream's, vendored from the pinned
-# commit by scripts/vendor-substrate.sh. All of it is cluster-scoped.
+# SandboxConfig and CSIDriverConfig at ate.dev/v1, and the
+# ValidatingAdmissionPolicy that every SandboxConfig passes, so the gVisor one
+# the control plane applies (wave 22) is checked too. Both files are
+# upstream's, vendored from the pinned release by scripts/vendor-substrate.sh,
+# and cluster-scoped. Before them, a PreSync hook retires a CRD an install
+# before Substrate 1.0 left at ate.dev/v1alpha1 (retire.yaml).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
+  - retire.yaml
   - crds.yaml
   - sandboxconfig-validation.yaml
 [[- else -]]

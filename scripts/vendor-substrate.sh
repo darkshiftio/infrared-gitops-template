@@ -3,36 +3,52 @@
 # Vendor Agent Substrate's install manifests into the template.
 # =============================================================================
 # Substrate's own installer (cmd/ate-setup) applies manifests/ate-install with
-# client-go, builds every image with ko, makes the CA Secrets and labels the
-# nodes. Here the same manifests arrive through Argo CD instead, so they are
-# committed, pinned, from the commit and the images in
-# scripts/substrate-images.json:
+# client-go, after it has made the CA Secrets, the API's settings and the
+# Postgres roles. Here the same manifests arrive through Argo CD instead, so
+# they are committed, pinned to the release in scripts/substrate-images.json:
+# upstream's tag, the commit it names, and each image upstream published for it
+# (ghcr.io/agent-substrate/substrate/<image>:<tag>, linux/amd64 and
+# linux/arm64), by digest. Darkshift builds none of them.
 #
-#   - each `ko://github.com/agent-substrate/substrate/<package>` image becomes
-#     that package's published image, tag and digest, and ${ENVOY_DATAPLANE_IMAGE}
-#     the envoy-dataplane image's;
-#   - ${SUBSTRATE_VERSION} becomes the images' version and
-#     ${SUBSTRATE_VERSION_SUFFIX} its object-name suffix, as ate-setup's
-#     SubstituteVersion does (cmd/ate-setup/internal/steps/version.go);
+#   - each `ko://go.ate.dev/substrate/<package>` image becomes that package's
+#     published image, tag and digest, and ${ENVOY_DATAPLANE_IMAGE} the
+#     envoy-dataplane image's, as ate-setup's prebuilt install maps them
+#     (cmd/ate-setup/internal/images);
+#   - the markers ate-setup splices are rendered as ate-setup renders them for
+#     this install: #ATE_EGRESS_INJECT_FLAGS is removed, which is what its
+#     --credential-provider '{"enabled":false}' does, so the egress gateway has
+#     no credential provider and denies any rule that would inject a
+#     credential; #ATE_MITM_EXTPROC_FILTER and #ATE_MITM_EXTPROC_CLUSTER stay
+#     the inert comments they are without an additional egress ext_proc. Any
+#     other marker, a ${...} placeholder or a ko:// reference left fails the
+#     run, so a new one upstream adds is decided here, not shipped by accident;
 #   - each file is wrapped in the template's guard, so it renders to a comment
 #     unless Substrate is on (Stores, SubstrateCapable and Registry).
 #
 # Left out on purpose: base/kustomization.yaml (components/substrate composes
 # its own), atenet-router-monitoring.yaml (GKE Managed Prometheus only),
 # ate-otel-config.yaml (it names GKE's collector; components/substrate has its
-# own), ate-system-namespace.yaml (Argo CD makes the namespaces), postgres/ (the
-# platform's one Postgres instead) and the kind and agentgateway overlays.
+# own), ate-system-namespace.yaml (Argo CD makes the namespaces),
+# ate-system-networkpolicies.yaml (components/substrate has its own, narrower
+# ones), postgres/ (the platform's one Postgres instead),
+# sandboxconfig-microvm.yaml.tmpl (gVisor only), egress-credential-injection/
+# (no credential provider) and the kind, agentgateway and cloudsql overlays.
 # Everything this install changes in the vendored files is a patch in the
 # component's kustomization.yaml, never an edit here.
 #
-# TO BUMP SUBSTRATE:
-#   1. publish the images from the new commit, with the patch the old ones
-#      carried, and copy the map of their digests (substrate-images.json) over
-#      scripts/substrate-images.json
-#   2. run this script, then `make verify`
-#   3. bump each ActorTemplate's version in its name
-#      (components/substrate-actors/templates.yaml): templates are immutable
-# Needs: curl, jq, shasum.
+# TO BUMP SUBSTRATE (upstream supports no move between incompatible releases,
+# and none between minor releases it skips: read its upgrade guide first):
+#   1. set .substrate.tag and .substrate.ref (the commit the tag names) in
+#      scripts/substrate-images.json, and .tag to the same tag
+#   2. run `scripts/vendor-substrate.sh --pin`: it checks the tag names that
+#      commit, takes each image's digest at the tag from the registry,
+#      anonymously, checks each is an index for linux/amd64 and linux/arm64,
+#      writes the digests to the pins, then vendors the manifests
+#   3. `make verify`, and read the diff of every vendored file
+#   4. an install whose SubstrateRegistry is set pulls Substrate's images from
+#      there: copy each pinned image there by digest before its pin moves
+# Without --pin it vendors from the pins as they are.
+# Needs: curl, jq, shasum; with --pin also git and crane.
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -40,22 +56,47 @@ cd "$(dirname "$0")/.."
 pins=scripts/substrate-images.json
 repo="$(jq -r .substrate.repo "$pins")"
 ref="$(jq -r .substrate.ref "$pins")"
-version="$(jq -r .version "$pins")"
+tag="$(jq -r .substrate.tag "$pins")"
+registry="$(jq -r .registry "$pins")"
 [[ "$repo" == https://github.com/agent-substrate/substrate ]] || { echo "unexpected repo $repo" >&2; exit 1; }
+[[ "$registry" == ghcr.io/agent-substrate/substrate ]] || { echo "unexpected registry $registry" >&2; exit 1; }
 [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "the ref must be a full commit, got $ref" >&2; exit 1; }
-# A label value: the nodes carry it, and the atelet DaemonSet selects on it.
-[[ ${#version} -le 63 && "$version" =~ ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$ ]] \
-  || { echo "version $version is not a label value" >&2; exit 1; }
-# versionlabel.NameSuffix: lower case, every other character a dash, no dash at
-# either end, at most 30 characters (else v and 10 hex of its sha256).
-suffix="$(tr '[:upper:]' '[:lower:]' <<<"$version" | sed -E 's/[^a-z0-9]/-/g; s/^-+//; s/-+$//')"
-if [ -z "$suffix" ] || [ "${#suffix}" -gt 30 ]; then
-  suffix="v$(printf '%s' "$version" | shasum -a 256 | cut -c1-10)"
-fi
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the tag must be a release, vX.Y.Z, got $tag" >&2; exit 1; }
+[[ "$(jq -r .tag "$pins")" == "$tag" ]] || { echo ".tag and .substrate.tag differ" >&2; exit 1; }
 
-raw="https://raw.githubusercontent.com/agent-substrate/substrate/$ref/manifests/ate-install"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+
+if [ "${1:-}" = --pin ]; then
+  # The tag must name the commit the manifests come from: the images were built
+  # from it.
+  peeled="$(git ls-remote "$repo" "refs/tags/$tag^{}" | awk '{print $1}')"
+  [ "$peeled" = "$ref" ] || { echo "upstream's $tag names ${peeled:-nothing}, not $ref" >&2; exit 1; }
+  # Anonymous reads: a public registry, and no credential of this machine's.
+  mkdir "$work/docker"
+  export DOCKER_CONFIG="$work/docker"
+  cp "$pins" "$work/pins.json"
+  for name in $(jq -r '.images | keys[]' "$pins"); do
+    image="$registry/$name:$tag"
+    index="$(crane manifest "$image")"
+    platforms="$(jq -r '[.manifests[]?.platform | select(.os != "unknown") | .os + "/" + .architecture] | sort | join(",")' <<<"$index")"
+    [ "$(jq -r .mediaType <<<"$index")" = application/vnd.oci.image.index.v1+json ] && [ "$platforms" = linux/amd64,linux/arm64 ] \
+      || { echo "$image is not an index for linux/amd64 and linux/arm64 (got $platforms)" >&2; exit 1; }
+    digest="$(crane digest "$image")"
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$image: no digest" >&2; exit 1; }
+    jq --arg n "$name" --arg r "$image@$digest" '.images[$n].ref = $r' "$work/pins.json" >"$work/pins.next"
+    mv "$work/pins.next" "$work/pins.json"
+    echo "pinned $image@$digest"
+  done
+  cp "$work/pins.json" "$pins"
+fi
+
+# Every image the manifests can name is pinned, at the tag, by digest.
+bad_pins="$(jq -r --arg reg "$registry" --arg tag "$tag" '.images | to_entries[] | .key as $k
+  | select((.value.ref | startswith($reg + "/" + $k + ":" + $tag + "@sha256:") and test("@sha256:[0-9a-f]{64}$")) | not) | $k' "$pins")"
+[ -z "$bad_pins" ] || { echo "not pinned at $tag by digest: $bad_pins (run with --pin)" >&2; exit 1; }
+
+raw="https://raw.githubusercontent.com/agent-substrate/substrate/$ref/manifests/ate-install"
 
 guard_on='[[- if and .Stores .SubstrateCapable .Registry -]]'
 guard_off='[[- else -]]
@@ -65,10 +106,13 @@ guard_off='[[- else -]]
 # objects.
 [[- end ]]'
 
+# markers <file>: the lines ate-setup splices at, by marker, one a line.
+markers() { sed -n -E 's/^[[:space:]]*(#ATE_[A-Z_]+).*/\1/p' "$1"; }
+
 # vendor <output, under template/components> <upstream file>...: fetch, pin,
-# wrap, write.
+# render the markers, wrap, write.
 vendor() {
-  local out="template/components/$1" f sums="" body="$work/body"
+  local out="template/components/$1" f sums="" body="$work/body" known
   shift
   : >"$body"
   for f in "$@"; do
@@ -83,12 +127,17 @@ vendor() {
     sed -i.bak "s#${ko}\$#${image}#" "$body"
   done < <(jq -r '.images[] | select(.ko != null) | [.ko, .ref] | @tsv' "$pins")
   sed -i.bak "s#\${ENVOY_DATAPLANE_IMAGE}#$(jq -r '.images["envoy-dataplane"].ref' "$pins")#" "$body"
-  # An unquoted ${SUBSTRATE_VERSION} scalar is quoted first, so a version of
-  # digits stays a string.
-  # shellcheck disable=SC2016 # the placeholder is literal text
-  sed -E -i.bak 's|^([[:space:]]*[^:[:space:]][^:]*): \$\{SUBSTRATE_VERSION\}$|\1: "${SUBSTRATE_VERSION}"|' "$body"
-  sed -i.bak -e "s#\${SUBSTRATE_VERSION_SUFFIX}#$suffix#g" -e "s#\${SUBSTRATE_VERSION}#$version#g" "$body"
-  if grep -nE 'ko://|\$\{(SUBSTRATE|ENVOY)_' "$body"; then
+  # The markers. No credential provider: the injection marker goes, once.
+  if markers "$body" | grep -qx '#ATE_EGRESS_INJECT_FLAGS'; then
+    [ "$(markers "$body" | grep -cx '#ATE_EGRESS_INJECT_FLAGS')" = 1 ] || { echo "$out: #ATE_EGRESS_INJECT_FLAGS more than once" >&2; exit 1; }
+    sed -i.bak -E '/^[[:space:]]*#ATE_EGRESS_INJECT_FLAGS/d' "$body"
+  fi
+  known='^#ATE_MITM_EXTPROC_(FILTER|CLUSTER)$'
+  if markers "$body" | grep -vE "$known"; then
+    echo "$out: a marker this script does not render (above)" >&2
+    exit 1
+  fi
+  if grep -nE 'ko://|\$\{[A-Za-z_]+\}' "$body"; then
     echo "$out: a placeholder is left (above)" >&2
     exit 1
   fi
@@ -99,7 +148,7 @@ vendor() {
   {
     printf '%s\n' "$guard_on"
     printf '# GENERATED by scripts/vendor-substrate.sh from scripts/substrate-images.json: do not edit.\n'
-    printf '# Agent Substrate %s, manifests/ate-install, images %s (version %s).\n' "${ref:0:7}" "$(jq -r .tag "$pins")" "$version"
+    printf '# Agent Substrate %s (%s), manifests/ate-install, images %s:%s by digest.\n' "$tag" "${ref:0:7}" "$registry" "$tag"
     printf '# source: %s\n# sha256 of each upstream file:\n%s' "$raw" "$sums"
     cat "$body"
     printf '\n%s\n' "$guard_off"
@@ -112,7 +161,7 @@ vendor substrate-crds/crds.yaml.tmpl \
 vendor substrate-crds/sandboxconfig-validation.yaml.tmpl sandboxconfig-validation.yaml
 vendor substrate-podcert/pod-certificate-controller.yaml.tmpl pod-certificate-controller.yaml
 vendor substrate/role.yaml.tmpl generated/role.yaml
-for f in ate-api-server ate-controller atelet atenet-router atenet-egress sandboxconfig-gvisor; do
+for f in ate-api-server ate-idp-server ate-controller atelet atenet-router atenet-egress sandboxconfig-gvisor; do
   vendor "substrate/$f.yaml.tmpl" "$f.yaml"
 done
-echo "Substrate ${ref:0:7}, version $version (object suffix $suffix)"
+echo "Substrate $tag (${ref:0:7}), images $registry:$tag"

@@ -1,79 +1,70 @@
 {
   "substrate": {
     "repo": "https://github.com/agent-substrate/substrate",
-    "ref": "ce05e5d93b9a0fe6155aa3af1ff8784fff6954ff",
-    "patchSha256": "5fcc97f1dcbb3a25757800b639b11f70de107b6631b3ba921a6d40297b527bdb"
+    "tag": "v1.0.0",
+    "ref": "b34fbee742906494b5eb4f1f36987176bf8770a4"
   },
-  "spikeCommit": "7e86cabd5179ce43af40a6771221101a6abe215a",
-  "registry": "ghcr.io/darkshiftio/substrate",
-  "tag": "one-install-ce05e5d-7e86cab",
-  "version": "one-install-ce05e5d-7e86cab",
-  "platform": "linux/amd64",
+  "registry": "ghcr.io/agent-substrate/substrate",
+  "tag": "v1.0.0",
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
   "images": {
+    "ate-idp-server": {
+      "package": "cmd/ate-idp-server",
+      "ko": "ko://go.ate.dev/substrate/cmd/ate-idp-server",
+      "ref": "ghcr.io/agent-substrate/substrate/ate-idp-server:v1.0.0@sha256:9553c0e60a8ad8bbb1c54c59e59cf0d33a338bf4f883b6f806610dc407f49f7c"
+    },
     "ateapi": {
       "package": "cmd/ateapi",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/ateapi",
-      "ref": "ghcr.io/darkshiftio/substrate/ateapi:one-install-ce05e5d-7e86cab@sha256:8be8116a4637fbac0e552e7eb3da5852a5140c195900537c103e553623b906ce"
+      "ko": "ko://go.ate.dev/substrate/cmd/ateapi",
+      "ref": "ghcr.io/agent-substrate/substrate/ateapi:v1.0.0@sha256:2f1ee444b126b6e3620045b61d2a87507fb0f889da0249656c474ab59dc2beaf"
     },
     "atecontroller": {
       "package": "cmd/atecontroller",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/atecontroller",
-      "ref": "ghcr.io/darkshiftio/substrate/atecontroller:one-install-ce05e5d-7e86cab@sha256:7ec0b2a6326300b51eea96c094d13c1fbaa89990f12d4c5508814258670ed781"
+      "ko": "ko://go.ate.dev/substrate/cmd/atecontroller",
+      "ref": "ghcr.io/agent-substrate/substrate/atecontroller:v1.0.0@sha256:44b3a127048e1da8c15dff35f65defe73f4e54ebb985bc020aa9bb0e6eb029b2"
     },
     "atelet": {
       "package": "cmd/atelet",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/atelet",
-      "ref": "ghcr.io/darkshiftio/substrate/atelet:one-install-ce05e5d-7e86cab@sha256:48c8a7c2284a0ff2c76b4a982f895be58ddfcfb820ad65b8b7c1ff21c859ae7b"
+      "ko": "ko://go.ate.dev/substrate/cmd/atelet",
+      "ref": "ghcr.io/agent-substrate/substrate/atelet:v1.0.0@sha256:79abc69f982392adbcbc3332cd8191cf74ac3cd1f4a43c44e9c8a3ce16488b6e"
     },
     "atenet": {
       "package": "cmd/atenet",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/atenet",
-      "ref": "ghcr.io/darkshiftio/substrate/atenet:one-install-ce05e5d-7e86cab@sha256:02840cef1981ffbd7b12d2558cf535e97e158aa993c96da79739971436c20234"
+      "ko": "ko://go.ate.dev/substrate/cmd/atenet",
+      "ref": "ghcr.io/agent-substrate/substrate/atenet:v1.0.0@sha256:04f7d93dc3fb3deda688137077226c12ce2da41cd4753adff708e3737dc59e20"
     },
-    "ateom-gvisor": {
-      "package": "cmd/ateom-gvisor",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor",
-      "ref": "ghcr.io/darkshiftio/substrate/ateom-gvisor:one-install-ce05e5d-7e86cab@sha256:e463ac66c11ade2e3e5d7c2939dddcdb8d2e27273d75e650881e084011cfd190"
+    "ateworker-gvisor": {
+      "package": "cmd/ateworker-gvisor",
+      "ko": "ko://go.ate.dev/substrate/cmd/ateworker-gvisor",
+      "ref": "ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0@sha256:f8987236c6256f58c4b2625e543b43f4ae4bdded6ee6821c03d966effb7c0f17"
     },
-    "ateom-microvm": {
-      "package": "cmd/ateom-microvm",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/ateom-microvm",
-      "ref": "ghcr.io/darkshiftio/substrate/ateom-microvm:one-install-ce05e5d-7e86cab@sha256:d2cd8464d74a66ad0fc70f7f2839b699d8ef0cb5280239cbf71959a2416c80a6"
+    "ateworker-microvm": {
+      "package": "cmd/ateworker-microvm",
+      "ko": "ko://go.ate.dev/substrate/cmd/ateworker-microvm",
+      "ref": "ghcr.io/agent-substrate/substrate/ateworker-microvm:v1.0.0@sha256:e4dcfec5aa085bfbdb60c7ccbadde64207a50ad341709487f567026b1696b292"
     },
     "kubernetes-secrets": {
       "package": "cmd/credential-provider/kubernetes-secrets",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/credential-provider/kubernetes-secrets",
-      "ref": "ghcr.io/darkshiftio/substrate/kubernetes-secrets:one-install-ce05e5d-7e86cab@sha256:40a552c4c48f64175070f76eca1a10836b993775dd2ba3fc9b2226943a95e0bb"
+      "ko": "ko://go.ate.dev/substrate/cmd/credential-provider/kubernetes-secrets",
+      "ref": "ghcr.io/agent-substrate/substrate/kubernetes-secrets:v1.0.0@sha256:21d494e2461d920bb03a66a0cdf574835c7d2e019b7941acef675ecff5702344"
+    },
+    "objectstore-plugin": {
+      "package": "cmd/objectstore-plugin",
+      "ko": "ko://go.ate.dev/substrate/cmd/objectstore-plugin",
+      "ref": "ghcr.io/agent-substrate/substrate/objectstore-plugin:v1.0.0@sha256:485cf92b31fed761c53f478d17ed69bf552a2cd8e8cf3b24b98a3e06789ee274"
     },
     "podcertcontroller": {
       "package": "cmd/podcertcontroller",
-      "ko": "ko://github.com/agent-substrate/substrate/cmd/podcertcontroller",
-      "ref": "ghcr.io/darkshiftio/substrate/podcertcontroller:one-install-ce05e5d-7e86cab@sha256:3df091b40d52b2242e0c1404e245f5395b886e9669251590f260776336bfe996"
-    },
-    "counter": {
-      "package": "demos/counter",
-      "ko": "ko://github.com/agent-substrate/substrate/demos/counter",
-      "ref": "ghcr.io/darkshiftio/substrate/counter:one-install-ce05e5d-7e86cab@sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698"
-    },
-    "egress": {
-      "package": "demos/egress",
-      "ko": "ko://github.com/agent-substrate/substrate/demos/egress",
-      "ref": "ghcr.io/darkshiftio/substrate/egress:one-install-ce05e5d-7e86cab@sha256:e4c90fe3cb2f422d53b70b9291abe4e773e0051c176781cd63d6c3066f9be731"
-    },
-    "fspersist": {
-      "package": "demos/multi-template/fspersist",
-      "ko": "ko://github.com/agent-substrate/substrate/demos/multi-template/fspersist",
-      "ref": "ghcr.io/darkshiftio/substrate/fspersist:one-install-ce05e5d-7e86cab@sha256:689012a3e5245fc943e43bd35fe032c2dda639367fa53c008b621aa6b2fafa87"
-    },
-    "sandbox": {
-      "package": "demos/sandbox",
-      "ko": "ko://github.com/agent-substrate/substrate/demos/sandbox",
-      "ref": "ghcr.io/darkshiftio/substrate/sandbox:one-install-ce05e5d-7e86cab@sha256:1fceb4c513f72f94432769a0249b9f39ce417e78e43017c267394eb290d52481"
+      "ko": "ko://go.ate.dev/substrate/cmd/podcertcontroller",
+      "ref": "ghcr.io/agent-substrate/substrate/podcertcontroller:v1.0.0@sha256:1005579b2142f63412507342f095894eb435fe3736607f32dbad406d0e05c5a5"
     },
     "envoy-dataplane": {
       "package": null,
       "ko": null,
-      "ref": "ghcr.io/darkshiftio/substrate/envoy-dataplane:one-install-ce05e5d-7e86cab@sha256:b4d0e0b2ab206524eac49e139c4ebe5a9279a8c61f6ddf99caad5b3535672a57"
+      "ref": "ghcr.io/agent-substrate/substrate/envoy-dataplane:v1.0.0@sha256:fc8e4c3ee9060a01153e4d4af571f3db294e60d536422e8a8c2996fa4a72bf8b"
     }
   }
 }

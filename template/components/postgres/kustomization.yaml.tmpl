@@ -1,7 +1,8 @@
 [[- if .Stores -]]
 # The platform's one Postgres (the `postgres` Application, wave 17), in the
 # namespace stores: the roles' Secrets and the wait (prepare.yaml), the
-# CloudNativePG Cluster, and a role and a database for each consumer; with
+# CloudNativePG Cluster, and a role and a database for each consumer (with
+# Agent Substrate, also substrate_v1, its 1.0's, substrate-v1.yaml); with
 # backups, the copies to the outside bucket (backup.yaml). Every object names
 # its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -11,6 +12,9 @@ resources:
   - cluster.yaml
   - seaweedfs.yaml
   - substrate.yaml
+[[- if and .SubstrateCapable .Registry ]]
+  - substrate-v1.yaml
+[[- end ]]
 [[- if and .Backup.Bucket .PostgresArchive.Enabled ]]
   - backup.yaml
 [[- end ]]

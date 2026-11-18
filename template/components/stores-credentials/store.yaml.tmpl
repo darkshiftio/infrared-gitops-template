@@ -15,10 +15,12 @@
 #   seaweedfs-s3-registry   registry/zot-s3 (the registry's S3 keys)
 [[- end ]]
 [[- if and .Registry .SubstrateCapable ]]
-#   seaweedfs-s3-ate-snapshots  ate-system/ate-s3-credentials (Agent Substrate's
-#                           snapshots, the S3 identity ate-snapshots)
-#   postgres-substrate      ate-system/ate-api-server-secret-envvars (Substrate's
-#                           records: its API's Postgres DSN)
+#   seaweedfs-s3-ate-snapshots-v1  ate-system/ate-s3-credentials-v1 (Agent
+#                           Substrate 1.0's snapshots, the S3 identity
+#                           ate-snapshots-v1)
+#   postgres-substrate-v1-owner-user, postgres-substrate-v1-readwrite-user
+#                           ate-system/ate-api-server-secret-envvars (Substrate
+#                           1.0's records: its API's two Postgres DSNs)
 [[- end ]]
 [[- if $backups ]]
 #   postgres-substrate      [[ .InfraredNamespace ]]/postgres-substrate (the backup's dump of
@@ -51,7 +53,7 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
 [[- if .Registry ]]
-    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots", "postgres-substrate"[[ else if $backups ]], "postgres-substrate"[[ end ]][[ if .MediaStore ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]]]
+    resourceNames: ["seaweedfs-s3-registry"[[ if .SubstrateCapable ]], "seaweedfs-s3-ate-snapshots-v1", "postgres-substrate-v1-owner-user", "postgres-substrate-v1-readwrite-user"[[ end ]][[ if $backups ]], "postgres-substrate"[[ end ]][[ if .MediaStore ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]]]
 [[- else if $backups ]]
     resourceNames: ["postgres-substrate"[[ if .MediaStore ]], "seaweedfs-s3-media", "seaweedfs-s3-storage-reader"[[ end ]]]
 [[- else ]]

@@ -1,0 +1,150 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# Before the CRDs: retire a CRD that does not serve ate.dev/v1.
+# =============================================================================
+# Agent Substrate 1.0 serves WorkerPool, SandboxConfig and CSIDriverConfig at
+# ate.dev/v1 alone. Before it they were ate.dev/v1alpha1, and the API server
+# refuses a CRD update that drops a version its objects are stored at, so the
+# v1 CRDs cannot be applied over the old ones: upstream supports no move from
+# 0.x, only a new install.
+#
+# This PreSync hook deletes each of the three CRDs that exists and does not
+# serve v1, and waits until it is gone; deleting a CRD deletes every object of
+# its kind (here the WorkerPool and the SandboxConfig an install before 1.0
+# made from git, and the workers that WorkerPool owned). Then the sync applies
+# the v1 CRDs. It never touches a CRD that serves v1, so it acts at most once
+# on an install and is safe to run at every sync: forward only.
+#
+# Its RBAC: read CRDs, and delete these three by name, nothing else. It runs in
+# ate-system, which this Application makes when it is missing (on a new
+# install, before the `substrate` Application labels it).
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-crds-retire
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrared-substrate-crds-retire
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames: ["workerpools.ate.dev", "sandboxconfigs.ate.dev", "csidriverconfigs.ate.dev"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrared-substrate-crds-retire
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrared-substrate-crds-retire
+subjects:
+  - kind: ServiceAccount
+    name: substrate-crds-retire
+    namespace: ate-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: substrate-crds-retire
+  namespace: ate-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+spec:
+  # Half an hour, then the sync fails and Argo CD retries it.
+  activeDeadlineSeconds: 1800
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: substrate-crds-retire
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: retire
+          # alpine/k8s 1.37.0: kubectl and a busybox shell.
+          image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+          env:
+            - name: HOME
+              value: /tmp
+            - name: CRDS
+              value: "workerpools.ate.dev sandboxconfigs.ate.dev csidriverconfigs.ate.dev"
+            - name: SERVED
+              value: v1
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              for crd in $CRDS; do
+                if ! versions="$(kubectl get crd "$crd" -o jsonpath='{.spec.versions[*].name}' 2>/tmp/err)"; then
+                  if grep -q NotFound /tmp/err; then
+                    echo "$crd does not exist; the sync makes it at ate.dev/$SERVED"
+                    continue
+                  fi
+                  cat /tmp/err >&2
+                  exit 1
+                fi
+                case " $versions " in
+                  *" $SERVED "*)
+                    echo "$crd serves ate.dev/$SERVED; leaving it alone"
+                    continue
+                    ;;
+                esac
+                echo "$crd serves only ate.dev/$versions: deleting it, and every object of its kind, before the sync makes it at ate.dev/$SERVED"
+                kubectl delete crd "$crd" --wait=false
+                # Gone means NotFound; any other error is waited out too.
+                until ! kubectl get crd "$crd" -o name >/dev/null 2>/tmp/err && grep -q NotFound /tmp/err; do
+                  echo "waiting for the CRD $crd to go"
+                  sleep 5
+                done
+                echo "deleted $crd"
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no CRDs to retire.
+[[- end ]]

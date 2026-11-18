@@ -2,6 +2,7 @@
 [[- $certManager := true ]][[ range .Disabled ]][[ if eq . "cert-manager" ]][[ $certManager = false ]][[ end ]][[ end -]]
 [[- $mtls := and .StoresSecurity $certManager -]]
 [[- $media := and .Stores .MediaStore -]]
+[[- $substrate := and .Stores .SubstrateCapable .Registry -]]
 [[- if .Stores -]]
 # =============================================================================
 # SeaweedFS's S3 identities: who may do what, in which bucket.
@@ -10,10 +11,19 @@
 # each ${...} names an environment variable of the gateway, set from the Secret
 # seaweedfs-s3-<identity> that the PreSync hook makes (prepare.yaml). SeaweedFS
 # drops a credential whose variable is unset, so a missing Secret never becomes
-# an empty key. Each identity reaches its own bucket only:
+# an empty key. Each identity reaches its own bucket only[[ if $substrate ]] (Agent Substrate's
+# two, the same one: 1.0 is a new install with new keys, and the old ones stay)[[ end ]]:
 #
 #   identity        bucket          for
+[[- if $substrate ]]
+#   ate-snapshots   ate-snapshots   Agent Substrate's actor snapshots before
+#                                   Substrate 1.0: kept, unused
+#   ate-snapshots-v1  ate-snapshots   Agent Substrate 1.0's actor snapshots,
+#                                   under v1/ (the API's and atelet's
+#                                   objectstore-plugin sidecars)
+[[- else ]]
 #   ate-snapshots   ate-snapshots   Agent Substrate's actor snapshots
+[[- end ]]
 #   registry        registry        the registry's images and charts
 [[- if $media ]]
 #   media           media           Infrared's API's videos and pictures
@@ -49,7 +59,12 @@ stringData:
           "name": "ate-snapshots",
           "credentials": [{"accessKey": "${S3_ATE_SNAPSHOTS_ACCESS_KEY_ID}", "secretKey": "${S3_ATE_SNAPSHOTS_SECRET_ACCESS_KEY}"}],
           "actions": ["Read:ate-snapshots", "Write:ate-snapshots", "List:ate-snapshots", "Tagging:ate-snapshots"]
-        },
+        },[[ if $substrate ]]
+        {
+          "name": "ate-snapshots-v1",
+          "credentials": [{"accessKey": "${S3_ATE_SNAPSHOTS_V1_ACCESS_KEY_ID}", "secretKey": "${S3_ATE_SNAPSHOTS_V1_SECRET_ACCESS_KEY}"}],
+          "actions": ["Read:ate-snapshots", "Write:ate-snapshots", "List:ate-snapshots", "Tagging:ate-snapshots"]
+        },[[ end ]]
         {
           "name": "registry",
           "credentials": [{"accessKey": "${S3_REGISTRY_ACCESS_KEY_ID}", "secretKey": "${S3_REGISTRY_SECRET_ACCESS_KEY}"}],
