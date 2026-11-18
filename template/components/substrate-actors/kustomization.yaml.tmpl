@@ -1,33 +1,20 @@
-[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if and .Stores .SubstrateCapable .Registry -]]
-# The platform's own actors on Agent Substrate (the `substrate-actors`
-# Application, wave 23):
+# The namespace of the platform's worker pools on Agent Substrate (the
+# `substrate-actors` Application, wave 23), ate-workers:
 #
-#   wait.yaml          PreSync: Substrate's API and router, and the registry
-#                      inside the cluster, answer
+#   wait.yaml          PreSync: Substrate's CRDs at ate.dev/v1, its API and
+#                      router, and the registry inside the cluster, answer
 [[- if .ImagePullSecret ]]
-[[- if $testActors ]]
-#   pull-secrets.yaml  the pull secret for the workers' image, and for the copy
-[[- else ]]
-#   pull-secrets.yaml  the pull secret for the workers' image
-[[- end ]]
-[[- end ]]
-#   workers.yaml       the WorkerPool platform: three warm gVisor workers in
-#                      the namespace ate-workers
-[[- if $testActors ]]
-#   images.yaml        Sync hook, wave 1: the counter demo's image and the test
-#                      actor's, copied from ghcr into [[ .Registry ]]
-#   templates.yaml     Sync hook, wave 2: the atespace platform and its
-#                      ActorTemplates, each with its golden snapshot
+#   pull-secrets.yaml  the pull secret, for a worker pool's image
 [[- end ]]
 #
-[[- if not $testActors ]]
-# Substrate's test actors (the ActorTemplates counter-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]] and sandbox-[[ if .StoresOrgLayout ]]v2[[ else ]]v1[[ end ]], and
-# their images) are off: the install names substrate-test-actors among the
-# components it leaves out, as the Infrared chart does unless its value
-# substrate.testActors is true. images.yaml and templates.yaml hold no objects.
+# Substrate 1.0 runs no WorkerPool here yet: the platform's pool of three
+# gVisor workers and Substrate's test actors (the ActorTemplates counter and
+# sandbox, upstream's demos, which 1.0 no longer publishes) served only the
+# checks of an install before it. The agents' pool comes with its own setting.
+# The substrate-test-actors name in the components the install leaves out
+# changes nothing here any more.
 #
-[[- end ]]
 # Every object names its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -35,11 +22,6 @@ resources:
   - wait.yaml
 [[- if .ImagePullSecret ]]
   - pull-secrets.yaml
-[[- end ]]
-  - workers.yaml
-[[- if $testActors ]]
-  - images.yaml
-  - templates.yaml
 [[- end ]]
 [[- if .NetworkPolicies ]]
   - fence.yaml

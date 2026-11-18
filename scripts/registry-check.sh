@@ -24,16 +24,19 @@
 #      infrared too, so the check holds whether or not the registry reads for
 #      anyone (tenancy.registryPulls).
 #
-# The source image defaults to Substrate's counter demo in the registry, by the
-# digest in scripts/substrate-images.json, under platform/substrate/ (in the
-# layout platform/images/substrate/). Step 3 removes the copy; the crane
-# pods are removed unless KEEP=1.
+# The source image defaults to Substrate's counter demo in the registry, by its
+# digest, under platform/substrate/ (in the layout platform/images/substrate/):
+# the copy an install made for Substrate's test actors before Substrate 1.0,
+# which has none, and which the registry keeps. On an install that never had
+# it, name a source image in the registry by digest. Step 3 removes the copy;
+# the crane pods are removed unless KEEP=1.
 # Needs: kubectl, jq, curl. Writes to the namespaces builds and registry only.
 # =============================================================================
 set -euo pipefail
 CTX="${1:?usage: scripts/registry-check.sh <kube context> <organization> [source image]}"
 ORG="${2:?usage: scripts/registry-check.sh <kube context> <organization> [source image]}"
-here="$(cd "$(dirname "$0")" && pwd)"
+# Substrate's counter demo as the template copied it before Substrate 1.0.
+COUNTER_DIGEST=sha256:d30262021f886ef40969bc38b68c7198bd626e8544be67be00cebfc8469e1698
 CRANE_IMAGE=gcr.io/go-containerregistry/crane:v0.22.1@sha256:1f968817b95790bed063f71175aa6b8ff879fa17064020415f3e18bb6e6a36e1
 ACCEPT='application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json'
 
@@ -56,8 +59,7 @@ kind=""
 if [ -n "${3:-}" ]; then
   SRC="$3"
 else
-  ref="$(jq -r '.images.counter.ref' "$here/substrate-images.json")"
-  SRC="$REG/platform/${kind}substrate/counter@${ref##*@}"
+  SRC="$REG/platform/${kind}substrate/counter@$COUNTER_DIGEST"
 fi
 case "$SRC" in *@sha256:*) ;; *) die "the source image must be named by digest: $SRC" ;; esac
 digest="${SRC##*@}"

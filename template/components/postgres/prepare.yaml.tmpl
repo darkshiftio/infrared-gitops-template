@@ -1,9 +1,11 @@
+[[- $substrate := and .Stores .SubstrateCapable .Registry -]]
 [[- if .Stores -]]
 # =============================================================================
 # Before the Cluster: the roles' Secrets, and CloudNativePG's webhook.
 # =============================================================================
 # This PreSync hook makes the Secret postgres-<role> (kubernetes.io/basic-auth)
-# of each role below, once, if it is absent, and never replaces one. Then it
+# of each login role below, its underscores as dashes in the Secret's name,
+# once, if it is absent, and never replaces one. Then it
 # waits, up to half an hour, until CloudNativePG's CRDs are established and its
 # webhook has a ready endpoint, so the Cluster is admitted when it is applied[[ if or (not .Backup.Bucket) .PostgresArchive.Enabled ]];
 # with backups, also until the Barman Cloud plugin answers and the store
@@ -71,7 +73,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["postgres-seaweedfs", "postgres-substrate"]
+    resourceNames: ["postgres-seaweedfs", "postgres-substrate"[[ if $substrate ]], "postgres-substrate-v1-owner-user", "postgres-substrate-v1-readwrite-user"[[ end ]]]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -139,8 +141,8 @@ spec:
               # Each role's password, made once and never replaced: CloudNativePG
               # gives the role the password in its Secret, and the role's consumer
               # reads the same Secret. Nothing prints a password.
-              for role in seaweedfs substrate; do
-                secret="postgres-$role"
+              for role in seaweedfs substrate[[ if $substrate ]] substrate_v1_owner_user substrate_v1_readwrite_user[[ end ]]; do
+                secret="postgres-$(echo "$role" | tr _ -)"
                 if kubectl get secret "$secret" >/dev/null 2>&1; then
                   echo "$secret exists; leaving it alone"
                   continue

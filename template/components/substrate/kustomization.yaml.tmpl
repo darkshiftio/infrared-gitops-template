@@ -1,25 +1,36 @@
 [[- if and .Stores .SubstrateCapable .Registry -]]
-# Agent Substrate's control plane (the `substrate` Application, wave 22), in the
-# namespace ate-system. Upstream's manifests, vendored from the pinned commit by
-# scripts/vendor-substrate.sh, with images by digest:
+# Agent Substrate 1.0's control plane (the `substrate` Application, wave 22), in
+# the namespace ate-system. Upstream's manifests, vendored from the pinned
+# release by scripts/vendor-substrate.sh, with upstream's images by digest:
 #
 #   role.yaml                 the controller's ClusterRole and Role
-#   ate-api-server.yaml       the API (2 replicas) and its headless Service api
-#   ate-controller.yaml       WorkerPools to Deployments, workers to records
-#   atelet.yaml               the node supervisor, a DaemonSet on every labelled node
-#   atenet-router.yaml        Envoy and ext_proc: wakes an actor for a request
-#   atenet-egress.yaml        the egress gateway, each actor's outbound policy
-#   sandboxconfig-gvisor.yaml the gVisor runtime every template here names
+#   ate-api-server.yaml       the API (2 replicas) and its headless Service api,
+#                             with its objectstore-plugin sidecar
+#   ate-idp-server.yaml       the identity provider (2 replicas), Service idp:
+#                             the keys that verify actors' JWTs
+#   ate-controller.yaml       WorkerPools to Deployments, workers to records,
+#                             and the egress CA's trust bundle
+#   atelet.yaml               the node supervisor, a DaemonSet on every node,
+#                             with its objectstore-plugin sidecar
+#   atenet-router.yaml        Envoy and ext_proc: wakes an actor for a request,
+#                             over TLS, for a client on its allowlist
+#   atenet-egress.yaml        the egress gateway, each actor's outbound policy,
+#                             with no credential provider
+#   sandboxconfig-gvisor.yaml the gVisor runtime, the class default
 #
 # upstream's base bundle less atenet-router-monitoring.yaml, GKE Managed
-# Prometheus's PodMonitoring, which this install never renders. Ours beside it:
+# Prometheus's PodMonitoring, which this install never renders, and
+# ate-system-networkpolicies.yaml, whose place ours take. Ours beside it:
 #
-#   network-policies.yaml  only Infrared's operator reaches the API and the router
-#   credentials.yaml       the Postgres DSN, the S3 keys[[ if .ImagePullSecret ]] and the pull secret[[ end ]], copied
-#   config.yaml            telemetry settings: no collector
-#   prepare.yaml           PreSync: the actor-identity pools, the API's
-#                          authentication settings, the node labels, the waits
-#   node-labels.yaml       labels a node that joins later
+#   network-policies.yaml  only Infrared's operator and Substrate reach the API
+#                          and the router
+#   credentials.yaml       the snapshots' S3 keys, the Postgres DSNs[[ if .ImagePullSecret ]] and the
+#                          pull secret[[ end ]], copied
+#   config.yaml            the API's settings, and telemetry: no collector
+#   prepare.yaml           PreSync: the actor-identity and egress CA pools, the
+#                          API's authentication settings, the waits
+#   grants.yaml            Sync hook, wave -1: the Postgres grants the API's
+#                          records need, before the API
 #
 # Everything this install changes in upstream's objects is a patch below. Every
 # object names its own namespace.
@@ -33,9 +44,10 @@ resources:
 [[- if and .Backup.Bucket .Restore.Point ]]
   - restore-wait.yaml
 [[- end ]]
-  - node-labels.yaml
+  - grants.yaml
   - role.yaml
   - ate-api-server.yaml
+  - ate-idp-server.yaml
   - ate-controller.yaml
   - atelet.yaml
   - atenet-router.yaml
@@ -46,18 +58,22 @@ resources:
 [[- end ]]
 [[- if .SubstrateRegistry ]]
 # Substrate's images from [[ .SubstrateRegistry ]] (INFRARED_SUBSTRATE_REGISTRY), each
-# by the same tag and digest as on ghcr.
+# by the same tag and digest as upstream publishes it on ghcr.
 images:
-  - name: ghcr.io/darkshiftio/substrate/ateapi
+  - name: ghcr.io/agent-substrate/substrate/ateapi
     newName: [[ .SubstrateRegistry ]]/ateapi
-  - name: ghcr.io/darkshiftio/substrate/atecontroller
+  - name: ghcr.io/agent-substrate/substrate/ate-idp-server
+    newName: [[ .SubstrateRegistry ]]/ate-idp-server
+  - name: ghcr.io/agent-substrate/substrate/atecontroller
     newName: [[ .SubstrateRegistry ]]/atecontroller
-  - name: ghcr.io/darkshiftio/substrate/atelet
+  - name: ghcr.io/agent-substrate/substrate/atelet
     newName: [[ .SubstrateRegistry ]]/atelet
-  - name: ghcr.io/darkshiftio/substrate/atenet
+  - name: ghcr.io/agent-substrate/substrate/atenet
     newName: [[ .SubstrateRegistry ]]/atenet
-  - name: ghcr.io/darkshiftio/substrate/envoy-dataplane
+  - name: ghcr.io/agent-substrate/substrate/envoy-dataplane
     newName: [[ .SubstrateRegistry ]]/envoy-dataplane
+  - name: ghcr.io/agent-substrate/substrate/objectstore-plugin
+    newName: [[ .SubstrateRegistry ]]/objectstore-plugin
 [[- end ]]
 patches:
   # Argo CD makes the namespace (CreateNamespace, with its Pod Security label),
@@ -68,9 +84,14 @@ patches:
       kind: Namespace
       metadata:
         name: ate-system
-  # Snapshots in SeaweedFS's bucket ate-snapshots, with its S3 identity's keys
-  # (credentials.yaml): the API copies snapshots to tags and deletes the ones
-  # nothing refers to.
+  # The API. Its objectstore-plugin sidecar copies and deletes snapshots in
+  # SeaweedFS's bucket ate-snapshots, as the S3 identity ate-snapshots-v1
+  # (credentials.yaml); the API itself refuses to start with any storage
+  # setting. It signs actors' JWTs and certificates with the -v1 pools
+  # (prepare.yaml). It reads the platform's Postgres with passwords, so the
+  # bundled Postgres's login certificates, which it never reads, are not
+  # projected: that volume is the only one asking for pod certificates with
+  # userAnnotations.
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment
@@ -80,8 +101,8 @@ patches:
       spec:
         template:
           spec:
-            containers:
-              - name: ate-api-server
+            initContainers:
+              - name: objectstore-plugin
                 env:
                   - name: ATE_STORAGE_BACKEND
                     value: s3
@@ -94,24 +115,106 @@ patches:
                   - name: AWS_ACCESS_KEY_ID
                     valueFrom:
                       secretKeyRef:
-                        name: ate-s3-credentials
+                        name: ate-s3-credentials-v1
                         key: AWS_ACCESS_KEY_ID
                   - name: AWS_SECRET_ACCESS_KEY
                     valueFrom:
                       secretKeyRef:
-                        name: ate-s3-credentials
+                        name: ate-s3-credentials-v1
                         key: AWS_SECRET_ACCESS_KEY
-  # atelet, on every node: snapshots in the same bucket, and actor images from
-  # the registry inside the cluster. atelet pulls images itself, without a
-  # login and without the node's registry mirrors: no GCP credentials, and
-  # every image named on a localhost or loopback registry (a template names
-  # localhost/platform/[[ if .StoresOrgLayout ]]images/[[ end ]]substrate/<image>@sha256:...) is pulled from
-  # [[ .Registry ]] instead, over plain HTTP. The args are upstream's list with
-  # those two changed: a patch replaces the whole list.
+            containers:
+              - name: ate-api-server
+                volumeMounts:
+                  - $patch: delete
+                    mountPath: /run/postgres.podcert.ate.dev
+            volumes:
+              - $patch: delete
+                name: postgres
+              - name: actor-id-jwt-pool
+                projected:
+                  sources:
+                    - secret:
+                        name: actor-id-jwt-pool-v1
+                        items:
+                          - key: pool
+                            path: pool.json
+              - name: actor-id-ca-pool
+                projected:
+                  sources:
+                    - secret:
+                        name: actor-id-ca-pool-v1
+                        items:
+                          - key: pool
+                            path: pool.json
+  # The API's one bootstrap owner, always a global owner: Infrared's operator,
+  # as its ServiceAccount token names it (the chart's infrared-operator in
+  # [[ .InfraredNamespace ]]). Nothing else holds a role until an access policy grants one.
   - target:
-      kind: DaemonSet
-      labelSelector: app=atelet
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ate-api-server
+      namespace: ate-system
     patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: ate-api-server
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--authz-bootstrap-owners=system:serviceaccount:[[ .InfraredNamespace ]]:infrared-operator"
+  # The identity provider: the issuer the API mints actors' JWTs as (the
+  # ConfigMap ate-api-server-envvars), and the -v1 pool's keys.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ate-idp-server
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: actor-id-jwt-pool
+                projected:
+                  sources:
+                    - secret:
+                        name: actor-id-jwt-pool-v1
+                        items:
+                          - key: pool
+                            path: pool.json
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ate-idp-server
+      namespace: ate-system
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: ate-idp-server
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--issuer=https://idp.ate-system.svc"
+  # atelet, on every node. Its objectstore-plugin sidecar moves snapshots in
+  # the same bucket, as the same identity; atelet itself refuses to start with
+  # any storage setting. atelet pulls an actor's image itself,
+[[- if eq .Cloud "gcp" ]]
+  # as the node does on GKE: with the node's own image credential provider (its
+  # binaries and config, upstream's GKE host paths), so as the node's service
+  # account.
+[[- else ]]
+  # anonymously: GKE's image credential provider, which upstream's args name,
+  # is only on GKE's nodes, so its flags and host paths go.
+[[- end ]]
+  # Every image named on a localhost or loopback registry is pulled from
+  # [[ .Registry ]], the registry inside the cluster, instead, over plain HTTP.
+  # Its image cache is a new directory, image-cache-v1: atelet 1.0 refuses the
+  # one an install before it left at /var/lib/ate/image-cache (layout version 1,
+  # where 1.0 reads 3) and does not start, so that one is left where it is,
+  # holding nothing a pull cannot bring back. The workers mount all of
+  # /var/lib/ate, so they read the new one too. The args are upstream's list
+  # with those changes: a patch replaces the whole list.
+  - patch: |-
       apiVersion: apps/v1
       kind: DaemonSet
       metadata:
@@ -120,16 +223,8 @@ patches:
       spec:
         template:
           spec:
-            containers:
-              - name: atelet
-                args:
-                  - --gcp-auth-for-image-pulls=false
-                  - --localhost-registry-replacement=[[ .Registry ]]
-                  - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
-                  - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
-                  - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
-                  - --drain-delay=0s
-                  - --drain-timeout=5m
+            initContainers:
+              - name: objectstore-plugin
                 env:
                   - name: ATE_STORAGE_BACKEND
                     value: s3
@@ -142,16 +237,73 @@ patches:
                   - name: AWS_ACCESS_KEY_ID
                     valueFrom:
                       secretKeyRef:
-                        name: ate-s3-credentials
+                        name: ate-s3-credentials-v1
                         key: AWS_ACCESS_KEY_ID
                   - name: AWS_SECRET_ACCESS_KEY
                     valueFrom:
                       secretKeyRef:
-                        name: ate-s3-credentials
+                        name: ate-s3-credentials-v1
                         key: AWS_SECRET_ACCESS_KEY
+            containers:
+              - name: atelet
+                args:
+[[- if eq .Cloud "gcp" ]]
+                  - --image-credential-provider-config=/run/image-credential-provider/config.yaml
+                  - --image-credential-provider-bin-dir=/run/image-credential-provider/bin
+[[- end ]]
+                  - --localhost-registry-replacement=[[ .Registry ]]
+                  - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+                  - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+                  - --drain-delay=0s
+                  - --drain-timeout=5m
+                  - --objectstore-plugin-socket=/run/objectstore-plugin/node.sock
+                  - --image-cache-dir=/var/lib/ate/image-cache-v1
+[[- if ne .Cloud "gcp" ]]
+                volumeMounts:
+                  - $patch: delete
+                    mountPath: /run/image-credential-provider/bin
+                  - $patch: delete
+                    mountPath: /run/image-credential-provider/config.yaml
+            volumes:
+              - $patch: delete
+                name: image-credential-provider-bin
+              - $patch: delete
+                name: image-credential-provider-config
+[[- end ]]
+  # The router admits one client: Infrared's operator, by the SPIFFE ID of its
+  # pod certificate from the pod-identity signer (the chart's infrared-operator
+  # in [[ .InfraredNamespace ]]).
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: atenet-router
+      namespace: ate-system
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: atenet-router
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: "--ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/[[ .InfraredNamespace ]]/sa/infrared-operator"
+  # The egress gateway verifies actors' certificates against the -v1 actor CA.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: atenet-egress
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: actor-id-ca-certs
+                secret:
+                  secretName: actor-id-ca-certs-v1
 [[- if .ImagePullSecret ]]
-  # Substrate's images are private: every workload here pulls with
-  # [[ .ImagePullSecret ]], copied from [[ .InfraredNamespace ]] (credentials.yaml).
+  # The install names a pull secret, [[ .ImagePullSecret ]] (copied from [[ .InfraredNamespace ]],
+  # credentials.yaml): every workload here pulls with it, as Infrared's own pods do.
   - target:
       kind: Deployment
       namespace: ate-system

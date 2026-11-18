@@ -202,11 +202,11 @@ type Data struct {
 	// postgres, the Cluster's own name, as before the field existed.
 	PostgresServerName string `json:"PostgresServerName"`
 	// SubstrateRegistry is the operator's INFRARED_SUBSTRATE_REGISTRY: the
-	// registry path Agent Substrate's images are pulled and copied from, which
-	// holds each image of scripts/substrate-images.json under its own name, by
-	// the same tag and digest, e.g.
+	// registry path Agent Substrate's images are pulled from, which holds each
+	// image of scripts/substrate-images.json under its own name, by the same
+	// tag and digest, e.g.
 	// us-central1-docker.pkg.dev/darkshift-preprod/infrared/substrate. Empty
-	// means ghcr.io/darkshiftio/substrate, as before the field existed.
+	// means where upstream publishes them, ghcr.io/agent-substrate/substrate.
 	SubstrateRegistry string `json:"SubstrateRegistry"`
 	// RegistryToken is the operator's INFRARED_REGISTRY_TOKEN, the Infrared
 	// chart's registryToken: the install's pull secret (ImagePullSecret) is an
@@ -340,11 +340,9 @@ type Data struct {
 	// stores and the registry, zot-base's S3 driver has no rootdirectory, so
 	// Zot's root is the bucket's, and Zot's pods carry an annotation naming it,
 	// so a change of root rolls them; the platform's own repositories are
-	// platform/images/kpack-builder and platform/images/substrate/<name>; and
-	// Substrate's test actors are the ActorTemplates counter-v2 and
-	// sandbox-v2, located at s3://ate-snapshots/platform/snapshots/ (see "The
-	// stores' org layout"). False, the default, renders as before the field
-	// existed, and an operator leaves it out of the data.
+	// platform/images/kpack-builder and platform/images/substrate/<name> (see
+	// "The stores' org layout"). False, the default, renders as before the
+	// field existed, and an operator leaves it out of the data.
 	StoresOrgLayout bool `json:"StoresOrgLayout,omitempty"`
 	// RegistryPaused stops Zot while a migration between the layouts copies,
 	// verifies and deletes its files, and while its root changes: with the
@@ -712,7 +710,7 @@ func main() {
 		`Restore: {"point": "20261006T010500Z", "artifact": "20261006T010500Z.irbackup", "mirrorRun": "20261006T011700Z"} (empty: no restore)`)
 	flag.StringVar(&d.PostgresServerName, "postgres-server-name", "", "PostgresServerName: the server name Postgres archives under (empty: postgres)")
 	flag.StringVar(&d.SubstrateRegistry, "substrate-registry", "",
-		"SubstrateRegistry: the registry path Substrate's images come from (empty: ghcr.io/darkshiftio/substrate)")
+		"SubstrateRegistry: the registry path Substrate's images come from (empty: ghcr.io/agent-substrate/substrate)")
 	flag.Var(jsonFlag[RegistryToken]{&d.RegistryToken, "registry-token"}, "registry-token",
 		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "awsHostNetwork": false (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
 	flag.StringVar(&d.RunningChartVersion, "running-chart-version", "", "RunningChartVersion: the rendering operator's chart version; image pins render only when it equals InfraredChartVersion (empty: always, as before)")

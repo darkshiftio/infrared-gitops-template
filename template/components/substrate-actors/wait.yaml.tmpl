@@ -1,15 +1,12 @@
-[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # =============================================================================
-# Before the platform's actors: Substrate's API and router, and the registry.
+# Before the platform's worker pools: Substrate's API and router, and the registry.
 # =============================================================================
 # On a fresh cluster every Application syncs at once (README, "Order on a fresh
 # cluster"). This PreSync hook waits, up to half an hour, until the WorkerPool
-# CRD is established, Substrate's API and router and the registry inside the
-# cluster have a ready endpoint[[ if .ImagePullSecret ]], and the store infrared-platform, which
-# copies the pull secret, is Ready[[ end ]].[[ if $testActors ]] The hooks after it copy the images into
-# the registry, as its user platform, and talk to the API.[[ else ]] With Substrate's test actors off
-# there are no hooks after it: only the WorkerPool.[[ end ]]
+# CRD is established at ate.dev/v1, Substrate's API and router and the registry
+# inside the cluster have a ready endpoint[[ if .ImagePullSecret ]], and the store infrared-platform,
+# which copies the pull secret, is Ready[[ end ]].
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
@@ -89,8 +86,9 @@ spec:
           env:
             - name: HOME
               value: /tmp
+            # A CRD named <name>@<version> must also serve that version.
             - name: WAIT_CRDS
-              value: "workerpools.ate.dev[[ if .ImagePullSecret ]] externalsecrets.external-secrets.io[[ end ]]"
+              value: "workerpools.ate.dev@v1[[ if .ImagePullSecret ]] externalsecrets.external-secrets.io[[ end ]]"
             - name: WAIT_SERVICES
               value: "ate-system/api ate-system/atenet-router registry/zot"
             - name: WAIT_STORES
@@ -101,7 +99,13 @@ spec:
             - |
               # Each list is space-separated; an empty one waits for nothing.
               established() {
-                [ "$(kubectl get crd "$1" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ]
+                name="${1%@*}"
+                [ "$(kubectl get crd "$name" -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ] || return 1
+                [ "$name" = "$1" ] && return 0
+                case " $(kubectl get crd "$name" -o jsonpath='{.spec.versions[*].name}' 2>/dev/null) " in
+                  *" ${1#*@} "*) return 0 ;;
+                esac
+                return 1
               }
               answering() {
                 kubectl -n "${1%%/*}" get endpointslices -l "kubernetes.io/service-name=${1#*/}" \

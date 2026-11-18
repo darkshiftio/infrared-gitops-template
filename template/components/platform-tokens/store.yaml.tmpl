@@ -1,4 +1,3 @@
-[[- $testActors := true ]][[ range .Disabled ]][[ if eq . "substrate-test-actors" ]][[ $testActors = false ]][[ end ]][[ end ]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) ]][[ $codeIndexPull := and $codeIndex .ImagePullSecret ]]
 [[- if (or (eq .Edge "gateway") (and .Stores .Backup.Bucket) (and .Stores .SubstrateCapable .Registry .ImagePullSecret) $codeIndex) -]]
 # =============================================================================
@@ -43,10 +42,9 @@
 [[- if and .Stores .SubstrateCapable .Registry .ImagePullSecret ]]
 #
 # It also reads the install's pull secret, [[ .ImagePullSecret ]], which Agent Substrate's
-# namespaces copy whole: its images on ghcr are private. They pull with it in
-# podcertificate-controller-system, ate-system and ate-workers[[ if $testActors ]], and the copy of
-# the actor images into the registry inside the cluster reads them with it in
-# registry[[ end ]] (components/substrate*).
+# namespaces copy whole: they pull its images with it in
+# podcertificate-controller-system, ate-system and ate-workers
+# (components/substrate*).
 [[- end ]]
 [[- if $codeIndexPull ]]
 #
@@ -113,9 +111,6 @@ spec:
         - podcertificate-controller-system
         - ate-system
         - ate-workers
-[[- if $testActors ]]
-        - registry
-[[- end ]]
 [[- end ]]
 [[- if $codeIndex ]]
         - code-index

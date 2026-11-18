@@ -3,22 +3,27 @@
 # substrate is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
 [[- else if and .Stores .SubstrateCapable .Registry -]]
-# Agent Substrate's control plane (components/substrate), in the namespace
-# ate-system: the API (ate-api-server), the controller, atelet on every node,
-# the router that wakes an actor for a request, and the egress gateway. Wave
-# 22, after the pod-certificate controller (21) whose certificates each of them
-# presents.
+# Agent Substrate 1.0's control plane (components/substrate), in the namespace
+# ate-system: the API (ate-api-server), the identity provider (ate-idp-server),
+# the controller, atelet on every node, the router that wakes an actor for a
+# request, and the egress gateway. Wave 22, after the pod-certificate
+# controller (21) whose certificates each of them presents.
 #
-#   records    the database substrate on the platform's one Postgres
-#   snapshots  SeaweedFS's bucket ate-snapshots, as its S3 identity
-#   images     ghcr by digest; actor images from the registry inside the
-#              cluster ([[ .Registry ]]), which atelet pulls itself
-#   fence      only Infrared's operator, Substrate's own components and the
-#              platform's jobs here reach the API and the router
+#   records    the database substrate_v1 on the platform's one Postgres, as its
+#              owner and read/write logins
+#   snapshots  SeaweedFS's bucket ate-snapshots, under v1/, as the S3 identity
+#              ate-snapshots-v1
+#   images     upstream's on ghcr by digest[[ if .SubstrateRegistry ]], copied to [[ .SubstrateRegistry ]][[ end ]];
+#              actor images from the registry inside the cluster ([[ .Registry ]])
+#              or as the node, which atelet pulls itself
+#   callers    the API's one bootstrap owner and the router's one client are
+#              Infrared's operator; NetworkPolicies admit only the operator,
+#              Substrate's own components and the platform's jobs here
 #
-# A PreSync hook makes the actor-identity CA and JWT pools once, writes the
-# API's authentication settings, labels the nodes, and waits for the stores
-# and the pod-certificate controller's trust bundles.
+# A PreSync hook makes the actor-identity and egress CA pools once, writes the
+# API's authentication settings, and waits for the stores and the
+# pod-certificate controller's trust bundles; a Sync hook makes the Postgres
+# grants before the API starts.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

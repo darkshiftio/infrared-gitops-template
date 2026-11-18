@@ -9,7 +9,7 @@
 # cluster's certificates.k8s.io/v1beta1 PodCertificateRequests, and publishes
 # their trust bundles as ClusterTrustBundles. Wave 21, after the CRDs (20).
 #
-# A PreSync hook makes its two CAs once, which Substrate's installer does by
+# A PreSync hook makes its three CAs once, which Substrate's installer does by
 # hand, and reports when they expire.
 apiVersion: argoproj.io/v1alpha1
 kind: Application

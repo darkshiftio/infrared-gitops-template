@@ -1,6 +1,6 @@
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # =============================================================================
-# Before the pod-certificate controller: its two CAs, made once.
+# Before the pod-certificate controller: its three CAs, made once.
 # =============================================================================
 # Substrate's installer makes these by hand (ate-setup, create.go); here this
 # PreSync hook does. The controller signs every Substrate component's
@@ -9,6 +9,10 @@
 #   Secret                 signs
 #   service-dns-ca-pool    serving certificates (the API's api.ate-system.svc)
 #   pod-identity-ca-pool   the components' client identities (SPIFFE)
+#   postgres-ca-pool       the bundled Postgres's login certificates, which
+#                          this install never asks for (the platform's
+#                          Postgres signs in with passwords); the controller
+#                          does not start without the pool
 #
 # Each is a CA pool as Substrate's localca reads it: key pool, one Ed25519 CA
 # with id 1, active for signing, its root valid 365 days; tls.crt and tls.key,
@@ -83,7 +87,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["service-dns-ca-pool", "pod-identity-ca-pool"]
+    resourceNames: ["service-dns-ca-pool", "pod-identity-ca-pool", "postgres-ca-pool"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -176,6 +180,7 @@ spec:
               }
               ca service-dns-ca-pool -algorithm ed25519
               ca pod-identity-ca-pool -algorithm ed25519
+              ca postgres-ca-pool -algorithm ed25519
               echo "candidate CAs made"
           securityContext:
             allowPrivilegeEscalation: false
@@ -207,7 +212,7 @@ spec:
             - -ec
             - |
               # Each CA, made once and never replaced. Nothing prints a key.
-              for name in service-dns-ca-pool pod-identity-ca-pool; do
+              for name in service-dns-ca-pool pod-identity-ca-pool postgres-ca-pool; do
                 if kubectl get secret "$name" -o name >/dev/null 2>&1; then
                   echo "$name exists; leaving it alone"
                 else

@@ -1,0 +1,119 @@
+[[- if and .Stores .SubstrateCapable .Registry -]]
+# =============================================================================
+# The consumer substrate_v1: Agent Substrate 1.0's records.
+# =============================================================================
+# Substrate 1.0 cannot use a database an earlier Substrate made (its
+# migrations were squashed), so it is a new install on a new database, made
+# the way upstream's docs/guides/postgres.md asks of a database an install
+# provides itself (its pkg/postgressetup/setup.sql):
+#
+#   role                           login  what
+#   substrate_v1_owner             no     owns the database and its schema
+#                                         substrate; the API's migrations run
+#                                         as it
+#   substrate_v1_readwrite         no     the API's every other query
+#   substrate_v1_owner_user        yes    member of substrate_v1_owner
+#   substrate_v1_readwrite_user    yes    member of substrate_v1_readwrite
+#
+# A login inherits nothing: it signs in, then the API takes its role (SET
+# ROLE), as upstream makes its logins (NOINHERIT). Each login signs in with the
+# password in postgres-<login, its underscores as dashes>, which the PreSync
+# hook makes once (prepare.yaml); the API's DSNs read the same Secrets
+# (components/substrate/credentials.yaml). The grants on the schema, which
+# CloudNativePG does not make, are the substrate Application's Sync hook's,
+# before the API starts (components/substrate/grants.yaml).
+#
+# The database substrate and its role substrate, which Substrate before 1.0
+# used, are left as they are (substrate.yaml). Removing an object here leaves
+# its role or database in Postgres (reclaim policy retain).
+# =============================================================================
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: substrate-v1-owner
+  namespace: stores
+  annotations:
+    # After the Cluster (0), before the database it owns (2).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: postgres
+  name: substrate_v1_owner
+  login: false
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: substrate-v1-readwrite
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: postgres
+  name: substrate_v1_readwrite
+  login: false
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: substrate-v1-owner-user
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: postgres
+  name: substrate_v1_owner_user
+  login: true
+  inherit: false
+  inRoles:
+    - substrate_v1_owner
+  passwordSecret:
+    name: postgres-substrate-v1-owner-user
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: substrate-v1-readwrite-user
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: postgres
+  name: substrate_v1_readwrite_user
+  login: true
+  inherit: false
+  inRoles:
+    - substrate_v1_readwrite
+  passwordSecret:
+    name: postgres-substrate-v1-readwrite-user
+  databaseRoleReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: substrate-v1
+  namespace: stores
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  cluster:
+    name: postgres
+  name: substrate_v1
+  owner: substrate_v1_owner
+  ensure: present
+  databaseReclaimPolicy: retain
+  schemas:
+    - name: substrate
+      owner: substrate_v1_owner
+      ensure: present
+[[- else -]]
+# Agent Substrate runs only where the operator's preflight found the cluster able
+# to host it, with the platform's own stores and the registry inside the
+# cluster: no database for Substrate 1.0.
+[[- end ]]

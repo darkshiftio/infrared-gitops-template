@@ -1,12 +1,17 @@
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # =============================================================================
-# Only Infrared's operator reaches Substrate's API and its router.
+# Only Infrared's operator, and Substrate itself, reach its API and its router.
 # =============================================================================
-# Substrate's API accepts any ServiceAccount token issued for its audience
-# (api.ate-system.svc) and authorizes nothing: whoever reaches it administers
-# every atespace. Its router authenticates nothing: whoever reaches it wakes,
-# and talks to, any actor. So these two policies admit to the API's pods and
-# the router's only:
+# Substrate 1.0 checks every caller itself. Its API authenticates a
+# ServiceAccount token for its audience (api.ate-system.svc) or a pod
+# certificate, and allows a call only to a bootstrap owner, a principal an
+# access policy names, or a component with its system role; the one bootstrap
+# owner is Infrared's operator (--authz-bootstrap-owners, kustomization.yaml).
+# Its router serves TLS alone and admits only a client whose pod certificate
+# carries a SPIFFE ID on its allowlist, which names the operator alone
+# (--ingress-allowed-spiffe-ids). These two policies keep everyone else from
+# reaching either at all, a fence beside those checks. They admit, to the
+# API's pods and the router's only:
 #
 #   Infrared's operator  in [[ .InfraredNamespace ]], the pods labelled
 #                        app.kubernetes.io/name=infrared and
@@ -14,17 +19,20 @@
 #   Substrate itself     to the API: atelet, the router (which resumes an actor
 #                        for a request), the egress gateway and the controller
 #   the platform's jobs  in ate-system, the pods labelled
-#                        infrared.darkshift.io/substrate-client=true: the hook
-#                        that makes the ActorTemplates, the counter test and the
-#                        fence check (scripts/substrate-*.sh in the template)
+#                        infrared.darkshift.io/substrate-client=true: the serve
+#                        check and the fence check (scripts/substrate-*.sh in
+#                        the template), which find the API and the router
+#                        answering, and refusing them
 #
 # and the namespace monitoring on the metrics port, 9090, alone. Nothing else:
 # no organization's namespace, no zone, no worker pod, and so no actor. An
 # actor's own traffic leaves its sandbox only through the egress gateway, which
 # refuses any destination its EgressPolicy does not name, and the worker pod it
-# runs in is refused here. The router is reached on its Service's ports only,
-# never Envoy's admin port. The kubelet's probes come from the node, which
-# k3s's network policy controller always admits.
+# runs in is refused here. The API is reached on its gRPC port, 443, never the
+# objectstore-plugin's credential exchange (8445), which only GCS uses; the
+# router on its TLS ports alone, 8443 (the Service's 443) and 8444 (CONNECT
+# over TLS), never Envoy's admin port. The kubelet's probes come from the node,
+# which k3s's network policy controller always admits.
 #
 # Wave -3: before the pods they guard.
 # =============================================================================
@@ -94,19 +102,13 @@ spec:
         - podSelector:
             matchLabels:
               infrared.darkshift.io/substrate-client: "true"
-      # The Service atenet-router's ports: HTTP, HTTPS, CONNECT, CONNECT over
-      # TLS, and the status port.
+      # The router's two listeners, both TLS: HTTPS (the Service's port 443)
+      # and CONNECT over TLS.
       ports:
-        - protocol: TCP
-          port: 8080
         - protocol: TCP
           port: 8443
         - protocol: TCP
-          port: 8081
-        - protocol: TCP
           port: 8444
-        - protocol: TCP
-          port: 4040
     - from:
         - namespaceSelector:
             matchLabels:

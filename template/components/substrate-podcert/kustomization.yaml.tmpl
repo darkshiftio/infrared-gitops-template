@@ -1,10 +1,10 @@
 [[- if and .Stores .SubstrateCapable .Registry -]]
 # Agent Substrate's pod-certificate controller (the `substrate-podcert`
 # Application, wave 21), in the namespace podcertificate-controller-system:
-# its CAs, made once by the PreSync hook in prepare.yaml[[ if .ImagePullSecret ]], the pull secret
-# for Substrate's images (pull-secret.yaml)[[ end ]], and the controller itself,
-# upstream's, vendored by scripts/vendor-substrate.sh. What this install changes
-# in it is the patches below. Every object names its own namespace.
+# its three CAs, made once by the PreSync hook in prepare.yaml[[ if .ImagePullSecret ]], the pull
+# secret for Substrate's images (pull-secret.yaml)[[ end ]], and the controller
+# itself, upstream's, vendored by scripts/vendor-substrate.sh. What this install
+# changes in it is the patches below. Every object names its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -18,9 +18,9 @@ resources:
 [[- end ]]
 [[- if .SubstrateRegistry ]]
 # Substrate's images from [[ .SubstrateRegistry ]] (INFRARED_SUBSTRATE_REGISTRY), each
-# by the same tag and digest as on ghcr.
+# by the same tag and digest as upstream publishes it on ghcr.
 images:
-  - name: ghcr.io/darkshiftio/substrate/podcertcontroller
+  - name: ghcr.io/agent-substrate/substrate/podcertcontroller
     newName: [[ .SubstrateRegistry ]]/podcertcontroller
 [[- end ]]
 patches:
@@ -33,8 +33,8 @@ patches:
       metadata:
         name: podcertificate-controller-system
 [[- if .ImagePullSecret ]]
-  # Substrate's images are private: they pull with [[ .ImagePullSecret ]], copied from
-  # [[ .InfraredNamespace ]] (pull-secret.yaml).
+  # The install names a pull secret, [[ .ImagePullSecret ]] (copied from [[ .InfraredNamespace ]],
+  # pull-secret.yaml): the controller pulls with it, as Infrared's own pods do.
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment
