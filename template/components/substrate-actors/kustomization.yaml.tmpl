@@ -7,13 +7,17 @@
 [[- if .ImagePullSecret ]]
 #   pull-secrets.yaml  the pull secret, for a worker pool's image
 [[- end ]]
+[[- if .AgentPool ]]
+#   workers.yaml       the WorkerPool agents, where an org's agent steps run as
+#                      actors (the chart's runner.actors)
+[[- end ]]
 #
-# Substrate 1.0 runs no WorkerPool here yet: the platform's pool of three
-# gVisor workers and Substrate's test actors (the ActorTemplates counter and
-# sandbox, upstream's demos, which 1.0 no longer publishes) served only the
-# checks of an install before it. The agents' pool comes with its own setting.
-# The substrate-test-actors name in the components the install leaves out
-# changes nothing here any more.
+# The platform's pool of three gVisor workers and Substrate's test actors (the
+# ActorTemplates counter and sandbox, upstream's demos, which 1.0 no longer
+# publishes) served only the checks of an install before Substrate 1.0. The
+# agents' pool comes with the chart's runner.actors (.AgentPool). The
+# substrate-test-actors name in the components the install leaves out changes
+# nothing here any more.
 #
 # Every object names its own namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -25,6 +29,9 @@ resources:
 [[- end ]]
 [[- if .NetworkPolicies ]]
   - fence.yaml
+[[- end ]]
+[[- if .AgentPool ]]
+  - workers.yaml
 [[- end ]]
 [[- else -]]
 # Agent Substrate runs only where the operator's preflight found the cluster able

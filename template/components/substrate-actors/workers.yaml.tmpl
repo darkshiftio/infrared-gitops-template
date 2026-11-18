@@ -1,0 +1,83 @@
+[[- if and .Stores .SubstrateCapable .Registry .AgentPool -]]
+# =============================================================================
+# The agents' warm capacity: the WorkerPool agents.
+# =============================================================================
+# An org's agent steps run here as Agent Substrate actors, one actor per step's
+# attempt (the chart's runner.actors; infrared-docs-internal ADR 0089). Each
+# template Infrared's operator makes for an AgentRole selects this pool by its
+# label, infrared.darkshift.io/worker-pool=agents. Substrate's controller turns
+# it into a Deployment of gVisor workers (ateworker-gvisor) and each ready pod
+# into a Worker record, and writes a NetworkPolicy that admits only Substrate's
+# router to them.
+#
+# [[ .AgentPool.Workers ]] workers, each sized for one step's actor and a little
+# more ([[ .AgentPool.CPU ]] CPU and [[ .AgentPool.Memory ]] at its limit), so a
+# worker runs one step at a time. The scheduler places a worker by its requests,
+# a quarter of its limits, as a runner Job's pod asks for a part of its limit.
+# The workers run on the runner placement's nodes (the chart's
+# runner.placement), whose taints atelet tolerates too.
+# =============================================================================
+[[- if .ImagePullSecret ]]
+# The worker image is private, and a WorkerPool cannot name a pull secret: its
+# workers run as this ServiceAccount, which lists it (pull-secrets.yaml copies
+# it here). A worker's identity is its pod's, whatever the ServiceAccount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agents-worker
+  namespace: ate-workers
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+imagePullSecrets:
+  - name: [[ .ImagePullSecret ]]
+---
+[[- end ]]
+apiVersion: ate.dev/v1
+kind: WorkerPool
+metadata:
+  name: agents
+  namespace: ate-workers
+  labels:
+    infrared.darkshift.io/worker-pool: agents
+spec:
+  replicas: [[ .AgentPool.Workers ]]
+  workerImage: [[ or .SubstrateRegistry "ghcr.io/agent-substrate/substrate" ]]/ateworker-gvisor:v1.0.0@sha256:f8987236c6256f58c4b2625e543b43f4ae4bdded6ee6821c03d966effb7c0f17
+  sandboxClasses:
+    - name: gvisor
+  template:
+[[- if .ImagePullSecret ]]
+    serviceAccountName: agents-worker
+[[- end ]]
+[[- if .AgentPool.NodeSelector ]]
+    nodeSelector:
+[[- range $k, $v := .AgentPool.NodeSelector ]]
+      [[ quote $k ]]: [[ quote $v ]]
+[[- end ]]
+[[- end ]]
+[[- if .AgentPool.Tolerations ]]
+    tolerations:
+[[- range .AgentPool.Tolerations ]]
+      - [[ if .Key ]]key: [[ quote .Key ]][[ else ]]operator: Exists[[ end ]]
+[[- if and .Key .Operator ]]
+        operator: [[ .Operator ]]
+[[- end ]]
+[[- if .Value ]]
+        value: [[ quote .Value ]]
+[[- end ]]
+[[- if .Effect ]]
+        effect: [[ .Effect ]]
+[[- end ]]
+[[- end ]]
+[[- end ]]
+    resources:
+      limits:
+        cpu: [[ quote .AgentPool.CPU ]]
+        memory: [[ quote .AgentPool.Memory ]]
+      requests:
+        cpu: [[ quote .AgentPool.RequestCPU ]]
+        memory: [[ quote .AgentPool.RequestMemory ]]
+[[- else -]]
+# The agents' WorkerPool renders only where Agent Substrate runs (the
+# preflight's answer, the platform's stores and the registry inside the
+# cluster) and the chart's runner.actors is on: no workers.
+[[- end ]]
