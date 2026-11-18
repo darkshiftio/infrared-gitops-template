@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# A fake curl for scripts/store-applier-test.sh: SeaweedFS's S3 gateway, a get
-# and a CopyObject, on the pretend SeaweedFS in FAKE_STATE, and the volume
-# servers' /status. FAKE_COPY_CORRUPT (a pattern of keys) writes a copy that
+# A fake curl for scripts/store-applier-test.sh: SeaweedFS's S3 gateway, a get,
+# a CopyObject and a PutObject of a body (the applier's manifests), on the
+# pretend SeaweedFS in FAKE_STATE, and the volume servers' /status. FAKE_COPY_CORRUPT (a pattern of keys) writes a copy that
 # differs; FAKE_COPY_FAIL answers 500; FAKE_KILL_AFTER_COPIES kills the run
 # (FAKE_MAIN_PID) after that many copies.
 #
@@ -14,7 +14,7 @@
 # shellcheck disable=SC2254 # FAKE_COPY_FAIL, FAKE_COPY_CORRUPT and FAKE_STALL are patterns
 # shellcheck source-path=SCRIPTDIR source=fake-lib.sh
 . "$(dirname "$0")/fake-lib.sh"
-method=GET out=- wfmt="" fail=false config="" url="" copy_source="" none_match=false
+method=GET out=- wfmt="" fail=false config="" url="" copy_source="" none_match=false data=""
 connect_timeout="" max_time=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -27,6 +27,7 @@ while [ $# -gt 0 ]; do
     -m | --max-time) max_time=$2; shift ;;
     --aws-sigv4) shift ;;
     -K) config=$2; shift ;;
+    --data-binary) data=$2; shift ;;
     -H)
       case "$2" in
         "x-amz-copy-source: "*) copy_source="${2#x-amz-copy-source: }" ;;
@@ -97,6 +98,11 @@ case "$url" in
           fi
         fi
       fi
+    elif [ "$method" = PUT ] && [ -n "$data" ] && [ "$none_match" = false ]; then
+      mkdir -p "$(dirname "$STATE/fs$dst")"
+      cat "${data#@}" >"$STATE/fs$dst"
+      set_mtime "$dst" "$(date +%s)"
+      called "s3 put $dst"
     else
       echo "fake curl: $method $url" >&2
       exit 2

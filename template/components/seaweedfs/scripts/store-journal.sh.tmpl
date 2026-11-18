@@ -187,7 +187,10 @@ put_applied() {
 
 # One request at a time, in order, from the first without an answer, until
 # the pod ends: the kubelet stops the sidecar once the container weed has, so
-# it never ends by itself, which would have it started again.
+# it never ends by itself, which would have it started again. Stopped, it ends
+# at once (between two requests), so the Job ends with the container weed and
+# does not wait out the pod's grace period.
+trap 'log "stopped"; exit 0' TERM INT
 tick=0.2
 sleep "$tick" 2>/dev/null || tick=1
 seq=1

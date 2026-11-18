@@ -3092,11 +3092,20 @@ fi
 # The scripts: bash that parses, no move in place and no rename anywhere, and
 # what they do as the owner's rule and the contracts say.
 ps="$work/paths/components/seaweedfs/scripts"
+# Two PUTs: the copy, never over a file, and the applier's own manifests,
+# which it writes over and which refuse any key outside .infrared-moves/.
 bash -n "$ps/store-paths.sh" && bash -n "$ps/store-journal.sh" \
   && ! grep -nE 'fs\.mv|RenameEntry|mv\.from|cp\.from' "$ps/store-paths.sh" "$ps/store-journal.sh" \
-  && [ "$(grep -c -- '-H "If-None-Match: \*"' "$ps/store-paths.sh")" = 1 ] && [ "$(grep -c -- '-X PUT' "$ps/store-paths.sh")" = 1 ] \
-  && ok "paths: the applier's scripts parse, copy only with If-None-Match: *, and never move or rename a file (no fs.mv, no rename)" \
+  && [ "$(grep -c -- '-H "If-None-Match: \*"' "$ps/store-paths.sh")" = 1 ] && [ "$(grep -c -- '-X PUT' "$ps/store-paths.sh")" = 2 ] \
+  && [ "$(grep -c -- '-X PUT .*--data-binary' "$ps/store-paths.sh")" = 1 ] \
+  && [ "$(grep -c -- 'case "$(key_of "$1")" in .infrared-moves/\*) ;; \*) return 1 ;; esac' "$ps/store-paths.sh")" = 1 ] \
+  && ok "paths: the applier's scripts parse, copy only with If-None-Match: *, write over nothing but their own manifests under .infrared-moves/, and never move or rename a file (no fs.mv, no rename)" \
   || bad "paths: the applier's scripts move, rename or overwrite"
+# The journal's wants it takes, for the operator to read before it asks.
+[ "$(sel "$pb" "$cj | .metadata.annotations[\"infrared.darkshift.io/store-moves-wants\"]")" \
+    = "measure copy delete vacuum precopy final unmark mark retire discard" ] \
+  && ok "paths: the CronJob names the journal's wants its applier takes, the online pre-copy's among them" \
+  || bad "paths: the CronJob's store-moves-wants is '$(sel "$pb" "$cj | .metadata.annotations")'"
 # Every curl gives up rather than hang the Job: a connect timeout and a time
 # limit on the line that starts it.
 curls="$(grep -hE '(^|[^A-Za-z])curl -' "$ps/store-paths.sh" "$ps/store-journal.sh" | grep -v '^[[:space:]]*#' || true)"
