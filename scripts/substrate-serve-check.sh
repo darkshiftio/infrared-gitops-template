@@ -121,12 +121,12 @@ else
 fi
 
 # The router serves TLS with a certificate CA verifies: a client it does not
-# admit is refused in the handshake (35 or 56), never unreachable (6, 7, 28)
+# admit is refused in the handshake (35, 55 or 56), never unreachable (6, 7, 28)
 # and never with an unverified certificate (60).
 for port in 443 8444; do
   r="$(router "$port")"
   case "$r" in
-    "35 000" | "56 000") echo "  ok    the router answers TLS on $port, with a certificate the service-DNS bundle verifies (curl $r)" ;;
+    "35 000" | "55 000" | "56 000") echo "  ok    the router answers TLS on $port, with a certificate the service-DNS bundle verifies (curl $r)" ;;
     *)
       echo "  FAIL  the router on $port: curl exit and status $r: $(tail -n 1 /tmp/curl.err)"
       rc=1 ;;

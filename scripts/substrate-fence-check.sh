@@ -151,8 +151,11 @@ for call in "ListAtespaces {}" "CreateAtespace {\"atespace\":{\"metadata\":{\"na
   fi
 done
 
-# The router: refused in the handshake (35 or 56, no HTTP status), never
-# unreachable (6, 7, 28), never with a certificate CA does not verify (60).
+# The router: refused in the handshake (35, 55 or 56, no HTTP status), never
+# unreachable (6, 7, 28), never with a certificate CA does not verify (60). In
+# TLS 1.3 the client ends its part of the handshake before the router checks
+# its certificate, so curl meets the alert or the close of the router in the
+# handshake (35), while sending the request (55) or while reading (56).
 for port in 443 8444; do
   for who in none own; do
     if [ "$who" = own ]; then
@@ -163,10 +166,10 @@ for port in 443 8444; do
       words="no client certificate"
     fi
     case "$r" in
-      "35 000" | "56 000")
+      "35 000" | "55 000" | "56 000")
         echo "  ok    the router on $port refuses $words in the TLS handshake (curl $r)" ;;
       *)
-        echo "  FAIL  the router on $port with $words: curl exit and status $r, want 35 or 56 and 000: $(tail -n 1 /tmp/curl.err)"
+        echo "  FAIL  the router on $port with $words: curl exit and status $r, want 35, 55 or 56 and 000: $(tail -n 1 /tmp/curl.err)"
         rc=1 ;;
     esac
   done
