@@ -14,7 +14,13 @@
 #                                        stores/infrared-store-paths-applied
 #   stores/infrared-store-moves          a migration's journal: measure, copy and
 #                                        verify, delete, vacuum, each step
-#                                        recorded before the next
+#                                        recorded before the next; for the
+#                                        registry's move with Zot serving but
+#                                        for a window of minutes, precopy
+#                                        while it serves, final with it
+#                                        stopped, unmark and mark, retire once
+#                                        it serves the new root, and discard
+#                                        a move turned back
 #
 # The operator starts a Job from it whenever either wants something (Jobs
 # seaweedfs-paths-<hash> and seaweedfs-moves-<want>), and waits for it by
@@ -90,6 +96,11 @@ kind: CronJob
 metadata:
   name: seaweedfs-paths
   namespace: stores
+  annotations:
+    # The journal's wants this applier takes (scripts/store-paths.sh): the
+    # operator asks for none it does not name, and waits, saying so, for a
+    # template that takes the ones it needs.
+    infrared.darkshift.io/store-moves-wants: "measure copy delete vacuum precopy final unmark mark retire discard"
 spec:
   schedule: "17 3 * * *"
   timeZone: Etc/UTC
@@ -119,6 +130,10 @@ spec:
           # The sidecar journal alone mounts a token, below.
           automountServiceAccountToken: false
           restartPolicy: Never
+          # Both containers end at once when stopped: a run stopped mid-step
+          # is taken up again by the next, and a migration's window waits for
+          # each run to end.
+          terminationGracePeriodSeconds: 10
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534

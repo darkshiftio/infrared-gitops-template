@@ -40,6 +40,22 @@
 #   stale            a journal another migration took stops the run
 #   tree             a template's snapshots copied into a shared folder, the
 #                    others' files there left alone
+#   precopy          while Zot serves: each blob copied, timed and verified,
+#                    its manifest recorded; no other file copied; the delta;
+#                    a later pass copies only new blobs, removes copies of
+#                    blobs Zot deleted, retimes one pushed again, and reads no
+#                    blob its manifest vouches for; a refused or bad copy, and
+#                    a pass killed midway, taken up again
+#   final            with Zot stopped: the destination made the source and
+#                    verified, reading only what nothing vouches for; unmark
+#                    deletes each verified source's oci-layout, mark copies it
+#                    back
+#   retire           with Zot at the new root: a source as verified deleted
+#                    file by file, a blob Zot deleted since counted; a source
+#                    or a copy changed since its verification deletes nothing
+#   discard          a move turned back: this migration's copies removed, a
+#                    file it did not copy left and named; refused while the
+#                    source lacks its oci-layout
 #   rollback         moving back, the repositories found are none of the old
 #                    root's, and not SeaweedFS's own uploads
 #   journal-keys     the sidecar writes the applier's keys alone
@@ -77,6 +93,8 @@ put() {
   printf '%s' "$2" >"$S/fs$1"
   echo "$3" >"$S/mtime$1"
 }
+# unput <filer path>: a file gone, as a deletion leaves it.
+unput() { rm "$S/fs$1" "$S/mtime$1"; }
 # blob <repository folder> <content> <mtime>: a blob named by its digest.
 blob() {
   local h
@@ -410,6 +428,209 @@ run_applier || true
   && [ "$(tree_of "$SN/sandbox-v1")" = "$before_sandbox" ] && [ "$(tree_of "$SN/snapshots/atespaces" | grep -c .)" = 6 ] \
   && ok "tree: a delete of one verified template removes its files and folders alone" \
   || { bad "tree: delete 1: '$(last_step 1)'"; show; }
+
+# --- The online pre-copy: precopy, final, unmark, mark, retire, discard -------------------------
+# (ADR 0087, Updates, 2026-11-18.) line_of <n> <step>: move n's last line of
+# that step. calls_from <count>: the calls after the first count.
+line_of() { data infrared-store-moves "state.$1" | awk -v s="$2" '$2 == s { l = $0 } END { print l }'; }
+calls_from() { tail -n "+$(($1 + 1))" "$S/calls"; }
+ID=20261118T020000Z
+MAN=/buckets/registry/.infrared-moves/$ID
+new_state precopy
+registry_repos
+before="$(tree_of "$WEB")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 1\nprecopy 2\nmeasure delta\n'
+rc=0
+run_applier || rc=$?
+m="$(data infrared-store-moves measured)"
+p2="$(line_of 2 precopied)"
+[ "$rc" = 0 ] && [ "$(steps 1)" = "precopying precopied" ] && [ "$(steps 2)" = "precopying precopied" ] \
+  && [ "$(cut -d' ' -f4,6,8,9 <<<"$p2")" = "2 2 0 0" ] \
+  && [ "$(cut -d' ' -f10 <<<"$p2")" = "$(sha256sum <"$S/fs$MAN/2.precopy.tsv" | cut -d' ' -f1)" ] \
+  && [ "$(grep -c . "$S/fs$MAN/2.precopy.tsv")" = 2 ] \
+  && [ "$(cd "$S/fs$NEW" && find . -type f ! -path './api/*' | LC_ALL=C sort | tr '\n' ' ')" = "$(printf './blobs/sha256/%s\n' "$B1" "$B2" | LC_ALL=C sort | tr '\n' ' ')" ] \
+  && [ "$(tree_of "$NEW/blobs")" = "$(tree_of "$WEB/blobs")" ] && [ "$(tree_of "$WEB")" = "$before" ] \
+  && grep -qE '^delta 2 3 [0-9]+$' <<<"$m" && grep -qE '^delta 1 1 [0-9]+$' <<<"$m" \
+  && ok "precopy: each blob copied, given its source's time and verified, the manifest recorded by its SHA-256; no index.json, oci-layout or upload copied, the source untouched; the delta is the files a final takes: every one but the blobs" \
+  || { bad "precopy: state.2 '$(steps 2)' ($p2), measured $m (exit $rc)"; show; }
+# Zot serves on: a push adds a blob, its GC deletes another, a blob pushed
+# again takes a new time. The next pass copies the new one, removes the copy
+# of the one deleted, gives the third its new time, and reads no blob it
+# verified before.
+B3="$(blob "$WEB" layer-three 1700000300)"
+unput "$WEB/blobs/sha256/$B2"
+echo 1700000400 >"$S/mtime$WEB/blobs/sha256/$B1"
+mark="$(grep -c . "$S/calls")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'precopy 2\n'
+run_applier || true
+p2="$(line_of 2 precopied)"
+[ "$(cut -d' ' -f4,6,8,9 <<<"$p2")" = "2 1 1 0" ] \
+  && [ "$(cd "$S/fs$NEW" && find . -type f ! -path './api/*' | LC_ALL=C sort | tr '\n' ' ')" = "$(printf './blobs/sha256/%s\n' "$B1" "$B3" | LC_ALL=C sort | tr '\n' ' ')" ] \
+  && [ "$(cat "$S/mtime$NEW/blobs/sha256/$B1")" = 1700000400 ] && [ "$(tree_of "$NEW/blobs")" = "$(tree_of "$WEB/blobs")" ] \
+  && ! calls_from "$mark" | grep -q "^s3 get $NEW/blobs/sha256/$B1$" && calls_from "$mark" | grep -q "^s3 get $NEW/blobs/sha256/$B3$" \
+  && [ "$(calls_from "$mark" | grep -c '^s3 copy ')" = 1 ] \
+  && ok "precopy: a pass after pushes copies only the new blob, removes the copy of the blob Zot deleted, moves a blob pushed again to its new time, and reads again no blob its manifest vouches for" \
+  || { bad "precopy: the second pass: $p2"; show; }
+
+# The window: Zot stopped, index.json changed since, a blob pushed after the
+# last pass, another upload. final makes the destination the source and
+# verifies it, reading no blob the pre-copy vouches for; unmark deletes the
+# sources' oci-layout once verified.
+put "$WEB/index.json" '{"schemaVersion":2,"manifests":[1,2]}' 1700000500
+B4="$(blob "$WEB" layer-four 1700000501)"
+put "$WEB/.uploads/u2" partial-two 1700000502
+listing="$( (cd "$S/fs$WEB" && find . -type f ! -path './api/*' | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do
+  printf '%s %s %s %s\n' "$f" "$(wc -c <"$f" | tr -d ' ')" "$(sha256sum <"$f" | cut -d' ' -f1)" "$(cat "$S/mtime$WEB/$f")"; done) | sha256sum | cut -d' ' -f1)"
+mark="$(grep -c . "$S/calls")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 3 $'final 1\nfinal 2\nunmark 1\nunmark 2\nmeasure\n'
+rc=0
+run_applier || rc=$?
+v2="$(line_of 2 verified)"
+[ "$rc" = 0 ] && [ "$(steps 2)" = "precopying precopied precopying precopied copying copied verified unmarking unmarked" ] \
+  && [ "$(steps 1)" = "precopying precopied copying copied verified unmarked" ] \
+  && [ "$(cut -d' ' -f4 <<<"$v2")" = 7 ] && [ "$(cut -d' ' -f6 <<<"$v2")" = "$listing" ] \
+  && [ "$(cut -d' ' -f7 <<<"$v2")" = "$(sha256sum <"$S/fs$MAN/2.final.tsv" | cut -d' ' -f1)" ] \
+  && [ "$(tree_of "$NEW" | grep -v '^./api/' | grep -v '^./oci-layout ')" = "$(tree_of "$WEB" | grep -v '^./api/')" ] \
+  && [ "$(line_of 2 unmarked | cut -d' ' -f4)/$(line_of 1 unmarked | cut -d' ' -f4)" = 1/0 ] \
+  && [ ! -e "$S/fs$WEB/oci-layout" ] && [ ! -e "$S/fs$WEB/api/oci-layout" ] && [ -f "$S/fs$NEW/oci-layout" ] \
+  && ! calls_from "$mark" | grep -q "^s3 get $NEW/blobs/sha256/$B1$" && ! calls_from "$mark" | grep -q "^s3 get $NEW/blobs/sha256/$B3$" \
+  && calls_from "$mark" | grep -q "^s3 get $NEW/blobs/sha256/$B4$" && [ "$(calls_from "$mark" | grep -c '^s3 copy ')" = 6 ] \
+  && ok "final: with Zot stopped the destination becomes the source (index.json changed, a blob and an upload since), verified to the listing verify_move takes, reading no blob the pre-copy vouches for; unmark then deletes each verified source's oci-layout, whose copy is the same" \
+  || { bad "final: state.2 '$(steps 2)' ($v2) (exit $rc)"; show; }
+
+# The window undone: mark copies each oci-layout back, the same bytes and
+# time.
+journal "$ID" "$FROM" "$TO" "$MOVES" 4 $'mark 1\nmark 2\n'
+run_applier || true
+[ "$(steps 2 | awk '{ print $NF }')" = marked ] && [ "$(steps 1 | awk '{ print $NF }')" = unmarked ] \
+  && [ "$(cat "$S/fs$WEB/oci-layout")" = '{"imageLayoutVersion":"1.0.0"}' ] && [ "$(cat "$S/mtime$WEB/oci-layout")" = 1700000101 ] \
+  && [ "$(tree_of "$WEB" | grep -v '^./api/')" = "$(tree_of "$NEW" | grep -v '^./api/')" ] \
+  && ok "mark: a window undone copies each oci-layout back from its verified copy, with its time: the source is whole again" \
+  || { bad "mark: state.2 '$(steps 2)'"; show; }
+journal "$ID" "$FROM" "$TO" "$MOVES" 5 $'unmark 1\nunmark 2\n'
+run_applier || true
+
+# Zot at the new root: it writes index.json there and deletes a blob. retire
+# deletes each source, file by file, as verified, and counts the blob Zot
+# deleted; a source changed since its verification is never deleted.
+put "$NEW/index.json" '{"schemaVersion":2,"manifests":[1,2,3]}' 1700000600
+unput "$NEW/blobs/sha256/$B3"
+put "$WEB/api/blobs/sha256/extra" extra 1700000700
+before_new="$(tree_of "$NEW")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 6 $'retire 1\nretire 2\nvacuum\n'
+run_applier || true
+[ "$(line_of 1 failed | cut -d' ' -f4-8)" = "its source is not what" ] && [ -f "$S/fs$WEB/api/index.json" ] \
+  && [ "$(line_of 2 deleted | cut -d' ' -f4,5)" = "6 1" ] && [ -z "$(cd "$S/fs$WEB" && find . -type f ! -path './api/*')" ] \
+  && [ -d "$S/fs$WEB/api" ] && [ ! -e "$S/fs$WEB/blobs" ] && [ "$(tree_of "$NEW")" = "$before_new" ] \
+  && ! grep -E '^weed fs.rm (-r|-rf) ' "$S/calls" | grep -q . \
+  && ok "retire: with Zot at the new root, a source as verified is deleted file by file with its empty folders, the blob Zot deleted since counted; a source that changed since its verification is not deleted; the destination untouched" \
+  || { bad "retire: state.1 '$(steps 1)', state.2 '$(steps 2)' ($(line_of 2 deleted))"; show; }
+
+# A retire killed after its first deletions: the next one deletes the rest of
+# what was verified and records it.
+new_state retire-resume
+registry_repos
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 2\nfinal 2\nunmark 2\n'
+run_applier || true
+unput "$WEB/blobs/sha256/$B1"
+unput "$WEB/index.json"
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'retire 2\n'
+run_applier || true
+[ "$(line_of 2 deleted | cut -d' ' -f4,5)" = "2 0" ] && [ -z "$(cd "$S/fs$WEB" && find . -type f ! -path './api/*')" ] \
+  && ok "retire: a retire that stopped after some deletions is taken up: what is left is as verified, and goes" \
+  || { bad "retire-resume: state.2 '$(steps 2)' ($(line_of 2 deleted))"; show; }
+
+# A blob changed at the destination after its verification: nothing deleted.
+new_state retire-changed
+registry_repos
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 2\nfinal 2\nunmark 2\n'
+run_applier || true
+before="$(tree_of "$WEB")"
+put "$NEW/blobs/sha256/$B1" other 1700000102
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'retire 2\n'
+run_applier || true
+[ "$(steps 2)" = "precopying precopied copying copied verified unmarking unmarked failed" ] && [ "$(tree_of "$WEB")" = "$before" ] \
+  && [[ "$(line_of 2 failed)" == *"blobs/sha256/$B1 changed at the destination"* ]] \
+  && ok "retire: a verified blob changed at the destination since deletes nothing of the source" \
+  || { bad "retire-changed: state.2 '$(steps 2)'"; show; }
+
+# Resilience: a copy refused and a copy that does not match leave the rest
+# verified and their sources untouched; a pass killed midway is taken up.
+new_state precopy-faults
+registry_repos
+before="$(tree_of "$WEB")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 2\n'
+run_applier FAKE_COPY_FAIL="*/acme/images/web/blobs/sha256/$B1" FAKE_COPY_CORRUPT="*/acme/images/web/blobs/sha256/$B2" || true
+p2="$(line_of 2 precopied)"
+[ "$(cut -d' ' -f4,6,8,9 <<<"$p2")" = "0 1 1 2" ] && [[ "$p2" == *"could not be copied"* ]] \
+  && [ -z "$(cd "$S/fs$NEW" 2>/dev/null && find . -type f)" ] && [ "$(tree_of "$WEB")" = "$before" ] \
+  && ok "precopy: a copy refused is left for the next pass and a copy that does not match is removed, both counted unverified; the source untouched" \
+  || { bad "precopy-faults: $p2"; show; }
+new_state precopy-resume
+registry_repos
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 2\n'
+rc=0
+run_applier FAKE_KILL_AFTER_COPIES=1 || rc=$?
+stopped="$(steps 2)"
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'precopy 2\n'
+run_applier || true
+[ "$rc" != 0 ] && [ "$stopped" = precopying ] && [ "$(cut -d' ' -f4,6 <<<"$(line_of 2 precopied)")" = "2 1" ] \
+  && [ "$(grep -c '^s3 copy ' "$S/calls")" = 2 ] && [ "$(tree_of "$NEW/blobs")" = "$(tree_of "$WEB/blobs")" ] \
+  && ok "precopy: a pass killed after one copy is taken up: that copy kept and read, the other copied, both verified" \
+  || { bad "precopy-resume: '$stopped' (exit $rc), then $(line_of 2 precopied)"; show; }
+
+# Turned back: discard removes this migration's copies, where the source is
+# there at the same size or the manifest vouches, and leaves anything else.
+new_state discard
+registry_repos
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 2\n'
+run_applier || true
+before="$(tree_of "$WEB")"
+put "$NEW/blobs/sha256/foreign" foreign 1700000900
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'discard 2\n'
+run_applier || true
+[ "$(line_of 2 discarded | cut -d' ' -f4-6)" = "2 1 blobs/sha256/foreign" ] && [ "$(tree_of "$WEB")" = "$before" ] \
+  && [ "$(cd "$S/fs$NEW" && find . -type f)" = ./blobs/sha256/foreign ] \
+  && ok "discard: a move turned back loses this migration's copies, and a file it did not copy stays and is named; the source untouched" \
+  || { bad "discard: $(line_of 2 discarded)"; show; }
+journal "$ID" "$FROM" "$TO" "$MOVES" 3 $'final 2\nunmark 2\ndiscard 2\n'
+run_applier || true
+[ "$(steps 2 | awk '{ print $NF }')" = failed ] && [[ "$(line_of 2 failed)" == *"not back yet"* ]] && [ -f "$S/fs$NEW/index.json" ] \
+  && ok "discard: a move whose oci-layout is not back at the source keeps its copy" \
+  || { bad "discard: after unmark: '$(steps 2)'"; show; }
+# Zot never served the destination: every file there is this migration's,
+# a copy changed since too.
+journal "$ID" "$FROM" "$TO" "$MOVES" 4 $'mark 2\n'
+run_applier || true
+put "$NEW/index.json" changed 1700000950
+before="$(tree_of "$WEB")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 5 $'discard 2 own\n'
+run_applier || true
+[ "$(line_of 2 discarded | cut -d' ' -f5)" = 0 ] && [ -z "$(cd "$S/fs$NEW" 2>/dev/null && find . -type f ! -path './api/*')" ] \
+  && [ "$(tree_of "$WEB")" = "$before" ] \
+  && ok "discard: with own, every copy goes, one changed since too; the source untouched" \
+  || { bad "discard own: $(line_of 2 discarded)"; show; }
+
+# A repository Zot deleted while it was pre-copied: its copies go too.
+new_state discard-gone
+registry_repos
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 2\n'
+run_applier || true
+for f in index.json oci-layout "blobs/sha256/$B1" "blobs/sha256/$B2" .uploads/u1; do unput "$WEB/$f"; done
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'discard 2\n'
+run_applier || true
+[ "$(line_of 2 discarded | cut -d' ' -f4,5)" = "2 0" ] && [ -z "$(cd "$S/fs$NEW" 2>/dev/null && find . -type f ! -path './api/*')" ] \
+  && ok "discard: the copies of a repository Zot deleted since go" \
+  || { bad "discard-gone: $(steps 2)"; show; }
+
+# The registry's alone: a tree journal asked to pre-copy stops.
+new_state precopy-tree
+journal "$ID" /buckets/ate-snapshots/platform/ /buckets/ate-snapshots/platform/snapshots/ $'1 a b snapshots - empty\n' 1 $'precopy 1\n' tree
+rc=0
+run_applier || rc=$?
+[ "$rc" != 0 ] && [[ "$(data infrared-store-moves outcome)" == *"which only the registry's take"* ]] \
+  && ok "precopy: a tree's journal is refused the registry's wants, and nothing is done" \
+  || { bad "precopy-tree: exit $rc, $(data infrared-store-moves outcome)"; show; }
 
 # --- Moving back: the repositories found ------------------------------------------------------
 new_state rollback

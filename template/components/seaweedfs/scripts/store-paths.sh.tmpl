@@ -50,6 +50,51 @@
 # stops before its outcome is asked again; each step reads what is there, so
 # it resumes where the files and the journal are.
 #
+# The registry's move with Zot serving all along but for a window of minutes
+# (the online pre-copy, ADR 0087 Updates, 2026-11-18) asks for these instead
+# of copy and delete, each step recorded as above, each file's checks kept in
+# the move's manifest (below):
+#   measure delta  as measure, and each move's delta: the files a final would
+#               copy or read again (the source's files no manifest line
+#               vouches for as they are, and every one but a blob)
+#   precopy <n> while Zot serves at the source: each blob (every file under
+#               blobs/, whose content never changes) the destination lacks is
+#               copied, given its source's time, and verified (its SHA-256 the
+#               digest it is named by, its source's size and time); a blob the
+#               manifest verified is read again only if its entry changed
+#               since; this migration's copies of blobs Zot has since deleted
+#               are removed. Never index.json, oci-layout, .uploads/, .sync/,
+#               and never a source file. Then the manifest and precopied.
+#   final <n>   with Zot stopped: the destination made the source exactly:
+#               what it lacks copied, a copy that is no longer its source's
+#               replaced, this migration's copies of files gone removed; then
+#               every file verified as copy does, reading again only what no
+#               manifest line vouches for. Then copied and verified, with the
+#               manifest's hash.
+#   unmark <n>  with Zot stopped, before it starts at a root that holds the
+#               old one: a verified move's oci-layout at the source, whose copy
+#               is the same, is deleted, so Zot does not take the old copy for
+#               a repository: unmarked <at> 1, or 0 where there was none
+#   mark <n>    a window undone: that oci-layout copied back, verified
+#   retire <n>  with Zot at the destination: a verified move's source deleted,
+#               file by file, only while it is what the verification read and
+#               the destination holds every verified blob as verified or, Zot
+#               having deleted it since, not at all
+#   discard <n> [own]
+#               a move turned back: this migration's copies removed, each only
+#               where its source is there at the same size or its manifest
+#               line still vouches for it; anything else is left and named.
+#               With own (Zot never served the destination, which was empty
+#               when planned, so every file there is this migration's), all
+#               of them
+#
+# A move's manifest, /buckets/<bucket>/.infrared-moves/<id>/<n>.tsv, is a line
+# a file of what its last precopy or final verified: "<path>\t<size>\t<mtime>
+# \t<mtimeNs>\t<sha256>\t<source chunks>\t<destination chunks>", the chunks
+# the filer lists for each entry, which change whenever its data does. Its
+# SHA-256 is the last field of the precopied or verified line it goes with;
+# one that does not match is not read, and everything is read again.
+#
 # A repository's own files (scope repository, the registry's) are those
 # directly in its folder and every file under its blobs/, .uploads/ and
 # .sync/ folders; any other folder in it is another repository's. A tree move
@@ -174,7 +219,8 @@ hash_object() {
 }
 
 # copy_object <from path> <to path> <bytes>: a new copy of the file, never
-# over one: prints copied, or exists when the destination has a file there.
+# over one: prints copied, exists when the destination has a file there, or
+# gone when the source has none (Zot deleted it since it was listed).
 # <bytes>, the source's size, sets the call's time limit: the gateway answers
 # a CopyObject once it has written the whole copy.
 copy_object() {
@@ -192,8 +238,29 @@ copy_object() {
       echo copied
       ;;
     412) echo exists ;;
+    404) echo gone ;;
     *) return 1 ;;
   esac
+}
+
+# put_manifest <filer path> <file>: the applier's own record of a move's
+# checks, through S3, which it writes over; never a repository's file.
+put_manifest() {
+  local bucket code
+  bucket="$(bucket_of "$1")"
+  case "$(key_of "$1")" in .infrared-moves/*) ;; *) return 1 ;; esac
+  code="$(curl -sS --connect-timeout 10 --max-time "$(s3_max_time "$(wc -c <"$2" | tr -d ' ')")" -o "$tmp/put.out" -w '%{http_code}' \
+    -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" --data-binary "@$2" \
+    "$S3_ENDPOINT/$bucket/$(key_of "$1")" 2>"$tmp/put.err")" || code=000
+  [ "$code" = 200 ]
+}
+
+# get_object <filer path> <out>: the file, through S3; fails when there is none.
+get_object() {
+  local bucket
+  bucket="$(bucket_of "$1")"
+  curl -sS -f --connect-timeout 10 --max-time 600 --aws-sigv4 "aws:amz:us-east-1:s3" -K "$tmp/s3-$bucket.curl" \
+    -o "$2" "$S3_ENDPOINT/$bucket/$(key_of "$1")" 2>"$tmp/get.err"
 }
 
 # list_dir <dir> <out> [full]: the entries of a directory, one JSON object a
@@ -215,23 +282,27 @@ list_dir() {
   done
 }
 
-# walk <dir> <scope> <out>: the files a move owns below <dir>, sorted, a line
-# each: "<path below dir>\t<size>\t<mtime>\t<mtimeNs>"; and in <out>.dirs the
-# folders below <dir> it read, deepest first. Scope repository: the files
-# directly in <dir> and every file under its blobs/, .uploads/ and .sync/;
-# tree: every file below <dir>.
+# walk <dir> <scope> <out> [full]: the files a move owns below <dir>, sorted,
+# a line each: "<path below dir>\t<size>\t<mtime>\t<mtimeNs>", and with full a
+# fifth field, the entry's chunks as the filer lists them (each one's file id
+# and its place in the file), which change whenever its data does, or - for
+# none; and in <out>.dirs the folders below <dir> it read, deepest first.
+# Scope repository: the files directly in <dir> and every file under its
+# blobs/, .uploads/ and .sync/; tree: every file below <dir>.
 walk() {
-  local root=${1%/} scope=$2 out=$3 rel
+  local root=${1%/} scope=$2 out=$3 full=${4:-} rel
   : >"$out.unsorted"
   : >"$out.dirs.unsorted"
   printf '\n' >"$tmp/walk.queue"
   while [ -s "$tmp/walk.queue" ]; do
     : >"$tmp/walk.next"
     while IFS= read -r rel <&3; do
-      list_dir "$root${rel:+/$rel}" "$tmp/walk.dir" || return 1
-      jq -r --arg rel "$rel" 'select((.isDirectory // false) | not)
+      list_dir "$root${rel:+/$rel}" "$tmp/walk.dir" "$full" || return 1
+      jq -r --arg rel "$rel" --arg full "$full" 'select((.isDirectory // false) | not)
         | [(if $rel == "" then .name else $rel + "/" + .name end), (.attributes.fileSize // "0"),
-           (.attributes.mtime // "0"), ((.attributes.mtimeNs // 0) | tostring)] | @tsv' "$tmp/walk.dir" >>"$out.unsorted"
+           (.attributes.mtime // "0"), ((.attributes.mtimeNs // 0) | tostring)]
+          + (if $full == "full" then ([.chunks[]? | "\(.fileId // "")/\(.fid.volumeId // 0),\(.fid.fileKey // 0),\(.fid.cookie // 0)@\(.offset // 0)+\(.size // 0)"]
+               | join(";") | if . == "" then "-" else . end | [.]) else [] end) | @tsv' "$tmp/walk.dir" >>"$out.unsorted"
       jq -r --arg rel "$rel" --arg scope "$scope" 'select(.isDirectory // false) | .name as $n
         | select($scope == "tree" or $rel != "" or $n == "blobs" or $n == ".uploads" or $n == ".sync")
         | if $rel == "" then $n else $rel + "/" + $n end' "$tmp/walk.dir" >>"$tmp/walk.next"
@@ -494,14 +565,16 @@ step() {
   stop_run "move $1's step could not be recorded: $JREPLY"
 }
 
-# move <n>: sets SRC and DST, the move's folders (no trailing slash), from
-# the journal; a move whose folders lie one in the other is refused.
+# move <n>: sets SRC and DST, the move's folders (no trailing slash), and
+# DEST, what its destination held when planned (empty or original), from the
+# journal; a move whose folders lie one in the other is refused.
 move() {
   local line
   line="$(awk -v n="$1" '$1 == n { print; exit }' "$tmp/moves")"
   [ -n "$line" ] || return 1
   SRC="$FROM$(cut -d' ' -f2 <<<"$line")"
   DST="$TO$(cut -d' ' -f3 <<<"$line")"
+  DEST="$(cut -d' ' -f6 <<<"$line")"
   case "$DST/" in "$SRC/"*) return 1 ;; esac
   case "$SRC/" in "$DST/"*) return 1 ;; esac
 }
@@ -712,6 +785,583 @@ delete_move() {
   step "$n" "deleted $(now) $removed"
 }
 
+# --- The online pre-copy: precopy, final, unmark, mark, retire, discard ------------
+# (ADR 0087, Updates, 2026-11-18.) Every step reads what is there and what the
+# journal says now, so each is taken up again where a stopped run left it.
+
+# state_lines <n>: move n's lines of this migration, as the journal holds them
+# now, into $tmp/state.
+state_lines() {
+  journal get "state.$1" "$ID" || {
+    if [ "$?" = 3 ]; then log "the journal is another migration's now ($JREPLY): this run stops"; exit 1; fi
+    stop_run "move $1's steps could not be read: $JREPLY"
+  }
+  awk -v id="$ID" '$1 == id' "$tmp/jvalue" >"$tmp/state"
+}
+
+# manifest_of <n> <kind>: where move n's manifest of kind (precopy or final) is.
+manifest_of() { printf '/buckets/%s/.infrared-moves/%s/%s.%s.tsv' "$BUCKET" "$ID" "$1" "$2"; }
+
+# save_manifest <n> <kind> <file>: the manifest written; prints its SHA-256.
+save_manifest() {
+  put_manifest "$(manifest_of "$1" "$2")" "$3" || return 1
+  sha256sum <"$3" | cut -d' ' -f1
+}
+
+# load_manifest <n> <kind> <sha256> <out>: move n's manifest of kind into out,
+# only if its SHA-256 is the one its line records; else out is empty.
+load_manifest() {
+  : >"$4"
+  case "$3" in "" | -) return 1 ;; esac
+  get_object "$(manifest_of "$1" "$2")" "$tmp/manifest.got" || return 1
+  if [ "$(sha256sum <"$tmp/manifest.got" | cut -d' ' -f1)" != "$3" ]; then
+    log "move $1: its $2 manifest is not the one its line records, so none of it is trusted"
+    return 1
+  fi
+  cp "$tmp/manifest.got" "$4"
+}
+
+# manifests <n> <out>: what move n's manifests vouch for, a line a path: its
+# last verification's, else its last pre-copy's. Reads $tmp/state.
+manifests() {
+  load_manifest "$1" precopy "$(awk '$2 == "precopied" { h = $10 } END { print h }' "$tmp/state")" "$tmp/man.pre" || true
+  load_manifest "$1" final "$(awk '$2 == "verified" && NF >= 7 { h = $7 } END { print h }' "$tmp/state")" "$tmp/man.fin" || true
+  awk -F'\t' 'FILENAME == ARGV[1] { f[$1] = 1; print; next } !($1 in f)' "$tmp/man.fin" "$tmp/man.pre" | LC_ALL=C sort >"$2"
+}
+
+# vouch <manifest> <destination listing> <source listing>: each source file at
+# the destination with what a manifest line vouches for it, read with the
+# full listings: "<path>\t<size>\t<mtime>\t<mtimeNs>\t<source chunks>\t<dest
+# size>\t<dest mtime>\t<dest chunks>\t<sha256, or - when nothing vouches>". A
+# line vouches while the file is the same size and its destination entry's
+# chunks are the ones verified: a blob's data is then what its name says, and
+# another file's what its source's was, if its source's chunks are the same
+# too. A source file the destination lacks has "-" for its destination's.
+vouch() {
+  awk -F'\t' -v OFS='\t' -v man="$1" -v dst="$2" '
+    FILENAME == man { m[$1] = $0; next }
+    FILENAME == dst { d[$1] = $0; next }
+    { if (!($1 in d)) { print $1, $2, $3, $4, $5, "-", "-", "-", "-"; next }
+      split(d[$1], x, "\t"); h = "-"
+      if ($1 in m) { split(m[$1], y, "\t")
+        if (y[2] == $2 && x[2] == $2 && x[5] != "-" && y[7] == x[5] && ($1 ~ /^blobs\// || y[6] == $5)) h = y[5] }
+      print $1, $2, $3, $4, $5, x[2], x[3], x[5], h }' "$1" "$2" "$3"
+}
+
+# want_sha <path> <size>: the SHA-256 a copy of the source's file must have: a
+# blob's digest, from its name, else the source's own, read now.
+want_sha() {
+  local hs
+  case "$1" in
+    blobs/sha256/*) printf '%s' "${1#blobs/sha256/}" ;;
+    *) hs="$(hash_object "$SRC/$1" "$2")" || return 1; printf '%s' "${hs% *}" ;;
+  esac
+}
+
+# remove_files <dir> <list>: each path of list, below dir, deleted, file by
+# file, 100 a command; fails, saying why in REMOVE_WHY, if any is still there.
+REMOVE_WHY=""
+remove_files() {
+  local dir=${1%/} left
+  if ! safe_paths "$2"; then
+    REMOVE_WHY="$SAFE_WHY"
+    return 1
+  fi
+  awk -v d="$dir" 'NR % 100 == 1 { if (NR > 1) print line; line = "fs.rm" } { line = line " " d "/" $1 } END { if (NR) print line }' "$2" >"$tmp/rm"
+  weed_shell <"$tmp/rm" >"$tmp/rm.out" 2>&1 || true
+  walk "$dir" "$SCOPE" "$tmp/rm.after" || { REMOVE_WHY="$dir could not be listed"; return 1; }
+  left="$(awk -F'\t' 'FILENAME == ARGV[1] { gone[$1] = 1; next } ($1 in gone) { print $1; exit }' "$2" "$tmp/rm.after")"
+  if [ -n "$left" ]; then
+    REMOVE_WHY="$left is still there after its deletion: $(head -c 200 "$tmp/rm.out")"
+    return 1
+  fi
+}
+
+# remove_dirs <dir> [self]: its own folders that are empty, deepest first
+# (the filer refuses one that holds anything), and with self dir itself.
+remove_dirs() {
+  local d
+  walk "$1" "$SCOPE" "$tmp/dirs" || return 0
+  : >"$tmp/rmdir"
+  while IFS= read -r d <&3; do printf 'fs.rm %s/%s\n' "$1" "$d" >>"$tmp/rmdir"; done 3<"$tmp/dirs.dirs"
+  if [ "${2:-}" = self ]; then printf 'fs.rm %s\n' "$1" >>"$tmp/rmdir"; fi
+  if [ -s "$tmp/rmdir" ]; then weed_shell <"$tmp/rmdir" >/dev/null 2>&1 || true; fi
+}
+
+# precopy_move <n>: while Zot serves at the source, its blobs to the
+# destination: copied where it lacks them, given their source's time, and
+# verified, a blob a manifest vouches for read only if its entry changed;
+# this migration's copies of blobs Zot has deleted since removed, and any copy
+# that does not verify (its source untouched). Then the manifest of what is
+# verified, and precopied <at> <files> <bytes> <copied> <copied bytes>
+# <removed> <unverified> <manifest sha256> [what went wrong first].
+precopy_move() {
+  local n=$1 act p size mtime ns sfp dsize dmtime dfp sha r hd want first="" copied=0 cbytes=0 removed=0 files bytes total sum
+  if ! move "$n" || [ "$DEST" != empty ]; then
+    step "$n" "failed $(now) there is no move $n to an empty destination in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  state_lines "$n"
+  if grep -q '^[^ ]* deleted ' "$tmp/state"; then
+    step "$n" "failed $(now) its source is deleted already: nothing is copied for it again"
+    return 0
+  fi
+  # Written, and read back, before the first copy: the files at the
+  # destination after it are this migration's own.
+  step "$n" "precopying $(now)"
+  walk "$SRC" repository "$tmp/src" full || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if ! safe_paths "$tmp/src"; then
+    step "$n" "failed $(now) $SAFE_WHY"
+    return 0
+  fi
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  manifests "$n" "$tmp/man"
+  awk -F'\t' '$1 ~ /^blobs\//' "$tmp/src" >"$tmp/src.blobs"
+  awk -F'\t' '$1 ~ /^blobs\//' "$tmp/dst" >"$tmp/dst.blobs"
+  # Copied: each blob the destination lacks. Removed: each of this
+  # migration's copies whose blob is no longer at the source.
+  awk -F'\t' -v OFS='\t' -v dst="$tmp/dst.blobs" 'FILENAME == dst { d[$1] = 1; next }
+    { s[$1] = 1; if (!($1 in d)) print "copy", $1, $2 }
+    END { for (p in d) if (!(p in s)) print "remove", p, 0 }' "$tmp/dst.blobs" "$tmp/src.blobs" >"$tmp/plan"
+  awk -F'\t' '$1 == "remove" { print $2 }' "$tmp/plan" >"$tmp/gone"
+  if [ -s "$tmp/gone" ]; then
+    if ! remove_files "$DST" "$tmp/gone"; then
+      step "$n" "failed $(now) $REMOVE_WHY"
+      return 0
+    fi
+    removed=$(grep -c . "$tmp/gone")
+  fi
+  while IFS=$'\t' read -r act p size <&3; do
+    [ "$act" = copy ] || continue
+    if ! r="$(copy_object "$SRC/$p" "$DST/$p" "$size")"; then
+      [ -n "$first" ] || first="$p could not be copied: HTTP $(head -c 100 "$tmp/copy.out" | tr -d '\n') $(head -c 100 "$tmp/copy.err")"
+      continue
+    fi
+    if [ "$r" = copied ]; then
+      copied=$((copied + 1))
+      cbytes=$((cbytes + size))
+    fi
+  done 3<"$tmp/plan"
+  # Each blob at the destination takes its source's time, as Zot takes a
+  # manifest's as its push time.
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  awk -F'\t' '$1 ~ /^blobs\//' "$tmp/dst" >"$tmp/dst.blobs"
+  join_tsv "$tmp/src.blobs" "$tmp/dst.blobs" | awk -F'\t' -v OFS='\t' '$5 != "-" && $6 != $3 { print $1, $3, $4 }' >"$tmp/times"
+  if [ -s "$tmp/times" ] && ! set_times "$DST" "$tmp/times"; then
+    step "$n" "failed $(now) the copies' modification times could not be set: $SET_TIMES_WHY"
+    return 0
+  fi
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  awk -F'\t' '$1 ~ /^blobs\//' "$tmp/dst" >"$tmp/dst.blobs"
+  vouch "$tmp/man" "$tmp/dst.blobs" "$tmp/src.blobs" >"$tmp/check"
+  : >"$tmp/man.new"
+  : >"$tmp/bad"
+  while IFS=$'\t' read -r p size mtime ns sfp dsize dmtime dfp sha <&3; do
+    [ "$dsize" != - ] || continue
+    if [ "$dsize" != "$size" ] || [ "$dmtime" != "$mtime" ]; then
+      printf '%s\n' "$p" >>"$tmp/bad"
+      [ -n "$first" ] || first="$p at the destination is $dsize bytes from $dmtime, the source's $size from $mtime"
+      continue
+    fi
+    if [ "$sha" = - ]; then
+      if ! hd="$(hash_object "$DST/$p" "$dsize")" || ! want="$(want_sha "$p" "$size")"; then
+        [ -n "$first" ] || first="$p could not be read: $(head -c 200 "$tmp/hash.err")"
+        continue
+      fi
+      if [ "${hd% *}" != "$want" ] || [ "${hd#* }" != "$size" ]; then
+        printf '%s\n' "$p" >>"$tmp/bad"
+        [ -n "$first" ] || first="$p at the destination is SHA-256 and bytes ${hd% *} ${hd#* }, not $want $size"
+        continue
+      fi
+      sha="${hd% *}"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$size" "$mtime" "$ns" "$sha" "$sfp" "$dfp" >>"$tmp/man.new"
+  done 3<"$tmp/check"
+  # A copy that does not verify is this migration's, and its source is there:
+  # it goes, and the next pre-copy copies it again.
+  if [ -s "$tmp/bad" ]; then
+    if ! remove_files "$DST" "$tmp/bad"; then
+      step "$n" "failed $(now) $REMOVE_WHY"
+      return 0
+    fi
+    removed=$((removed + $(grep -c . "$tmp/bad")))
+  fi
+  LC_ALL=C sort -o "$tmp/man.new" "$tmp/man.new"
+  if ! sum="$(save_manifest "$n" precopy "$tmp/man.new")"; then
+    step "$n" "failed $(now) its manifest could not be written: $(head -c 200 "$tmp/put.err" "$tmp/put.out" 2>/dev/null | tr '\n' ' ')"
+    return 0
+  fi
+  read -r files bytes <<<"$(counts "$tmp/man.new")"
+  total="$(grep -c . "$tmp/src.blobs" || true)"
+  step "$n" "precopied $(now) $files $bytes $copied $cbytes $removed $((total - files)) $sum${first:+ $first}"
+}
+
+# final_move <n>: with Zot stopped, the destination made the source: what it
+# lacks copied, a copy that is not its source's now removed and copied again,
+# this migration's copies of files no longer at the source removed, every
+# time set; then every file verified as verify_move does, a SHA-256 a
+# manifest vouches for not read again. Then copied, and verified with the
+# manifest's SHA-256 after the listing's.
+final_move() {
+  local n=$1 act p size mtime ns sfp dsize dmtime dfp sha r hd want files bytes extra listing sum
+  if ! move "$n" || [ "$DEST" != empty ]; then
+    step "$n" "failed $(now) there is no move $n to an empty destination in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  state_lines "$n"
+  if grep -q '^[^ ]* deleted ' "$tmp/state"; then
+    step "$n" "failed $(now) its source is deleted already: nothing is copied for it again"
+    return 0
+  fi
+  step "$n" "copying $(now)"
+  walk "$SRC" repository "$tmp/src" full || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if ! safe_paths "$tmp/src"; then
+    step "$n" "failed $(now) $SAFE_WHY"
+    return 0
+  fi
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  manifests "$n" "$tmp/man"
+  # A file at the destination that no manifest vouches for is read: kept if
+  # it is the source's, else removed and copied again.
+  vouch "$tmp/man" "$tmp/dst" "$tmp/src" >"$tmp/check"
+  : >"$tmp/fresh"
+  : >"$tmp/gone"
+  : >"$tmp/tocopy"
+  while IFS=$'\t' read -r p size mtime ns sfp dsize dmtime dfp sha <&3; do
+    if [ "$dsize" = - ]; then
+      printf '%s\t%s\n' "$p" "$size" >>"$tmp/tocopy"
+      continue
+    fi
+    [ "$sha" = - ] || continue
+    if ! hd="$(hash_object "$DST/$p" "$dsize")" || ! want="$(want_sha "$p" "$size")"; then
+      step "$n" "failed $(now) $p could not be read: $(head -c 200 "$tmp/hash.err")"
+      return 0
+    fi
+    if [ "${hd% *}" = "$want" ] && [ "${hd#* }" = "$size" ]; then
+      printf '%s\t%s\t%s\n' "$p" "${hd% *}" "$dfp" >>"$tmp/fresh"
+    else
+      printf '%s\n' "$p" >>"$tmp/gone"
+      printf '%s\t%s\n' "$p" "$size" >>"$tmp/tocopy"
+    fi
+  done 3<"$tmp/check"
+  # This migration's copies of files the source no longer holds.
+  join_tsv "$tmp/dst" "$tmp/src" | awk -F'\t' '$5 == "-" { print $1 }' >>"$tmp/gone"
+  if [ -s "$tmp/gone" ] && ! remove_files "$DST" "$tmp/gone"; then
+    step "$n" "failed $(now) $REMOVE_WHY"
+    return 0
+  fi
+  while IFS=$'\t' read -r p size <&3; do
+    if ! r="$(copy_object "$SRC/$p" "$DST/$p" "$size")"; then
+      step "$n" "failed $(now) $p could not be copied: HTTP $(head -c 100 "$tmp/copy.out" | tr -d '\n') $(head -c 100 "$tmp/copy.err")"
+      return 0
+    fi
+    case "$r" in
+      gone)
+        step "$n" "failed $(now) $p is no longer at the source"
+        return 0
+        ;;
+      exists)
+        step "$n" "mismatch $(now) $p is at the destination again, and is not written over"
+        return 0
+        ;;
+    esac
+  done 3<"$tmp/tocopy"
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  join_tsv "$tmp/src" "$tmp/dst" | awk -F'\t' -v OFS='\t' '$5 != "-" && $6 != $3 { print $1, $3, $4 }' >"$tmp/times"
+  if [ -s "$tmp/times" ] && ! set_times "$DST" "$tmp/times"; then
+    step "$n" "failed $(now) the copies' modification times could not be set: $SET_TIMES_WHY"
+    return 0
+  fi
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  join_tsv "$tmp/src" "$tmp/dst" | awk -F'\t' -v OFS='\t' '$5 != "-" { print $1, $2 }' >"$tmp/held.copies"
+  read -r files bytes <<<"$(counts "$tmp/held.copies")"
+  step "$n" "copied $(now) $files $bytes"
+  # The verification: as verify_move's, every file of the source the same at
+  # the destination, nothing else there, a SHA-256 read where nothing
+  # vouches for it.
+  extra="$(join_tsv "$tmp/dst" "$tmp/src" | awk -F'\t' '$5 == "-" { print $1; exit }')"
+  if [ -n "$extra" ]; then
+    step "$n" "mismatch $(now) the destination holds $extra, which the source does not"
+    return 0
+  fi
+  vouch "$tmp/man" "$tmp/dst" "$tmp/src" | awk -F'\t' -v OFS='\t' -v fresh="$tmp/fresh" '
+    FILENAME == fresh { f[$1] = $2 "\t" $3; next }
+    { if ($9 == "-" && ($1 in f)) { split(f[$1], z, "\t"); if (z[2] == $8) $9 = z[1] } print }' "$tmp/fresh" - >"$tmp/check"
+  : >"$tmp/listing"
+  : >"$tmp/man.new"
+  while IFS=$'\t' read -r p size mtime ns sfp dsize dmtime dfp sha <&3; do
+    if [ "$dsize" = - ]; then
+      step "$n" "mismatch $(now) $p is not at the destination"
+      return 0
+    fi
+    if [ "$dsize" != "$size" ]; then
+      step "$n" "mismatch $(now) $p is $size bytes at the source and $dsize at the destination"
+      return 0
+    fi
+    if [ "$dmtime" != "$mtime" ]; then
+      step "$n" "mismatch $(now) $p was modified at $mtime at the source and $dmtime at the destination"
+      return 0
+    fi
+    if [ "$sha" = - ]; then
+      if ! hd="$(hash_object "$DST/$p" "$dsize")" || ! want="$(want_sha "$p" "$size")"; then
+        step "$n" "failed $(now) $p could not be read: $(head -c 200 "$tmp/hash.err")"
+        return 0
+      fi
+      if [ "${hd% *}" != "$want" ] || [ "${hd#* }" != "$size" ]; then
+        step "$n" "mismatch $(now) $p differs: SHA-256 and bytes ${hd% *} ${hd#* } at the destination, $want $size wanted"
+        return 0
+      fi
+      sha="${hd% *}"
+    fi
+    case "$p" in
+      blobs/sha256/*)
+        if [ "$sha" != "${p#blobs/sha256/}" ]; then
+          step "$n" "mismatch $(now) $p holds content of SHA-256 $sha, not its name"
+          return 0
+        fi
+        ;;
+    esac
+    printf '%s %s %s %s\n' "$p" "$size" "$sha" "$mtime" >>"$tmp/listing"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$size" "$mtime" "$ns" "$sha" "$sfp" "$dfp" >>"$tmp/man.new"
+  done 3<"$tmp/check"
+  read -r files bytes <<<"$(counts "$tmp/src")"
+  if [ "$(grep -c . "$tmp/listing" || true)" != "$files" ]; then
+    step "$n" "mismatch $(now) $(grep -c . "$tmp/listing" || true) of the source's $files files were compared"
+    return 0
+  fi
+  listing="$(LC_ALL=C sort "$tmp/listing" | sha256sum | cut -d' ' -f1)"
+  LC_ALL=C sort -o "$tmp/man.new" "$tmp/man.new"
+  if ! sum="$(save_manifest "$n" final "$tmp/man.new")"; then
+    step "$n" "failed $(now) its manifest could not be written: $(head -c 200 "$tmp/put.err" "$tmp/put.out" 2>/dev/null | tr '\n' ' ')"
+    return 0
+  fi
+  step "$n" "verified $(now) $files $bytes $listing $sum"
+}
+
+# marks <n>: after move n's last verified line, whether its source's
+# oci-layout is deleted now (1), may be (2: an unmark began and did not say
+# how it ended) or not (0), and the first step there that
+# undoes the verification ("-" for none: unmarked, marked, and the failed or
+# mismatched attempts of unmark, mark and retire, which change nothing); "none"
+# with no verified line.
+marks() {
+  awk '$2 == "verified" { v = 1; u = 0; bad = "-"; next }
+    v && $2 == "unmarking" { u = 2; next }
+    v && $2 == "unmarked" { u = ($4 == "0" ? 0 : 1); next }
+    v && $2 == "marked" { u = 0; next }
+    v && ($2 == "failed" || $2 == "mismatch") { next }
+    v && bad == "-" { bad = $2 }
+    END { if (!v) print "0 none"; else print u, bad }' "$tmp/state"
+}
+
+# unverified <what marks said>: why a move is not verified, in words.
+unverified() {
+  if [ "$1" = none ]; then echo "it is not verified"; else echo "its last verification is followed by $1"; fi
+}
+
+# layout_of <dir> <out>: the entry of oci-layout directly in dir, if any, as
+# "<size>\t<mtime>\t<mtimeNs>".
+layout_of() {
+  list_dir "$1" "$tmp/top" || return 1
+  jq -r 'select(.name == "oci-layout" and ((.isDirectory // false) | not))
+    | [(.attributes.fileSize // "0"), (.attributes.mtime // "0"), ((.attributes.mtimeNs // 0) | tostring)] | @tsv' "$tmp/top" >"$2"
+}
+
+# unmark_move <n>: with Zot stopped, a verified move's oci-layout at the
+# source deleted, its copy at the destination being the same, so Zot at a
+# root that holds the old one does not take the old copy for a repository.
+unmark_move() {
+  local n=$1 u bad hs hd
+  if ! move "$n"; then
+    step "$n" "failed $(now) there is no move $n in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  state_lines "$n"
+  read -r u bad <<<"$(marks)"
+  if [ "$bad" != - ]; then
+    step "$n" "failed $(now) $(unverified "$bad"), so its oci-layout stays"
+    return 0
+  fi
+  if [ "$u" = 1 ]; then
+    log "move $n: its oci-layout is deleted already"
+    return 0
+  fi
+  layout_of "$SRC" "$tmp/lay.src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ ! -s "$tmp/lay.src" ]; then
+    # None at the source: deleted by a run that stopped before it could say
+    # so (its unmarking line), or never there, when Zot takes no copy for a
+    # repository anyway.
+    if [ "$u" = 2 ]; then step "$n" "unmarked $(now) 1"; else step "$n" "unmarked $(now) 0"; fi
+    return 0
+  fi
+  layout_of "$DST" "$tmp/lay.dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ ! -s "$tmp/lay.dst" ] || [ "$(cut -f1,2 "$tmp/lay.src")" != "$(cut -f1,2 "$tmp/lay.dst")" ] \
+    || ! hs="$(hash_object "$SRC/oci-layout" 0)" || ! hd="$(hash_object "$DST/oci-layout" 0)" || [ "$hs" != "$hd" ]; then
+    step "$n" "failed $(now) the destination's oci-layout is not the source's, so the source's stays"
+    return 0
+  fi
+  # Recorded, and read back, before the deletion: a run that stops after it
+  # leaves a line that says the oci-layout may be gone.
+  step "$n" "unmarking $(now)"
+  printf 'fs.rm %s/oci-layout\n' "$SRC" | weed_shell >"$tmp/rm.out" 2>&1 || true
+  layout_of "$SRC" "$tmp/lay.src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ -s "$tmp/lay.src" ]; then
+    step "$n" "failed $(now) its oci-layout is still at the source after its deletion: $(head -c 200 "$tmp/rm.out")"
+    return 0
+  fi
+  step "$n" "unmarked $(now) 1"
+}
+
+# mark_move <n>: a window undone: the oci-layout unmark deleted copied back
+# from the destination, never over a file, given its time, and verified.
+mark_move() {
+  local n=$1 u bad r hs hd
+  if ! move "$n"; then
+    step "$n" "failed $(now) there is no move $n in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  state_lines "$n"
+  read -r u bad <<<"$(marks)"
+  if [ "$u" = 0 ]; then
+    # Never deleted, or copied back already.
+    log "move $n: its oci-layout is at the source, or never was"
+    return 0
+  fi
+  layout_of "$DST" "$tmp/lay.dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ ! -s "$tmp/lay.dst" ]; then
+    step "$n" "failed $(now) the destination holds no oci-layout to copy back"
+    return 0
+  fi
+  layout_of "$SRC" "$tmp/lay.src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ ! -s "$tmp/lay.src" ]; then
+    if ! r="$(copy_object "$DST/oci-layout" "$SRC/oci-layout" "$(cut -f1 "$tmp/lay.dst")")" || [ "$r" = gone ]; then
+      step "$n" "failed $(now) oci-layout could not be copied back: HTTP $(head -c 100 "$tmp/copy.out" | tr -d '\n') $(head -c 100 "$tmp/copy.err")"
+      return 0
+    fi
+    printf 'oci-layout\t%s\t%s\n' "$(cut -f2 "$tmp/lay.dst")" "$(cut -f3 "$tmp/lay.dst")" >"$tmp/times"
+    if ! set_times "$SRC" "$tmp/times"; then
+      step "$n" "failed $(now) the oci-layout copied back could not take its time: $SET_TIMES_WHY"
+      return 0
+    fi
+    layout_of "$SRC" "$tmp/lay.src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  fi
+  if [ "$(cut -f1,2 "$tmp/lay.src")" != "$(cut -f1,2 "$tmp/lay.dst")" ] || ! hs="$(hash_object "$SRC/oci-layout" 0)" \
+    || ! hd="$(hash_object "$DST/oci-layout" 0)" || [ "$hs" != "$hd" ]; then
+    step "$n" "mismatch $(now) the oci-layout at the source is not the destination's"
+    return 0
+  fi
+  step "$n" "marked $(now)"
+}
+
+# retire_move <n>: with Zot at the destination, a verified move's source
+# deleted, file by file, then its empty folders: only while the source is
+# what its verification read (the final manifest: the same files, sizes,
+# times and chunks, but the oci-layout unmark deleted) and the destination
+# holds index.json and every verified blob as verified or, deleted by Zot
+# since, not at all. Then deleted <at> <files> <blobs Zot deleted since>.
+retire_move() {
+  local n=$1 u bad vsum first changed collected removed
+  if ! move "$n"; then
+    step "$n" "failed $(now) there is no move $n in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  state_lines "$n"
+  if [ "$(awk '{ s = $2 } END { print s }' "$tmp/state")" = deleted ]; then
+    log "move $n: its source is deleted already"
+    return 0
+  fi
+  read -r u bad <<<"$(marks)"
+  if [ "$bad" != - ]; then
+    step "$n" "failed $(now) $(unverified "$bad"), so nothing of it is deleted"
+    return 0
+  fi
+  vsum="$(awk '$2 == "verified" && NF >= 7 { h = $7 } END { print h }' "$tmp/state")"
+  if ! load_manifest "$n" final "$vsum" "$tmp/man"; then
+    step "$n" "failed $(now) its verification's manifest is missing or not the one recorded, so nothing of it is deleted"
+    return 0
+  fi
+  walk "$SRC" repository "$tmp/src" full || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  # Every file still at the source is as verified: the same size, time and
+  # chunks, and no oci-layout once unmark deleted it. One that is gone is an
+  # earlier retire's, which stopped before it could record so.
+  awk -F'\t' -v OFS='\t' -v u="$u" '!(u != 0 && $1 == "oci-layout") { print $1, $2, $3, $6 }' "$tmp/man" | LC_ALL=C sort >"$tmp/want.src"
+  awk -F'\t' -v OFS='\t' '{ print $1, $2, $3, $5 }' "$tmp/src" | LC_ALL=C sort >"$tmp/got.src"
+  first="$(awk -F'\t' 'FILENAME == ARGV[1] { w[$1] = $0; next } (w[$1] != $0) { print $1; exit }' "$tmp/want.src" "$tmp/got.src")"
+  if [ -n "$first" ]; then
+    step "$n" "failed $(now) its source is not what was verified, $first first: nothing of it is deleted"
+    return 0
+  fi
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  if ! awk -F'\t' '$1 == "index.json" { f = 1 } END { exit !f }' "$tmp/dst"; then
+    step "$n" "failed $(now) the destination holds no index.json: nothing of the source is deleted"
+    return 0
+  fi
+  read -r changed collected <<<"$(awk -F'\t' -v dst="$tmp/dst" 'FILENAME == dst { d[$1] = $2 "\t" $5; next }
+      $1 ~ /^blobs\// { if ($1 in d) { if (d[$1] != $2 "\t" $7 && c == "") c = $1 } else k++ }
+      END { print (c == "" ? "-" : c), k + 0 }' "$tmp/dst" "$tmp/man")"
+  if [ "$changed" != - ]; then
+    step "$n" "failed $(now) $changed changed at the destination since its verification: nothing of the source is deleted"
+    return 0
+  fi
+  removed="$(grep -c . "$tmp/src" || true)"
+  if [ "$removed" -gt 0 ]; then
+    if ! remove_files "$SRC" "$tmp/src"; then
+      step "$n" "failed $(now) $REMOVE_WHY"
+      return 0
+    fi
+    remove_dirs "$SRC" self
+  fi
+  step "$n" "deleted $(now) $removed $collected"
+}
+
+# discard_move <n> [own]: a move turned back, its source whole and never
+# deleted: this migration's copies at the destination removed, each only
+# where the source holds the same path at the same size or a manifest line
+# still vouches for it, or every one with own (the operator's word that Zot
+# never served the destination); anything else stays, and is named. Then the
+# empty folders. discarded <at> <removed> <left> [the first left].
+discard_move() {
+  local n=$1 own=${2:-} u bad removed left firstleft
+  if ! move "$n" || [ "$DEST" != empty ]; then
+    step "$n" "failed $(now) there is no move $n to an empty destination in the journal, or its folders lie one in the other"
+    return 0
+  fi
+  state_lines "$n"
+  if grep -q '^[^ ]* deleted ' "$tmp/state"; then
+    step "$n" "failed $(now) its source is deleted: its copy is the only one, and stays"
+    return 0
+  fi
+  read -r u bad <<<"$(marks)"
+  if [ "$u" != 0 ]; then
+    step "$n" "failed $(now) its source's oci-layout is not back yet (mark), so its copy stays"
+    return 0
+  fi
+  walk "$SRC" repository "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  # The source whole, or gone altogether: a repository Zot deleted, whose
+  # copies are of nothing it keeps.
+  if [ -s "$tmp/src" ] && ! awk -F'\t' '$1 == "index.json" { i = 1 } $1 == "oci-layout" { o = 1 } END { exit !(i && o) }' "$tmp/src"; then
+    step "$n" "failed $(now) its source is not whole (index.json and oci-layout), so its copy stays"
+    return 0
+  fi
+  walk "$DST" repository "$tmp/dst" full || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+  manifests "$n" "$tmp/man"
+  awk -F'\t' -v src="$tmp/src" -v man="$tmp/man" -v own="$own" '
+    FILENAME == src { s[$1] = $2; next }
+    FILENAME == man { m[$1] = $2 "\t" $7; next }
+    { if (own == "own" || ($1 in s && s[$1] == $2) || ($1 in m && $5 != "-" && m[$1] == $2 "\t" $5)) print "gone\t" $1; else print "left\t" $1 }' \
+    "$tmp/src" "$tmp/man" "$tmp/dst" >"$tmp/plan"
+  awk -F'\t' '$1 == "gone" { print $2 }' "$tmp/plan" >"$tmp/gone"
+  removed="$(grep -c . "$tmp/gone" || true)"
+  left="$(grep -c '^left' "$tmp/plan" || true)"
+  firstleft="$(awk -F'\t' '$1 == "left" { print $2; exit }' "$tmp/plan")"
+  if [ "$removed" -gt 0 ] && ! remove_files "$DST" "$tmp/gone"; then
+    step "$n" "failed $(now) $REMOVE_WHY"
+    return 0
+  fi
+  remove_dirs "$DST" self
+  step "$n" "discarded $(now) $removed $left${firstleft:+ $firstleft}"
+}
+
 # free_bytes: what the store takes before a volume server turns its volumes
 # read-only, every copy counted: the least, over the volume servers, of a
 # server's free disk less a tenth of its disk, times the servers, divided by
@@ -760,17 +1410,21 @@ find_repositories() {
   done
 }
 
-# measure: each move's own files at its source and destination, the free
-# space, and the repositories found.
+# measure [delta]: each move's own files at its source and destination, the
+# free space, and the repositories found; with delta, each registry move's
+# delta too: "delta <n> <files> <bytes>", its source's files that no manifest
+# line vouches for as they are now, and every file of it that is not a blob,
+# which a final copies or reads again.
 measure() {
-  local n free sf sb df db
+  local n free sf sb df db delta=${1:-} full=""
+  if [ "$delta" = delta ] && [ "$SCOPE" = repository ]; then full=full; fi
   free="$(free_bytes)" || stop_run "the volume servers' free space could not be read: $(head -c 200 "$tmp/topology.err" "$tmp/status.err" 2>/dev/null | tr '\n' ' ')"
   {
     printf 'want %s\nat %s\nfree %s\n' "$WANT_HASH" "$(now)" "$free"
     while IFS=' ' read -r n _ <&4; do
       move "$n" || stop_run "move $n's folders lie one in the other"
-      walk "$SRC" "$SCOPE" "$tmp/src" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
-      walk "$DST" "$SCOPE" "$tmp/dst" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
+      walk "$SRC" "$SCOPE" "$tmp/src" "$full" || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+      walk "$DST" "$SCOPE" "$tmp/dst" "$full" || stop_run "$DST could not be listed: $(head -c 200 "$tmp/page.err")"
       read -r sf sb <<<"$(counts "$tmp/src")"
       if [ "$SCOPE" = tree ]; then
         # A tree's destination is shared: its files at the source's paths.
@@ -780,6 +1434,12 @@ measure() {
         read -r df db <<<"$(counts "$tmp/dst")"
       fi
       printf 'entry %s %s %s %s %s\n' "$n" "$sf" "$sb" "$df" "$db"
+      if [ -n "$full" ]; then
+        state_lines "$n"
+        manifests "$n" "$tmp/man"
+        vouch "$tmp/man" "$tmp/dst" "$tmp/src" \
+          | awk -F'\t' -v n="$n" '$9 == "-" || $1 !~ /^blobs\// { f++; b += $2 } END { printf "delta %s %d %.0f\n", n, f, b }'
+      fi
     done 4<"$tmp/moves"
     if [ "$SCOPE" = repository ]; then
       find_repositories || stop_run "the repositories below $FROM could not be listed: $(head -c 200 "$tmp/page.err")"
@@ -840,9 +1500,27 @@ apply_moves() {
     # shellcheck disable=SC2086 # the want's fields
     set -- $want_line
     case "$1:${2:-}" in
+      precopy:* | final:* | unmark:* | mark:* | retire:* | discard:* | measure:delta)
+        # The online pre-copy's wants: the registry's repositories alone.
+        [ "$SCOPE" = repository ] || stop_run "the journal wants \"$want_line\" of a $SCOPE move, which only the registry's take"
+        ;;
+    esac
+    case "$1:${2:-}" in
       measure:) measure ;;
+      measure:delta) measure delta ;;
       copy:[1-9]*) copy_move "$2" ;;
       delete:[1-9]*) delete_move "$2" ;;
+      precopy:[1-9]*) precopy_move "$2" ;;
+      final:[1-9]*) final_move "$2" ;;
+      unmark:[1-9]*) unmark_move "$2" ;;
+      mark:[1-9]*) mark_move "$2" ;;
+      retire:[1-9]*) retire_move "$2" ;;
+      discard:[1-9]*)
+        case "${3:-}" in
+          "" | own) discard_move "$2" "${3:-}" ;;
+          *) stop_run "the journal wants \"$want_line\", which this applier does not take" ;;
+        esac
+        ;;
       vacuum:)
         if ! printf 'lock\nvolume.vacuum -collection=%s -garbageThreshold=%s\nunlock\n' "$BUCKET" "$VACUUM_GARBAGE" \
           | weed_shell >"$tmp/vacuum.out" 2>&1; then
