@@ -436,6 +436,9 @@ yq -p json -o json '. + {"AgentPool": {"Workers": 4, "CPU": "2500m", "Memory": "
     "RequestCPU": "625m", "RequestMemory": "2304Mi", "NodeSelector": {"darkshift.io/pool": "ci"},
     "Tolerations": [{"Key": "darkshift.io/pool", "Operator": "Equal", "Value": "ci", "Effect": "NoSchedule"}]}}' \
   "$work/substrate.json" >"$work/agents.json"
+# The same pool elastic (runner.actors.maxWorkers): the operator sizes it from
+# 0 to 10, from 2 workers until it first does.
+yq -p json -o json '.AgentPool.Workers = 2 | .AgentPool.MaxWorkers = 10' "$work/agents.json" >"$work/agents-elastic.json"
 # The code index on: Substrate's Data with the code index's image among
 # Infrared's own (INFRARED_IMAGES, code-index), as the Infrared chart hands it
 # over with codeIndex.enabled, the one install's shape with the code index; the
@@ -523,6 +526,7 @@ variants=(
   "substrate demo-su k3s $zot_registry -data $work/substrate.json"
   "substrate-off demo-so k3s $zot_registry -data $work/substrate-off.json"
   "agents demo-ag k3s $zot_registry -data $work/agents.json -pull-secret ghcr-pull"
+  "agents-elastic demo-ae k3s $zot_registry -data $work/agents-elastic.json -pull-secret ghcr-pull"
   "substrate-plain demo-ss k3s - -stores -registry $zot_registry -substrate-capable"
   "substrate-pull demo-sl k3s - -stores -registry $zot_registry -substrate-capable -pull-secret ghcr-pull"
   "registry-token demo-rt k3s $zot_registry -data $work/registry-token.json"
@@ -2253,6 +2257,23 @@ for v in "${variants[@]}"; do
         && [ "$atelet_tol" = "ate.dev/sandboxClass=:NoSchedule cloud.google.com/compute-class=:NoSchedule darkshift.io/pool=ci:NoSchedule" ] \
         && ok "$variant: the WorkerPool agents: $(jq -r .Workers <<<"$agent_pool") gVisor workers of $want_image on the pool's nodes, pulling as agents-worker, and atelet tolerating the pool's taint" \
         || bad "$variant: the agents' WorkerPool or atelet's tolerations are wrong"
+      # Elastic (MaxWorkers): the Application leaves the pool's replicas to
+      # the operator, ignored and kept on a sync, and no worker pod is the
+      # cluster autoscaler's to evict. Fixed: neither, as before.
+      app="$reg/components/substrate-actors.yaml"
+      ignored="$(line "$app" '.spec.ignoreDifferences[]? | .group + "/" + .kind + " " + .namespace + "/" + .name + " " + (.jsonPointers | join(","))')"
+      respects="$(line "$app" '.spec.syncPolicy.syncOptions[] | select(. == "RespectIgnoreDifferences=true")')"
+      evict="$(line "$sa" "$pool | .spec.template.annotations[\"cluster-autoscaler.kubernetes.io/safe-to-evict\"] // \"\"")"
+      if [ "$(jq -r '.MaxWorkers // 0' <<<"$agent_pool")" -gt 0 ]; then
+        [ "$ignored" = "ate.dev/WorkerPool ate-workers/agents /spec/replicas" ] && [ "$respects" = "RespectIgnoreDifferences=true" ] \
+          && [ "$evict" = false ] \
+          && ok "$variant: the WorkerPool agents elastic: its replicas the operator's (ignored, kept on a sync), from $(jq -r .Workers <<<"$agent_pool") until it sizes them, and its workers not the autoscaler's to evict" \
+          || bad "$variant: the elastic agents' WorkerPool: ignoreDifferences '$ignored', '$respects', safe-to-evict '$evict'"
+      else
+        [ -z "$ignored" ] && [ -z "$respects" ] && [ -z "$evict" ] \
+          && ok "$variant: the WorkerPool agents fixed: its replicas Argo CD's, as before" \
+          || bad "$variant: a fixed agents' WorkerPool with an elastic one's ignoreDifferences '$ignored', '$respects' or safe-to-evict '$evict'"
+      fi
     fi
   else
     left="$(for f in $sub_files; do holds_objects "$f" && echo "$f"; done || true)"

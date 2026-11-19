@@ -53,6 +53,11 @@ ns="$(k get deploy -A -l app.kubernetes.io/component=operator,app.kubernetes.io/
 runner="$(k -n "$ns" get deploy infrared-operator -o json | jq -r '.spec.template.spec.containers[0].env[] | select(.name == "INFRARED_RUNNER_IMAGE") | .value')"
 grep -qE '^[^@ ]+@sha256:[0-9a-f]{64}$' <<<"$runner" || die "the operator's runner image is not pinned by digest: $runner"
 [ -n "$(k -n ate-workers get workerpools.ate.dev agents -o name 2>/dev/null)" ] || die "no WorkerPool agents on $CTX: turn the chart's runner.actors on first"
+# An elastic pool (runner.actors.maxWorkers) at a floor of none has no worker
+# for the check's actor: one by hand, which the operator takes back once it
+# has held no actor for five minutes.
+[ "$(k -n ate-workers get workerpools.ate.dev agents -o jsonpath='{.status.readyReplicas}')" -gt 0 ] 2>/dev/null \
+  || die "the WorkerPool agents on $CTX has no ready worker: kubectl --context $CTX -n ate-workers scale workerpools.ate.dev agents --replicas=1, wait for it, then run this again"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 atespace="${CLEANUP:-actor-check-$stamp}"
