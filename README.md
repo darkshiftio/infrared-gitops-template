@@ -98,7 +98,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.RegistryPaused` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts is in its phases `Pausing`, `Copying` or `Rooting` (ADR 0087 D7): with `.Stores` and `.Registry`, Zot's Application renders `replicaCount: 0`, so no Zot process reads or writes the bucket while its files are copied, verified and deleted, and nothing else changes |
 | `.StorePaths` | absent or `false`, `true` | the operator's `INFRARED_STORES_POLICIES`, the Infrared chart's `stores.policies.enabled` (ADR 0087 D10): with `.Stores`, the stores' applier, the CronJob `stores/seaweedfs-paths`, which applies the path rules the operator writes to `stores/infrared-store-paths`, daily and in each Job the operator starts from it (see "The stores' applier") |
 | `.StoresMigration` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts runs (the Installation's `status.storage.migration` has a phase other than `Done`) or another move it drives through the journal `stores/infrared-store-moves`: the migration starts the applier's Jobs from the CronJob by its name, so with `.Stores` the CronJob renders even without `.StorePaths`, its own schedule suspended, so only the operator's Jobs run while files move |
-| `.AgentPool` | absent, or `{Workers, CPU, Memory, RequestCPU, RequestMemory, NodeSelector, Tolerations}` | the operator's, from the Infrared chart's `runner.actors` (`INFRARED_AGENT_ACTORS`, on) and `runner.placement` (infrared-docs-internal ADR 0089): with Agent Substrate (`.Stores`, `.Registry`, `.SubstrateCapable`), the WorkerPool `agents` in `ate-workers`, where an org's agent steps run as actors: `Workers` warm gVisor workers, each with `CPU` and `Memory` at its limits and `RequestCPU` and `RequestMemory` as its requests, on the nodes `NodeSelector` picks with `Tolerations`, which atelet then tolerates too (see "The agents' WorkerPool"). Absent renders as before the field existed; `hack/render` refuses 0 or more than 64 workers, a size that is no quantity, a selector or toleration Kubernetes would not take |
+| `.AgentPool` | absent, or `{Workers, MinWorkers, MaxWorkers, CPU, Memory, RequestCPU, RequestMemory, NodeSelector, Tolerations}` | the operator's, from the Infrared chart's `runner.actors` (`INFRARED_AGENT_ACTORS`, on) and `runner.placement` (infrared-docs-internal ADR 0089): with Agent Substrate (`.Stores`, `.Registry`, `.SubstrateCapable`), the WorkerPool `agents` in `ate-workers`, where an org's agent steps run as actors: `Workers` warm gVisor workers, each with `CPU` and `Memory` at its limits and `RequestCPU` and `RequestMemory` as its requests, on the nodes `NodeSelector` picks with `Tolerations`, which atelet then tolerates too (see "The agents' WorkerPool"). `MaxWorkers` above 0 (`runner.actors.maxWorkers`) makes it elastic: the operator sets its replicas from `MinWorkers` to `MaxWorkers`, `Workers` is its size until it first does, and the Application leaves the replicas to it. Absent renders as before the field existed, and so do `MinWorkers` and `MaxWorkers` at 0, left out of the data; `hack/render` refuses 0 or more than 64 workers for a fixed pool, a floor not under a ceiling of at most 64 or workers outside them for an elastic one, a size that is no quantity, a selector or toleration Kubernetes would not take |
 
 The operator's JSON uses camelCase names for the older fields (`clusterName`,
 …) and the Go names for the newer ones (`Edge`, `PlatformDomain`, …);
@@ -1240,6 +1240,19 @@ this renders and atelet keeps upstream's tolerations alone.
 
 Warm workers cost what they keep up: on a node pool that scales to zero, at least one node stays up while the pool
 names any worker.
+
+With `.AgentPool.MaxWorkers` above 0 (the chart's `runner.actors.maxWorkers`), the pool is elastic: Infrared's operator
+sets its replicas from the agent steps that hold or wait for an actor, from `.AgentPool.MinWorkers` to
+`.AgentPool.MaxWorkers`, through the WorkerPool's `scale` subresource, so the node pool scales with the steps, down to
+none. A WorkerPool's replicas are required, so the template still renders them, at `.AgentPool.Workers`, the pool's
+size until the operator first sets it; the Application `substrate-actors` then ignores `/spec/replicas` of the
+WorkerPool `agents` and respects that on a sync (`ignoreDifferences`, `RespectIgnoreDifferences=true`), and the
+operator sizes the pool only while the live Application says so, so it never fights a template from before. The
+operator removes only a worker that holds no actor, drained in Substrate first, and every worker pod carries
+`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, so the cluster autoscaler never stops a step to pack its
+nodes; a node goes once the operator has removed its workers. Turning a pool elastic changes its pod template once,
+which restarts its workers: do it while no step runs. With `MaxWorkers` at 0 the pool renders as before, its replicas
+Argo CD's.
 
 ### The code index
 

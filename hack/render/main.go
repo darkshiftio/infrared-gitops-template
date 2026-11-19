@@ -384,9 +384,15 @@ type Data struct {
 
 // AgentPool is the WorkerPool agents: Workers warm workers, each sized for one
 // step's actor (CPU and Memory its limits, RequestCPU and RequestMemory what
-// it asks for), on the nodes NodeSelector picks, with Tolerations.
+// it asks for), on the nodes NodeSelector picks, with Tolerations. MaxWorkers
+// above 0 makes it elastic: the operator sets its replicas between MinWorkers
+// and MaxWorkers, Workers is its size only until the operator first does, and
+// the template leaves the replicas to it (see "The agents' WorkerPool"). Both
+// are left out of the data at 0, which renders as before they existed.
 type AgentPool struct {
 	Workers       int32             `json:"Workers"`
+	MinWorkers    int32             `json:"MinWorkers,omitempty"`
+	MaxWorkers    int32             `json:"MaxWorkers,omitempty"`
 	CPU           string            `json:"CPU"`
 	Memory        string            `json:"Memory"`
 	RequestCPU    string            `json:"RequestCPU"`
@@ -744,7 +750,7 @@ func main() {
 		`RegistryToken, as JSON: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com", "registry": "us-central1-docker.pkg.dev"}, or {"awsRegion": "us-east-1", "awsRoleArn": "" (optional), "awsHostNetwork": false (optional), "registry": "<account>.dkr.ecr.us-east-1.amazonaws.com"} (empty: none)`)
 	flag.StringVar(&d.RunningChartVersion, "running-chart-version", "", "RunningChartVersion: the rendering operator's chart version; image pins render only when it equals InfraredChartVersion (empty: always, as before)")
 	flag.Var(jsonFlag[*AgentPool]{&d.AgentPool, "agent-pool"}, "agent-pool",
-		`AgentPool, as the operator renders it from runner.actors: {"Workers": 4, "CPU": "2500m", "Memory": "9Gi", "RequestCPU": "625m", "RequestMemory": "2304Mi", "NodeSelector": {...} (optional), "Tolerations": [{"Key", "Operator", "Value", "Effect"}] (optional)} (empty: none)`)
+		`AgentPool, as the operator renders it from runner.actors: {"Workers": 4, "MinWorkers": 0 and "MaxWorkers": 10 (optional: elastic), "CPU": "2500m", "Memory": "9Gi", "RequestCPU": "625m", "RequestMemory": "2304Mi", "NodeSelector": {...} (optional), "Tolerations": [{"Key", "Operator", "Value", "Effect"}] (optional)} (empty: none)`)
 	flag.Var(jsonFlag[*CloudIdentity]{&d.CloudIdentity, "cloud-identity"}, "cloud-identity",
 		`CloudIdentity, as INFRARED_CLOUD_IDENTITY maps to it: {"gcpServiceAccount": "...@<project>.iam.gserviceaccount.com" (optional), and at most one of "awsRoleArn", "awsHostNetwork": true, "awsWebIdentity": true} (empty: none)`)
 	flag.BoolVar(&d.OIDC, "oidc", false, "OIDC: Infrared is the OpenID Connect provider of the install's own tools (INFRARED_OIDC); with -grafana-url and -infrared-host, Grafana signs people in through it")
@@ -974,16 +980,26 @@ var (
 	labelValue = regexp.MustCompile(`^([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$`)
 )
 
-// validateAgentPool checks the agents' WorkerPool: 1 to 64 workers, each
-// size a quantity, a node selector of labels, and tolerations as Kubernetes
-// takes them.
+// validateAgentPool checks the agents' WorkerPool: 1 to 64 workers, or, with
+// the pool elastic, a floor and a ceiling of 0 to 64 and the workers between
+// them; each size a quantity, a node selector of labels, and tolerations as
+// Kubernetes takes them.
 func validateAgentPool(p *AgentPool) []error {
 	if p == nil {
 		return nil
 	}
 	var errs []error
-	if p.Workers < 1 || p.Workers > 64 {
+	switch {
+	case p.MaxWorkers == 0 && p.MinWorkers != 0:
+		errs = append(errs, fmt.Errorf("AgentPool.MinWorkers needs MaxWorkers, the elastic pool's ceiling, got %d", p.MinWorkers))
+	case p.MaxWorkers == 0 && (p.Workers < 1 || p.Workers > 64):
 		errs = append(errs, fmt.Errorf("AgentPool.Workers must be 1 to 64, got %d", p.Workers))
+	case p.MaxWorkers < 0 || p.MaxWorkers > 64 || p.MinWorkers < 0 || p.MinWorkers > p.MaxWorkers:
+		errs = append(errs, fmt.Errorf("AgentPool.MinWorkers and MaxWorkers must be 0 <= MinWorkers <= MaxWorkers <= 64, got %d and %d",
+			p.MinWorkers, p.MaxWorkers))
+	case p.MaxWorkers > 0 && (p.Workers < p.MinWorkers || p.Workers > p.MaxWorkers):
+		errs = append(errs, fmt.Errorf("AgentPool.Workers of an elastic pool must be %d to %d, its floor to its ceiling, got %d",
+			p.MinWorkers, p.MaxWorkers, p.Workers))
 	}
 	for name, v := range map[string]string{"CPU": p.CPU, "Memory": p.Memory, "RequestCPU": p.RequestCPU, "RequestMemory": p.RequestMemory} {
 		if !quantity.MatchString(v) {

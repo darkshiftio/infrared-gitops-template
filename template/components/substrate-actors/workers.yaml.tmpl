@@ -16,6 +16,17 @@
 # a quarter of its limits, as a runner Job's pod asks for a part of its limit.
 # The workers run on the runner placement's nodes (the chart's
 # runner.placement), whose taints atelet tolerates too.
+[[- if .AgentPool.MaxWorkers ]]
+#
+# Elastic (the chart's runner.actors.maxWorkers): Infrared's operator sets
+# the replicas from the agent steps that hold or wait for an actor, between
+# [[ .AgentPool.MinWorkers ]] and [[ .AgentPool.MaxWorkers ]] workers, through the pool's scale subresource,
+# and the Application substrate-actors leaves them to it: the replicas below
+# are only the pool's size until the operator first sets them. It removes
+# only a worker that holds no actor, drained first, and the cluster
+# autoscaler may not evict a worker to pack its nodes, which would stop the
+# step it runs.
+[[- end ]]
 # =============================================================================
 [[- if .ImagePullSecret ]]
 # The worker image is private, and a WorkerPool cannot name a pull secret: its
@@ -45,6 +56,10 @@ spec:
   sandboxClasses:
     - name: gvisor
   template:
+[[- if .AgentPool.MaxWorkers ]]
+    annotations:
+      cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+[[- end ]]
 [[- if .ImagePullSecret ]]
     serviceAccountName: agents-worker
 [[- end ]]

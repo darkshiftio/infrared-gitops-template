@@ -29,6 +29,19 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: ate-workers
+[[- if .AgentPool ]][[ if .AgentPool.MaxWorkers ]]
+  # The agents' pool is elastic (the chart's runner.actors.maxWorkers): its
+  # replicas are Infrared's operator's to set, which the pool's scale
+  # subresource does. Argo CD shows no drift for them, and a sync keeps what
+  # the operator set; the operator sizes the pool only while this says so.
+  ignoreDifferences:
+    - group: ate.dev
+      kind: WorkerPool
+      name: agents
+      namespace: ate-workers
+      jsonPointers:
+        - /spec/replicas
+[[- end ]][[ end ]]
   syncPolicy:
     automated:
       prune: true
@@ -41,6 +54,9 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - SkipDryRunOnMissingResource=true
+[[- if .AgentPool ]][[ if .AgentPool.MaxWorkers ]]
+      - RespectIgnoreDifferences=true
+[[- end ]][[ end ]]
     retry:
       limit: 5
       backoff:

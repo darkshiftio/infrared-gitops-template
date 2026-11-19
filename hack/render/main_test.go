@@ -1309,3 +1309,46 @@ func TestStoreApplierFields(t *testing.T) {
 		}
 	}
 }
+
+// The agents' WorkerPool, elastic (runner.actors.maxWorkers; infrared-docs-internal
+// ADR 0089, slice 2): its floor and ceiling load by their Go names, a fixed
+// pool's data carries neither, and only a floor under a ceiling of at most 64
+// with the workers between them validates; a fixed pool still needs 1 to 64.
+func TestAgentPoolElastic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "AgentPool": {"Workers": 2, "MinWorkers": 1, "MaxWorkers": 10, "CPU": "2500m", ` +
+		`"Memory": "9Gi", "RequestCPU": "625m", "RequestMemory": "2304Mi"}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil || d.AgentPool == nil || d.AgentPool.MinWorkers != 1 || d.AgentPool.MaxWorkers != 10 {
+		t.Fatalf("loaded %+v, %v", d.AgentPool, err)
+	}
+	fixed := AgentPool{Workers: 4, CPU: "2500m", Memory: "9Gi", RequestCPU: "625m", RequestMemory: "2304Mi"}
+	b, err := json.Marshal(fixed)
+	if err != nil || strings.Contains(string(b), "MinWorkers") || strings.Contains(string(b), "MaxWorkers") {
+		t.Errorf("a fixed pool's data = %s, %v", b, err)
+	}
+	for _, c := range []struct {
+		name                    string
+		workers, floor, ceiling int32
+		ok                      bool
+	}{
+		{"fixed", 4, 0, 0, true},
+		{"fixed, no workers", 0, 0, 0, false},
+		{"elastic from none", 0, 0, 10, true},
+		{"elastic, workers at its ceiling", 10, 2, 10, true},
+		{"a floor without a ceiling", 2, 1, 0, false},
+		{"a floor over its ceiling", 4, 5, 4, false},
+		{"a ceiling over 64", 4, 0, 65, false},
+		{"workers under the floor", 1, 2, 10, false},
+		{"workers over the ceiling", 12, 0, 10, false},
+	} {
+		p := fixed
+		p.Workers, p.MinWorkers, p.MaxWorkers = c.workers, c.floor, c.ceiling
+		if errs := validateAgentPool(&p); (len(errs) == 0) != c.ok {
+			t.Errorf("%s: %v, want ok %t", c.name, errs, c.ok)
+		}
+	}
+}
