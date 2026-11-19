@@ -3,7 +3,9 @@
 # applier runs, on the pretend SeaweedFS in FAKE_STATE. fs.configure merges a
 # rule into what is there (as SeaweedFS's AddLocationConf does) and prints the
 # rules with every field, as SeaweedFS does; fs.rm without -r refuses a
-# folder that holds anything.
+# folder that holds anything. FAKE_RM_FAIL (a pattern of paths): fs.rm of one
+# fails, as a filer that cannot delete it.
+# shellcheck disable=SC2254 # FAKE_RM_FAIL is a pattern
 # shellcheck source-path=SCRIPTDIR source=fake-lib.sh
 . "$(dirname "$0")/fake-lib.sh"
 [ "${1:-}" = shell ] || { echo "fake weed: $*" >&2; exit 2; }
@@ -63,6 +65,8 @@ while IFS= read -r line; do
           *)
             if [ ! -e "$STATE/fs$a" ]; then
               echo "rm: $a: filer: no entry is found in filer store"
+            elif [ -n "${FAKE_RM_FAIL:-}" ] && case "$a" in $FAKE_RM_FAIL) true ;; *) false ;; esac; then
+              echo "rm: $a: delete entry: rpc error: code = Unavailable"
             elif [ -d "$STATE/fs$a" ] && [ "$recursive" = false ] && [ -n "$(ls -A "$STATE/fs$a")" ]; then
               echo "rm: $a: fail to delete non-empty folder"
             else

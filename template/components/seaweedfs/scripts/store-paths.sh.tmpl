@@ -20,12 +20,24 @@
 #     (fs.rm -r): a deliberate deletion, not a move;
 #   - the filer's log, /topics/.system/log/<day>/, is pruned of days older
 #     than pruneLogDays;
-#   - what it did goes to infrared-store-paths-applied.
+#   - the sweep: in a run that carries no migration's want (which it would
+#     only lengthen, Zot's window above all), every stale upload session in
+#     the registry's bucket (below) is deleted, file by file, each logged
+#     with its bytes and time, as Zot's GC means to and cannot on S3. A
+#     sweep that fails says so in the log and in staleUploads, and never
+#     changes the path rules' result;
+#   - what it did goes to infrared-store-paths-applied, with the sweep's
+#     staleUploads, "<at> deleted|failed <files> <bytes> [why]": the files
+#     and bytes it deleted, and why it failed (an operator from before it
+#     ignores the key; a run whose sweep waits leaves the last one there).
 #
 # The journal of a migration between the stores' layouts, stores/infrared-store-
 # moves, when it wants something not yet done, each want in turn:
 #   measure     each move's files and bytes at its source and destination, the
-#               store's free space, and the repositories found
+#               store's free space, and the repositories found; for a registry
+#               move whose source holds stale upload sessions, which its entry
+#               leaves out at either side, "stale <n> <files> <bytes>" after
+#               its entry line; no such line for one that holds none
 #   copy <n>    copying is recorded, and read back, before the first file is
 #               copied. Each of the source's files the destination lacks is
 #               copied as new data (S3 CopyObject, which writes new chunks),
@@ -79,7 +91,8 @@
 #   retire <n>  with Zot at the destination: a verified move's source deleted,
 #               file by file, only while it is what the verification read and
 #               the destination holds every verified blob as verified or, Zot
-#               having deleted it since, not at all
+#               having deleted it since, not at all. Its stale upload sessions
+#               stay, and its folder with them, until the sweep deletes them
 #   discard <n> [own]
 #               a move turned back: this migration's copies removed, each only
 #               where its source is there at the same size or its manifest
@@ -100,6 +113,19 @@
 # .sync/ folders; any other folder in it is another repository's. A tree move
 # (scope tree, a template's snapshots) owns every file below its folder, and
 # its destination may hold others' files too, which it leaves alone.
+#
+# A stale upload session is a file directly in a registry repository's
+# .uploads/ whose modification time is more than STALE_UPLOADS seconds (a
+# day; a positive whole number) before the run began. Zot v2.1.21 on S3
+# commits a session there before it checks the blob's digest and moves it,
+# and leaves it when that fails; its GC cannot delete one (on S3 its Cancel
+# only aborts a multipart upload), and nothing expires them. A session still
+# in progress is an S3 multipart upload, which SeaweedFS stages in the
+# bucket's own .uploads/ at its root, never in a repository's: nothing here
+# touches that one. A stale session is none of a move's own files, at its
+# source or its destination: no step (above) counts, copies, verifies,
+# compares or deletes one, and measure says how many its source holds. Only
+# the sweep deletes them.
 # =============================================================================
 set -euo pipefail
 umask 077
@@ -118,6 +144,10 @@ GRPC_TLS="${GRPC_TLS:-false}"
 BUCKET_COPIES="${BUCKET_COPIES:-2}"
 VACUUM_GARBAGE="${VACUUM_GARBAGE:-0.1}"
 JOURNAL_WAIT="${JOURNAL_WAIT:-600}"
+# An upload session untouched this many seconds before the run began is
+# stale (above): a day, unless set.
+STALE_UPLOADS="${STALE_UPLOADS:-86400}"
+RUN_START="$(date -u +%s)"
 tmp="$WORK/tmp/weed"
 mkdir -p "$tmp" "$WORK/req" "$WORK/res"
 # The sidecar stops answering once this container has ended.
@@ -128,6 +158,17 @@ now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 oneline() { printf '%s' "$*" | tr '\n\t' '  ' | cut -c1-400; }
 tick=0.2
 sleep "$tick" 2>/dev/null || tick=1
+
+# A threshold that is not a positive whole number of seconds (ten digits at
+# most) is refused before anything is read, copied or deleted.
+case "$STALE_UPLOADS" in
+  "" | 0* | *[!0-9]* | ???????????*)
+    log "STALE_UPLOADS is \"$(oneline "$STALE_UPLOADS")\", not a positive whole number of seconds: this run does nothing"
+    exit 1
+    ;;
+esac
+# A session modified before this, Unix seconds, is stale.
+STALE_BEFORE=$((RUN_START - STALE_UPLOADS))
 
 # --- The sidecar journal --------------------------------------------------------
 JSEQ=0
@@ -336,13 +377,29 @@ list_dir() {
   done
 }
 
+# stale_split <listing>: a registry repository's listing (walk's) left
+# without its stale upload sessions, which go to <listing>.stale: each file
+# directly in its .uploads/ whose modification time is known and before
+# STALE_BEFORE.
+stale_split() {
+  : >"$1.stale"
+  : >"$1.kept"
+  awk -F'\t' -v before="$STALE_BEFORE" -v stale="$1.stale" -v kept="$1.kept" '
+    $1 ~ /^\.uploads\/[^\/]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 > 0 && $3 + 0 < before + 0 { print > stale; next }
+    { print > kept }' "$1"
+  mv "$1.kept" "$1"
+}
+
 # walk <dir> <scope> <out> [full]: the files a move owns below <dir>, sorted,
 # a line each: "<path below dir>\t<size>\t<mtime>\t<mtimeNs>", and with full a
 # fifth field, the entry's chunks as the filer lists them (each one's file id
 # and its place in the file), which change whenever its data does, or - for
 # none; and in <out>.dirs the folders below <dir> it read, deepest first.
 # Scope repository: the files directly in <dir> and every file under its
-# blobs/, .uploads/ and .sync/; tree: every file below <dir>.
+# blobs/, .uploads/ and .sync/, but its stale upload sessions, which go to
+# <out>.stale: no step of a move counts, copies, verifies or deletes one, at
+# a source or a destination; tree: every file below <dir>, and <out>.stale
+# empty.
 walk() {
   local root=${1%/} scope=$2 out=$3 full=${4:-} rel
   : >"$out.unsorted"
@@ -366,6 +423,7 @@ walk() {
   done
   LC_ALL=C sort "$out.unsorted" >"$out"
   awk -F/ '{ print NF "\t" $0 }' "$out.dirs.unsorted" | LC_ALL=C sort -rn | cut -f2- >"$out.dirs"
+  if [ "$scope" = repository ]; then stale_split "$out"; else : >"$out.stale"; fi
 }
 
 # safe_paths <listing>: every path is of the characters S3 keys and weed shell
@@ -416,6 +474,120 @@ read_conf() {
   jq -s -c '.[0].locations // [] | map({key: .locationPrefix, value: (del(.locationPrefix)
       | with_entries(select(.value != "" and .value != 0 and .value != "0" and .value != false and .value != null
                             and .value != [] and .value != {})))}) | from_entries' "$tmp/conf.out" >"$1"
+}
+
+# --- The sweep: the registry's stale upload sessions --------------------------------
+# Zot's bucket alone, in either layout: its repositories are below
+# /buckets/registry/zot/zot/ before the org layout, below /buckets/registry/
+# in it.
+SWEEP_ROOT=/buckets/registry
+# The record's staleUploads, "<at> deleted|failed <files> <bytes> [why]";
+# empty when the sweep did not run.
+SWEEP_RECORD=""
+
+# migration_pending: whether this run carries a migration's want, which
+# apply_moves takes after the path rules: the journal wants something it
+# holds no outcome for.
+migration_pending() {
+  local j="$WORK/in/moves.json" want
+  [ -e "$j" ] && [ "$(jq -r '.format // ""' "$j")" = 1 ] || return 1
+  want="$(jq -r '.wantHash // ""' "$j")"
+  [ -n "$want" ] && [ "$(jq -r '(.outcome // "") | split(" ")[0]' "$j")" != "$want" ]
+}
+
+# upload_folders <out>: each folder below Zot's bucket that holds a .uploads
+# folder, a line each, its path below the bucket: a repository (a folder
+# holding index.json), in either layout and nested or not, or what retire left
+# of one. Never the bucket's own .uploads (SeaweedFS's multipart uploads in
+# progress) or the applier's .infrared-moves; never into a .uploads, a
+# repository's blobs or .sync, or a blob store's sha256.
+upload_folders() {
+  local rel
+  : >"$1"
+  printf '\n' >"$tmp/sweep.queue"
+  while [ -s "$tmp/sweep.queue" ]; do
+    : >"$tmp/sweep.next"
+    while IFS= read -r rel <&3; do
+      list_dir "$SWEEP_ROOT${rel:+/$rel}" "$tmp/sweep.dir" || return 1
+      jq -r -s --arg rel "$rel" 'any(.[]; ((.isDirectory // false) | not) and .name == "index.json") as $repo
+        | .[] | select(.isDirectory // false) | .name as $n
+        | if $n == ".uploads" then (if $rel == "" then empty else "uploads\t" + $rel end)
+          elif ($repo and ($n == "blobs" or $n == ".sync")) or ($n == "sha256" and ($rel | test("(^|/)blobs$")))
+            or ($rel == "" and $n == ".infrared-moves") then empty
+          else "folder\t" + (if $rel == "" then $n else $rel + "/" + $n end) end' "$tmp/sweep.dir" >"$tmp/sweep.found"
+      awk -F'\t' '$1 == "uploads" { print $2 }' "$tmp/sweep.found" >>"$1"
+      awk -F'\t' '$1 == "folder" { print $2 }' "$tmp/sweep.found" >>"$tmp/sweep.next"
+    done 3<"$tmp/sweep.queue"
+    mv "$tmp/sweep.next" "$tmp/sweep.queue"
+  done
+}
+
+# sweep_uploads: every stale upload session below Zot's bucket deleted, file
+# by file (fs.rm, never -r), then looked up to be gone; each one deleted
+# logged with its path, bytes and time. Sets SWEEP_RECORD: what it deleted,
+# and why it failed when it did.
+sweep_uploads() {
+  local r why="" files bytes left
+  : >"$tmp/sweep.stale"
+  : >"$tmp/sweep.result"
+  : >"$tmp/sweep.repos"
+  if ! upload_folders "$tmp/sweep.repos"; then
+    why="$SWEEP_ROOT could not be listed: $(head -c 200 "$tmp/page.err")"
+  fi
+  # Each repository's sessions, as walk lists its own files, and the stale
+  # ones split off as a move's are.
+  while [ -z "$why" ] && IFS= read -r r <&3; do
+    if ! list_dir "$SWEEP_ROOT/$r/.uploads" "$tmp/sweep.up"; then
+      why="$SWEEP_ROOT/$r/.uploads could not be listed: $(head -c 200 "$tmp/page.err")"
+      break
+    fi
+    jq -r 'select((.isDirectory // false) | not)
+      | [".uploads/" + .name, (.attributes.fileSize // "0"), (.attributes.mtime // "0"), ((.attributes.mtimeNs // 0) | tostring)] | @tsv' \
+      "$tmp/sweep.up" >"$tmp/sweep.files"
+    stale_split "$tmp/sweep.files"
+    awk -F'\t' -v OFS='\t' -v r="$r" '{ print r "/" $1, $2, $3 }' "$tmp/sweep.files.stale" >>"$tmp/sweep.stale"
+  done 3<"$tmp/sweep.repos"
+  # A name weed shell would not take as it is stays, and is named.
+  awk -F'\t' '$1 ~ /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/ && $1 !~ /(^|\/)\.\.?(\/|$)/' "$tmp/sweep.stale" >"$tmp/sweep.safe"
+  left="$(awk -F'\t' -v safe="$tmp/sweep.safe" 'FILENAME == safe { ok[$1] = 1; next } !($1 in ok) { print $1; exit }' \
+    "$tmp/sweep.safe" "$tmp/sweep.stale")"
+  if [ -z "$why" ] && [ -n "$left" ]; then why="a file name the applier does not take: $SWEEP_ROOT/$left"; fi
+  if [ -s "$tmp/sweep.safe" ]; then
+    awk -F'\t' -v d="$SWEEP_ROOT" 'NR % 100 == 1 { if (NR > 1) print line; line = "fs.rm" } { line = line " " d "/" $1 }
+      END { if (NR) print line }' "$tmp/sweep.safe" >"$tmp/sweep.rm"
+    weed_shell <"$tmp/sweep.rm" >"$tmp/sweep.rm.out" 2>&1 || true
+    # Each folder listed again: a session is deleted once it is not there.
+    cut -f1 "$tmp/sweep.safe" | sed 's|/\.uploads/[^/]*$||' | LC_ALL=C sort -u >"$tmp/sweep.again"
+    : >"$tmp/sweep.checked"
+    : >"$tmp/sweep.after"
+    while IFS= read -r r <&3; do
+      if ! list_dir "$SWEEP_ROOT/$r/.uploads" "$tmp/sweep.up"; then
+        [ -n "$why" ] || why="$SWEEP_ROOT/$r/.uploads could not be listed after the deletion: $(head -c 200 "$tmp/page.err")"
+        continue
+      fi
+      printf '%s\n' "$r" >>"$tmp/sweep.checked"
+      jq -r --arg r "$r" 'select((.isDirectory // false) | not) | $r + "/.uploads/" + .name' "$tmp/sweep.up" >>"$tmp/sweep.after"
+    done 3<"$tmp/sweep.again"
+    awk -F'\t' -v OFS='\t' -v checked="$tmp/sweep.checked" -v after="$tmp/sweep.after" '
+      FILENAME == checked { ok[$1] = 1; next }
+      FILENAME == after { there[$1] = 1; next }
+      { r = $1; sub(/\/\.uploads\/[^\/]*$/, "", r); if (!(r in ok)) next; s = "deleted"; if ($1 in there) s = "left"; print s, $0 }' \
+      "$tmp/sweep.checked" "$tmp/sweep.after" "$tmp/sweep.safe" >"$tmp/sweep.result"
+    left="$(awk -F'\t' '$1 == "left" { n++; if (f == "") f = $2 } END { if (n) print n " of them still there after their deletion, " f " first" }' \
+      "$tmp/sweep.result")"
+    if [ -z "$why" ] && [ -n "$left" ]; then why="$left: $(head -c 200 "$tmp/sweep.rm.out" | tr '\n' ' ')"; fi
+  fi
+  awk -F'\t' -v OFS='\t' '$1 == "deleted" { print $2, $3, $4 }' "$tmp/sweep.result" >"$tmp/sweep.deleted"
+  jq -R -r --arg root "$SWEEP_ROOT" 'split("\t") | "the sweep: deleted \($root)/\(.[0]), \(.[1]) bytes, untouched since \(.[2] | tonumber | todate)"' \
+    "$tmp/sweep.deleted"
+  read -r files bytes <<<"$(counts "$tmp/sweep.deleted")"
+  if [ -n "$why" ]; then
+    SWEEP_RECORD="$(now) failed $files $bytes $(oneline "$why")"
+    log "the sweep failed, having deleted $files stale upload sessions of $bytes bytes: $(oneline "$why"); the path rules' result is not changed by it"
+  else
+    SWEEP_RECORD="$(now) deleted $files $bytes"
+    log "the sweep: $files stale upload sessions deleted, $bytes bytes, each untouched for more than $STALE_UPLOADS seconds"
+  fi
 }
 
 apply_paths() {
@@ -574,14 +746,23 @@ apply_paths() {
     fi
   fi
 
+  # The sweep, whatever became of the rules: its result is its own, and a run
+  # that carries a migration's want leaves it to a run without one.
+  if migration_pending; then
+    log "the sweep: this run carries a migration's want, so the registry's stale upload sessions wait for a run without one"
+  else
+    sweep_uploads
+  fi
+
   if [ -n "$PATHS_FAILED" ]; then
     message="$PATHS_FAILED"
   else
     message="$((wrote + kept)) rules held ($wrote written, $kept as they were), $removed removed, $(grep -c . "$tmp/purged" || true) prefixes purged, $pruned days of the filer's log pruned"
   fi
   jq -n --arg hash "$hash" --arg at "$(now)" --arg result "$([ -n "$PATHS_FAILED" ] && echo failed || echo applied)" \
-    --arg message "$message" --rawfile rules "$tmp/held" --rawfile purged "$tmp/purged" \
-    '{format: "1", hash: $hash, at: $at, result: $result, message: $message, rules: $rules, purged: $purged}' >"$tmp/applied.json"
+    --arg message "$message" --rawfile rules "$tmp/held" --rawfile purged "$tmp/purged" --arg swept "$SWEEP_RECORD" \
+    '{format: "1", hash: $hash, at: $at, result: $result, message: $message, rules: $rules, purged: $purged}
+      + (if $swept == "" then {} else {staleUploads: $swept} end)' >"$tmp/applied.json"
   if ! journal applied - - "$tmp/applied.json"; then
     log "infrared-store-paths-applied could not be written: $JREPLY"
     return 1
@@ -1055,7 +1236,8 @@ precopy_move() {
 # this migration's copies of files no longer at the source removed, every
 # time set; then every file verified as verify_move does, a SHA-256 a
 # manifest vouches for not read again. Then copied, and verified with the
-# manifest's SHA-256 after the listing's.
+# manifest's SHA-256 after the listing's. Stale upload sessions are none of
+# it, at either side (walk): never copied, verified, counted or removed.
 final_move() {
   local n=$1 act p size mtime ns sfp dsize dmtime dfp sha r hd want files bytes extra listing sum
   if ! move "$n" || [ "$DEST" != empty ]; then
@@ -1069,6 +1251,9 @@ final_move() {
   fi
   step "$n" "copying $(now)"
   walk "$SRC" repository "$tmp/src" full || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
+  if [ -s "$tmp/src.stale" ]; then
+    log "move $n: $(counts "$tmp/src.stale" | awk '{ print $1 " stale upload sessions, " $2 " bytes," }') left at its source"
+  fi
   if ! safe_paths "$tmp/src"; then
     step "$n" "failed $(now) $SAFE_WHY"
     return 0
@@ -1313,6 +1498,10 @@ mark_move() {
 # times and chunks, but the oci-layout unmark deleted) and the destination
 # holds index.json and every verified blob as verified or, deleted by Zot
 # since, not at all. Then deleted <at> <files> <blobs Zot deleted since>.
+# Stale upload sessions, at either side (walk), are neither compared,
+# counted nor deleted: at the source they stay, and its folder with them
+# (the filer keeps a folder that holds anything), until the sweep deletes
+# them.
 retire_move() {
   local n=$1 u bad vsum first changed collected removed
   if ! move "$n"; then
@@ -1337,7 +1526,8 @@ retire_move() {
   walk "$SRC" repository "$tmp/src" full || stop_run "$SRC could not be listed: $(head -c 200 "$tmp/page.err")"
   # Every file still at the source is as verified: the same size, time and
   # chunks, and no oci-layout once unmark deleted it. One that is gone is an
-  # earlier retire's, which stopped before it could record so.
+  # earlier retire's, which stopped before it could record so, or a session
+  # the sweep deleted once stale.
   awk -F'\t' -v OFS='\t' -v u="$u" '!(u != 0 && $1 == "oci-layout") { print $1, $2, $3, $6 }' "$tmp/man" | LC_ALL=C sort >"$tmp/want.src"
   awk -F'\t' -v OFS='\t' '{ print $1, $2, $3, $5 }' "$tmp/src" | LC_ALL=C sort >"$tmp/got.src"
   first="$(awk -F'\t' 'FILENAME == ARGV[1] { w[$1] = $0; next } (w[$1] != $0) { print $1; exit }' "$tmp/want.src" "$tmp/got.src")"
@@ -1364,6 +1554,9 @@ retire_move() {
       return 0
     fi
     remove_dirs "$SRC" self
+  fi
+  if [ -s "$tmp/src.stale" ]; then
+    log "move $n: $(counts "$tmp/src.stale" | awk '{ print $1 " stale upload sessions, " $2 " bytes," }') left at $SRC, and its folder with them, for the sweep"
   fi
   step "$n" "deleted $(now) $removed $collected"
 }
@@ -1468,12 +1661,14 @@ find_repositories() {
 }
 
 # measure [delta]: each move's own files at its source and destination, the
-# free space, and the repositories found; with delta, each registry move's
-# delta too: "delta <n> <files> <bytes>", its source's files that no manifest
-# line vouches for as they are now, and every file of it that is not a blob,
-# which a final copies or reads again.
+# free space, and the repositories found; for each registry move whose
+# source holds stale upload sessions, which its entry leaves out at either
+# side, "stale <n> <files> <bytes>" after its entry line; with delta, each
+# registry move's delta too: "delta <n> <files> <bytes>", its source's files
+# that no manifest line vouches for as they are now, and every file of it
+# that is not a blob, which a final copies or reads again.
 measure() {
-  local n free sf sb df db delta=${1:-} full=""
+  local n free sf sb df db xf xb delta=${1:-} full=""
   if [ "$delta" = delta ] && [ "$SCOPE" = repository ]; then full=full; fi
   free="$(free_bytes)" || stop_run "the volume servers' free space could not be read: $(head -c 200 "$tmp/topology.err" "$tmp/status.err" 2>/dev/null | tr '\n' ' ')"
   {
@@ -1491,6 +1686,11 @@ measure() {
         read -r df db <<<"$(counts "$tmp/dst")"
       fi
       printf 'entry %s %s %s %s %s\n' "$n" "$sf" "$sb" "$df" "$db"
+      # What the move leaves where it is, at its source.
+      if [ -s "$tmp/src.stale" ]; then
+        read -r xf xb <<<"$(counts "$tmp/src.stale")"
+        printf 'stale %s %s %s\n' "$n" "$xf" "$xb"
+      fi
       if [ -n "$full" ]; then
         state_lines "$n"
         manifests "$n" "$tmp/man"

@@ -10,7 +10,10 @@
 #
 #   stores/infrared-store-paths          the path rules, a deleted org's prefixes
 #                                        and the filer log's age, which it
-#                                        applies; what it did goes to
+#                                        applies, then the sweep of the
+#                                        registry's upload sessions untouched
+#                                        for a day, which Zot cannot delete on
+#                                        S3; what it did goes to
 #                                        stores/infrared-store-paths-applied
 #   stores/infrared-store-moves          a migration's journal: measure, copy and
 #                                        verify, delete, vacuum, each step

@@ -26,7 +26,8 @@
 #   get state.<n> <id>             answers the key's value, the same way
 #   applied                        merges the value, a JSON object of the
 #                                  keys format, hash, at, result, message,
-#                                  rules and purged, into
+#                                  rules, purged and staleUploads (the
+#                                  sweep's), into
 #                                  infrared-store-paths-applied
 #
 # Every write carries the resourceVersion it read, so a concurrent writer is a
@@ -167,7 +168,7 @@ get_journal() {
 # infrared-store-paths-applied, then reads them back.
 put_applied() {
   local n=$1 value=$2
-  if ! jq -e 'type == "object" and (keys - ["format", "hash", "at", "result", "message", "rules", "purged"] | length == 0)
+  if ! jq -e 'type == "object" and (keys - ["format", "hash", "at", "result", "message", "rules", "purged", "staleUploads"] | length == 0)
       and ([.[] | type] | all(. == "string"))' "$value" >/dev/null 2>&1; then
     answer "$n" "error the applied value holds a key the applier does not write"
     return

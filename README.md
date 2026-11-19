@@ -1001,8 +1001,8 @@ Forbid`, `backoffLimit: 0`: a failed run is a result the operator reads.
 
 | Contract | What a run does |
 |---|---|
-| `stores/infrared-store-paths` (`format`, `hash`, `rules`, `purge`, `pruneLogDays`) | Refuses it unless the hash is its keys' and every line is an org's kind, a deleted org's media or snapshots, or the platform's other files. Each rule not exactly as wanted at its prefix is deleted, then written whole (`fs.configure` merges into a rule, and an empty TTL never clears one); a rule as wanted is left alone. The rules it wrote before (`-applied`'s `rules`) and no longer wanted are deleted, and no other rule. Each purge prefix is removed (`fs.rm -r`), a deliberate deletion, and looked up to be gone. `/topics/.system/log/<day>/` older than `pruneLogDays` is pruned. Then `stores/infrared-store-paths-applied`: `format`, `hash`, `at`, `result`, `message`, the `rules` it holds and the prefixes `purged`. |
-| `stores/infrared-store-moves` (the journal) | When its `wantHash` hashes its `id`, `seq` and `want`, and has no outcome: each want in turn (`measure`, `copy <n>`, `delete <n>`, `vacuum`), each step a line of `state.<n>`, then the `outcome`. |
+| `stores/infrared-store-paths` (`format`, `hash`, `rules`, `purge`, `pruneLogDays`) | Refuses it unless the hash is its keys' and every line is an org's kind, a deleted org's media or snapshots, or the platform's other files. Each rule not exactly as wanted at its prefix is deleted, then written whole (`fs.configure` merges into a rule, and an empty TTL never clears one); a rule as wanted is left alone. The rules it wrote before (`-applied`'s `rules`) and no longer wanted are deleted, and no other rule. Each purge prefix is removed (`fs.rm -r`), a deliberate deletion, and looked up to be gone. `/topics/.system/log/<day>/` older than `pruneLogDays` is pruned. Then the sweep deletes the registry's stale upload sessions (below). Then `stores/infrared-store-paths-applied`: `format`, `hash`, `at`, `result`, `message`, the `rules` it holds, the prefixes `purged`, and the sweep's `staleUploads`. |
+| `stores/infrared-store-moves` (the journal) | When its `wantHash` hashes its `id`, `seq` and `want`, and has no outcome: each want in turn (`measure`, `copy <n>`, `delete <n>`, `vacuum`; for the registry's move with Zot serving all along but for a window, `measure delta`, `precopy <n>`, `final <n>`, `unmark <n>`, `mark <n>`, `retire <n>` and `discard <n> [own]`, which the CronJob names in its annotation `infrared.darkshift.io/store-moves-wants`), each step a line of `state.<n>`, then the `outcome`. `scripts/store-paths.sh` says what each want does. |
 
 Every move is a copy, a verification and only then a deletion, never a move
 in place (no `fs.mv`, no rename): nothing is deleted before its copy is
@@ -1029,8 +1029,11 @@ verified at its new path (the owner, 2026-11-17).
 - **measure** counts each move's files at its source and destination, the
   free space (the least, over the volume servers, of a server's free disk less
   a tenth of its disk, times the servers, over the bucket's copies), and the
-  repositories found below `from`. **vacuum** compacts the bucket's volumes
-  with a tenth or more deleted.
+  repositories found below `from`; a registry move whose source holds stale
+  upload sessions (below) has a line `stale <n> <files> <bytes>` after its
+  `entry`, which leaves them out at either side, and one that holds none has
+  no such line.
+  **vacuum** compacts the bucket's volumes with a tenth or more deleted.
 
 A repository's own files are those directly in its folder and every file
 under its `blobs/`, `.uploads/` and `.sync/`; any other folder is another
@@ -1043,6 +1046,44 @@ to `atespaces`, from `/buckets/ate-snapshots/platform/` to
 `/buckets/ate-snapshots/platform/snapshots/`). Agent Substrate 1.0 overtook
 that move: its new install leaves those snapshots, and the records that named
 them, where they are, unused (see "Agent Substrate").
+
+A stale upload session is a file directly in a registry repository's
+`.uploads/` modified more than `STALE_UPLOADS` seconds before the run began:
+a day, unless the container's environment sets another positive whole
+number (anything else stops the run before it does anything). Zot v2.1.21 on
+S3 commits a session there before it checks the blob's digest and moves it,
+and leaves it when that fails; its GC cannot delete one (on S3 its `Cancel`
+only aborts a multipart upload), and nothing expires them (workspace TODO
+729: 41 of them, 21 GB, at the home, kept a move from holding). A session
+still in progress is an S3 multipart upload, which SeaweedFS stages in the
+bucket's own `.uploads/` at its root, never in a repository's: nothing here
+touches it.
+
+- **A registry move leaves them where they are**, at its source and its
+  destination alike: they are none of its own files, and no step counts,
+  copies, verifies, compares or deletes one. `measure`'s `entry` leaves them
+  out of both sides' counts, and its delta out of the delta; `final`'s
+  `copied` and `verified` lines count and list the rest; `retire` deletes the
+  rest of a source, whose folder stays while they remain; `discard`, with
+  `own` too, leaves them. A destination that holds only stale sessions counts
+  as empty, so a move back is not refused for those a move left at its old
+  paths. A young session is copied and verified as any other file. No step's
+  line gains a field.
+- **The sweep deletes them.** The path rules' run (daily, and on a change,
+  with `stores.policies.enabled`) deletes every stale session in the bucket
+  `registry`, in either layout (`zot/zot/<repository>/.uploads/` before the
+  org layout, `<org>/<kind>/<name>/.uploads/` in it, a nested repository's and
+  what `retire` left of one too), file by file with `fs.rm` (never `-r`), each
+  looked up to be gone and logged with its path, bytes and time. Never the
+  bucket's own `.uploads/`, a file outside a repository's `.uploads/` or in a
+  folder below it, or a session younger than the threshold. A run that
+  carries a migration's want leaves the sweep to the next run without one, so
+  it never lengthens a step or Zot's window; the move's steps ignore stale
+  sessions, so a sweep between them fails none. In
+  `stores/infrared-store-paths-applied`, `staleUploads` is
+  `<at> deleted|failed <files> <bytes> [why]`, what the sweep deleted: a
+  sweep that fails says so there and in the log, and never changes the path
+  rules' `result`.
 
 Two containers, each with one kind of credential, meet in an `emptyDir`:
 
@@ -1071,8 +1112,11 @@ a destination file that differs is never written over, that a copy that
 fails or does not match leaves the source and is never deleted, that a stopped
 run resumes, that a call that stalls times out and fails its step and the next
 run resumes, that a delete whose copy changed since its verification deletes
-nothing, and that a journal another migration took stops the run. `make
-verify` runs it. A real SeaweedFS is the proof on kind (P2).
+nothing, that a journal another migration took stops the run, and that a
+move leaves stale upload sessions where they are, at a source or a
+destination, while the sweep deletes them and nothing else, between a
+migration's steps too. `make verify` runs it. A real SeaweedFS is the proof
+on kind (P2).
 
 ### Agent Substrate
 
