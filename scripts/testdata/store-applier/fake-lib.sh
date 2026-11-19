@@ -4,6 +4,9 @@
 #
 #   fs/<filer path>     each file's content, each folder a directory
 #   mtime/<filer path>  each file's modification time, Unix seconds
+#   size/<filer path>   a file's size, where the filer lists it so without
+#                       its content holding as many bytes: one too large to
+#                       write, which nothing may read or copy
 #   conf.json           the filer's path rules, {"locations": [...]}
 #   cm/<name>.json      each ConfigMap of the namespace stores
 #   calls               every call the fakes took, a line each
@@ -18,8 +21,10 @@ called() { printf '%s\n' "$*" >>"$STATE/calls"; }
 mtime_of() { cat "$STATE/mtime$1" 2>/dev/null || echo 0; }
 set_mtime() { mkdir -p "$(dirname "$STATE/mtime$1")"; printf '%s\n' "$2" >"$STATE/mtime$1"; }
 
-# size_of <filer path>
-size_of() { wc -c <"$STATE/fs$1" | tr -d ' '; }
+# size_of <filer path>: its size as given, else its content's.
+size_of() {
+  if [ -f "$STATE/size$1" ]; then cat "$STATE/size$1"; else wc -c <"$STATE/fs$1" | tr -d ' '; fi
+}
 
 # chunks_of <filer path>: the file's one chunk, named by its content, as the
 # filer would list it.
@@ -44,5 +49,8 @@ entry_json() {
   fi
 }
 
-# rm_meta <filer path>: forgets the times below a removed path.
-rm_meta() { if [ -e "$STATE/mtime$1" ]; then rm -r "$STATE/mtime$1"; fi; }
+# rm_meta <filer path>: forgets the times and sizes below a removed path.
+rm_meta() {
+  if [ -e "$STATE/mtime$1" ]; then rm -r "$STATE/mtime$1"; fi
+  if [ -e "$STATE/size$1" ]; then rm -r "$STATE/size$1"; fi
+}

@@ -87,6 +87,13 @@ case "$url" in
         else
           cat "$STATE/fs$src" >"$STATE/fs$dst"
         fi
+        # A file of a given size: its copy is listed at that size too.
+        if [ -f "$STATE/size$src" ]; then
+          mkdir -p "$(dirname "$STATE/size$dst")"
+          cp "$STATE/size$src" "$STATE/size$dst"
+        else
+          rm -f "$STATE/size$dst"
+        fi
         set_mtime "$dst" "$(date +%s)"
         printf '<CopyObjectResult><ETag>"x"</ETag></CopyObjectResult>' >"$body"
         called "s3 copy $src $dst"
@@ -101,6 +108,7 @@ case "$url" in
     elif [ "$method" = PUT ] && [ -n "$data" ] && [ "$none_match" = false ]; then
       mkdir -p "$(dirname "$STATE/fs$dst")"
       cat "${data#@}" >"$STATE/fs$dst"
+      rm -f "$STATE/size$dst"
       set_mtime "$dst" "$(date +%s)"
       called "s3 put $dst"
     else

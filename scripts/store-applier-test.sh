@@ -58,6 +58,32 @@
 #   discard          a move turned back: this migration's copies removed, a
 #                    file it did not copy left and named; refused while the
 #                    source lacks its oci-layout
+#   stale-move       a registry move whose source holds an upload session two
+#                    days old (3 GiB) and one ten minutes old: measure says
+#                    stale <n> <files> <bytes> after the move's entry, which
+#                    leaves it out, as does the delta, which counts the young
+#                    one; final copies and verifies the young one alone, its
+#                    counts and listing without the stale one; retire deletes
+#                    the rest and leaves it, and its folder
+#   stale-destination
+#                    destinations that hold stale sessions already (as a move
+#                    back finds those a move left) count as empty; discard,
+#                    with own too, leaves them; the move starts, verifies and
+#                    retires around them, and they are still there after
+#   sweep            the path rules' run deletes each stale upload session in
+#                    the registry's bucket, before the layout and in it,
+#                    nested and what retire left, file by file, each logged;
+#                    never a young one, the bucket's own .uploads/, a file
+#                    outside a .uploads/ or deeper in one, or another
+#                    bucket's; staleUploads says what it deleted, or that it
+#                    failed, the rules' result their own; STALE_UPLOADS that
+#                    is not a positive whole number stops the run before any
+#                    call, and one that is sets the threshold
+#   sweep-move       the sweep waits in a run that carries a migration's want;
+#                    between its wants it deletes a stale session at a
+#                    source, then one verified young since gone stale and its
+#                    copy, and the final, its verification and the retire
+#                    hold
 #   rollback         moving back, the repositories found are none of the old
 #                    root's, and not SeaweedFS's own uploads
 #   journal-keys     the sidecar writes the applier's keys alone
@@ -94,9 +120,21 @@ put() {
   mkdir -p "$(dirname "$S/fs$1")" "$(dirname "$S/mtime$1")"
   printf '%s' "$2" >"$S/fs$1"
   echo "$3" >"$S/mtime$1"
+  rm -f "$S/size$1"
+}
+# put_size <filer path> <bytes> <mtime>: a file the filer lists at that size,
+# without writing its bytes: one too large to write, which nothing may read.
+put_size() {
+  put "$1" "a file of $2 bytes" "$3"
+  mkdir -p "$(dirname "$S/size$1")"
+  echo "$2" >"$S/size$1"
 }
 # unput <filer path>: a file gone, as a deletion leaves it.
-unput() { rm "$S/fs$1" "$S/mtime$1"; }
+unput() { rm "$S/fs$1" "$S/mtime$1"; rm -f "$S/size$1"; }
+# An upload session's times: two days old is stale (STALE_UPLOADS, a day),
+# ten minutes old is not.
+TWO_DAYS_AGO=$(($(date +%s) - 2 * 86400))
+TEN_MINUTES_AGO=$(($(date +%s) - 600))
 # blob <repository folder> <content> <mtime>: a blob named by its digest.
 blob() {
   local h
@@ -152,15 +190,16 @@ tree_of() {
 }
 show() { echo "--- $S/applier.log" >&2; tail -n 20 "$S/applier.log" >&2; echo "--- $S/journal.log" >&2; tail -n 5 "$S/journal.log" >&2; }
 
-# The registry before the layout: acme/web with its own files (an upload left
-# over among them) and acme/web/api, a repository nested in it.
+# The registry before the layout: acme/web with its own files (an upload
+# session among them, ten minutes old) and acme/web/api, a repository nested
+# in it.
 registry_repos() {
   WEB=/buckets/registry/zot/zot/acme/web
   put "$WEB/index.json" '{"schemaVersion":2,"manifests":[]}' 1700000100
   put "$WEB/oci-layout" '{"imageLayoutVersion":"1.0.0"}' 1700000101
   B1="$(blob "$WEB" layer-one 1700000102)"
   B2="$(blob "$WEB" config-one 1700000103)"
-  put "$WEB/.uploads/u1" partial 1700000104
+  put "$WEB/.uploads/u1" partial "$TEN_MINUTES_AGO"
   put "$WEB/api/index.json" '{"schemaVersion":2,"manifests":[1]}' 1700000200
   blob "$WEB/api" layer-api 1700000201 >/dev/null
   NEW=/buckets/registry/acme/images/web
@@ -518,7 +557,7 @@ p2="$(line_of 2 precopied)"
 # sources' oci-layout once verified.
 put "$WEB/index.json" '{"schemaVersion":2,"manifests":[1,2]}' 1700000500
 B4="$(blob "$WEB" layer-four 1700000501)"
-put "$WEB/.uploads/u2" partial-two 1700000502
+put "$WEB/.uploads/u2" partial-two "$TEN_MINUTES_AGO"
 listing="$( (cd "$S/fs$WEB" && find . -type f ! -path './api/*' | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do
   printf '%s %s %s %s\n' "$f" "$(wc -c <"$f" | tr -d ' ')" "$(sha256sum <"$f" | cut -d' ' -f1)" "$(cat "$S/mtime$WEB/$f")"; done) | sha256sum | cut -d' ' -f1)"
 mark="$(grep -c . "$S/calls")"
@@ -671,6 +710,213 @@ run_applier || rc=$?
 [ "$rc" != 0 ] && [[ "$(data infrared-store-moves outcome)" == *"which only the registry's take"* ]] \
   && ok "precopy: a tree's journal is refused the registry's wants, and nothing is done" \
   || { bad "precopy-tree: exit $rc, $(data infrared-store-moves outcome)"; show; }
+
+# --- Stale upload sessions: a move leaves them, the sweep deletes them -------------------------
+# (TODO 729.) Zot on S3 leaves a session whose finish failed in its
+# repository's .uploads/ for good; one untouched for a day (STALE_UPLOADS) is
+# stale. A session in progress is a multipart upload, in the bucket's own
+# .uploads/. A move leaves the stale ones where they are: out of its delta,
+# its final, its verification and its retire. The path rules' run deletes
+# them, and nothing else.
+GIB3=3221225472
+MIB5=5242880
+# bytes_of <folder> <file>...: the bytes of those files below the folder.
+bytes_of() { local d=$1 f t=0; shift; for f in "$@"; do t=$((t + $(wc -c <"$S/fs$d/$f"))); done; echo "$t"; }
+new_state stale-move
+registry_repos
+unput "$WEB/.uploads/u1"
+put_size "$WEB/.uploads/old" "$GIB3" "$TWO_DAYS_AGO"
+put "$WEB/.uploads/young" "$(head -c "$MIB5" /dev/zero | tr '\0' y)" "$TEN_MINUTES_AGO"
+own="$(bytes_of "$WEB" index.json oci-layout "blobs/sha256/$B1" "blobs/sha256/$B2" .uploads/young)"
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 1\nprecopy 2\nmeasure delta\n'
+rc=0
+run_applier || rc=$?
+m="$(data infrared-store-moves measured)"
+[ "$rc" = 0 ] && [ "$(grep -A1 '^entry 2 ' <<<"$m" | sed -n 2p)" = "stale 2 1 $GIB3" ] && ! grep -q '^stale 1 ' <<<"$m" \
+  && grep -qx "entry 2 5 $own 2 $(bytes_of "$WEB" "blobs/sha256/$B1" "blobs/sha256/$B2")" <<<"$m" \
+  && grep -qx "delta 2 3 $(($(bytes_of "$WEB" index.json oci-layout) + MIB5))" <<<"$m" \
+  && ! grep -q '^s3 [a-z]* .*\.uploads/' "$S/calls" \
+  && ok "stale-move: measure says the session two days old after its move's entry (stale 2 1 $GIB3), which leaves it out; so does the delta, which counts the one ten minutes old; no other move has a stale line" \
+  || { bad "stale-move: measured $m (exit $rc)"; show; }
+# The window: final copies and verifies the young session alone.
+listing="$( (cd "$S/fs$WEB" && find . -type f ! -path './api/*' ! -path './.uploads/old' | sed 's|^\./||' | LC_ALL=C sort \
+  | while IFS= read -r f; do printf '%s %s %s %s\n' "$f" "$(wc -c <"$f" | tr -d ' ')" "$(sha256sum <"$f" | cut -d' ' -f1)" "$(cat "$S/mtime$WEB/$f")"; done) \
+  | sha256sum | cut -d' ' -f1)"
+mark="$(grep -c . "$S/calls")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'final 1\nfinal 2\nunmark 1\nunmark 2\nmeasure\n'
+rc=0
+run_applier || rc=$?
+v2="$(line_of 2 verified)"
+m="$(data infrared-store-moves measured)"
+[ "$rc" = 0 ] && [ "$(steps 2)" = "precopying precopied copying copied verified unmarking unmarked" ] \
+  && [ "$(cut -d' ' -f4,5 <<<"$v2")" = "5 $own" ] && [ "$(cut -d' ' -f6 <<<"$v2")" = "$listing" ] \
+  && [ "$(line_of 2 copied | cut -d' ' -f4,5)" = "5 $own" ] \
+  && [ "$(calls_from "$mark" | grep -c "^s3 copy $WEB/.uploads/young $NEW/.uploads/young$")" = 1 ] \
+  && ! calls_from "$mark" | grep -q '\.uploads/old' && [ ! -e "$S/fs$NEW/.uploads/old" ] \
+  && cmp -s "$S/fs$WEB/.uploads/young" "$S/fs$NEW/.uploads/young" && [ "$(cat "$S/mtime$NEW/.uploads/young")" = "$TEN_MINUTES_AGO" ] \
+  && grep -qx "stale 2 1 $GIB3" <<<"$m" \
+  && ok "stale-move: final copies and verifies the young session with the rest, and never reads or copies the stale one: the verified counts and listing leave it out, and it is still at the source" \
+  || { bad "stale-move: final: state.2 '$(steps 2)' ($v2), measured $m (exit $rc)"; show; }
+# Zot at the new root: retire deletes the rest and leaves the stale session,
+# and its folder with it.
+before_new="$(tree_of "$NEW")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 3 $'retire 1\nretire 2\n'
+rc=0
+run_applier || rc=$?
+[ "$rc" = 0 ] && [ "$(line_of 2 deleted | cut -d' ' -f4,5)" = "4 0" ] && [ "$(line_of 1 deleted | cut -d' ' -f4,5)" = "2 0" ] \
+  && [ "$(steps 2 | awk '{ print $NF }')" = deleted ] \
+  && [ "$(cd "$S/fs$WEB" && find . -type f)" = ./.uploads/old ] && [ ! -e "$S/fs$WEB/blobs" ] && [ ! -e "$S/fs$WEB/api" ] \
+  && [ "$(cat "$S/size$WEB/.uploads/old")/$(cat "$S/mtime$WEB/.uploads/old")" = "$GIB3/$TWO_DAYS_AGO" ] \
+  && [ "$(tree_of "$NEW")" = "$before_new" ] && grep -qF "move 2: 1 stale upload sessions, $GIB3 bytes, left at $WEB" "$S/applier.log" \
+  && ok "stale-move: retire deletes every other file of the source and leaves the stale session, and its folder, without failing; the destination untouched" \
+  || { bad "stale-move: retire: state.2 '$(steps 2)' ($(line_of 2 deleted)), the source holds $(cd "$S/fs$WEB" 2>/dev/null && find . -type f | tr '\n' ' ')"; show; }
+
+# A destination that holds stale sessions already, as a move back finds those
+# a move left at its old paths: it counts as empty, discard (with own too)
+# leaves them, and the move starts, verifies and retires around them.
+new_state stale-destination
+registry_repos
+put_size "$NEW/.uploads/left" "$GIB3" "$TWO_DAYS_AGO"
+put "$NEW/api/.uploads/left" left-api "$TWO_DAYS_AGO"
+left_before="$(tree_of "$NEW")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'measure\n'
+rc=0
+run_applier || rc=$?
+m="$(data infrared-store-moves measured)"
+counted="$([ "$rc" = 0 ] && grep -qE '^entry 1 2 [0-9]+ 0 0$' <<<"$m" && grep -qE '^entry 2 5 [0-9]+ 0 0$' <<<"$m" && ! grep -q '^stale ' <<<"$m" && echo yes)"
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'precopy 2\ndiscard 2 own\nprecopy 2\ndiscard 2\n'
+run_applier || true
+discards="$(data infrared-store-moves state.2 | awk '$2 == "discarded" { print $4, $5 }' | tr '\n' ' ')"
+kept_discard="$([ "$(tree_of "$NEW")" = "$left_before" ] && echo yes)"
+journal "$ID" "$FROM" "$TO" "$MOVES" 3 $'precopy 1\nprecopy 2\nfinal 1\nfinal 2\nunmark 1\nunmark 2\nretire 1\nretire 2\n'
+rc=0
+run_applier || rc=$?
+[ "$counted" = yes ] && [ "$discards" = "2 0 2 0 " ] && [ "$kept_discard" = yes ] && [ "$rc" = 0 ] \
+  && [ "$(steps 1 | awk '{ print $(NF - 3), $(NF - 2), $(NF - 1), $NF }')" = "copied verified unmarked deleted" ] \
+  && [ "$(steps 2 | awk '{ print $(NF - 4), $(NF - 3), $(NF - 2), $(NF - 1), $NF }')" = "copied verified unmarking unmarked deleted" ] \
+  && [ "$(line_of 2 verified | cut -d' ' -f4)/$(line_of 1 verified | cut -d' ' -f4)" = 5/2 ] \
+  && [ "$(line_of 2 deleted | cut -d' ' -f4)/$(line_of 1 deleted | cut -d' ' -f4)" = 4/2 ] && [ ! -e "$S/fs$WEB" ] \
+  && [ "$(tree_of "$NEW" | grep '/\.uploads/left ')" = "$(grep '/\.uploads/left ' <<<"$left_before")" ] \
+  && [ "$(cat "$S/size$NEW/.uploads/left")" = "$GIB3" ] && [ -f "$S/fs$NEW/.uploads/u1" ] \
+  && ! grep -q "^removed $NEW/.*\.uploads/left\$" "$S/calls" && ! grep -q '^s3 [a-z]* .*\.uploads/left' "$S/calls" \
+  && ok "stale-destination: destinations holding only stale sessions count as empty, discard and discard own leave the sessions, and the move starts, verifies and retires around them: they are still there after" \
+  || { bad "stale-destination: counted '$counted' ($m), discards '$discards', kept '$kept_discard', state.1 '$(steps 1)', state.2 '$(steps 2)' (exit $rc)"; show; }
+
+# The sweep, in the path rules' run: every stale session below the registry's
+# bucket, in either layout, and nothing else.
+new_state sweep
+paths_cm "" "" ""
+cm infrared-store-paths-applied '{"format": "1"}'
+R=/buckets/registry
+put "$R/zot/zot/acme/web/index.json" '{}' 1700000100
+blob "$R/zot/zot/acme/web" layer 1700000101 >/dev/null
+put_size "$R/zot/zot/acme/web/.uploads/s1" "$GIB3" "$TWO_DAYS_AGO"
+put "$R/zot/zot/acme/web/.uploads/young" young "$TEN_MINUTES_AGO"
+put "$R/zot/zot/acme/web/.uploads/deeper/s9" deeper "$TWO_DAYS_AGO"
+put "$R/zot/zot/acme/web/.sync/x" sync "$TWO_DAYS_AGO"
+put "$R/zot/zot/acme/web/api/index.json" '{}' 1700000100
+put "$R/zot/zot/acme/web/api/.uploads/s2" session-two "$TWO_DAYS_AGO"
+put "$R/zot/zot/acme/gone/.uploads/s3" session-three "$TWO_DAYS_AGO"
+put "$R/acme/images/web/index.json" '{}' 1700000100
+put "$R/acme/images/web/oci-layout" '{}' "$TWO_DAYS_AGO"
+put "$R/acme/images/web/.uploads/s4" session-four "$TWO_DAYS_AGO"
+put "$R/acme/images/web/.uploads/young" young "$TEN_MINUTES_AGO"
+put "$R/.uploads/0f1e/0001.part" part "$TWO_DAYS_AGO"
+put "$R/.uploads/stray" stray "$TWO_DAYS_AGO"
+put "$R/.infrared-moves/$ID/2.final.tsv" manifest "$TWO_DAYS_AGO"
+put /buckets/media/acme/.uploads/s5 media "$TWO_DAYS_AGO"
+before="$(tree_of /buckets)"
+swept=$'/buckets/registry/acme/images/web/.uploads/s4\n/buckets/registry/zot/zot/acme/gone/.uploads/s3\n/buckets/registry/zot/zot/acme/web/.uploads/s1\n/buckets/registry/zot/zot/acme/web/api/.uploads/s2'
+rc=0
+run_applier || rc=$?
+[ "$rc" = 0 ] && [ "$(data infrared-store-paths-applied result)" = applied ] \
+  && [ "$(tree_of /buckets)" = "$(grep -vE '^\./registry/(zot/zot/acme/web/(api/)?\.uploads/s[12]|zot/zot/acme/gone/\.uploads/s3|acme/images/web/\.uploads/s4) ' <<<"$before")" ] \
+  && [ "$(grep '^removed ' "$S/calls" | cut -d' ' -f2 | LC_ALL=C sort)" = "$swept" ] \
+  && ! grep -E '^weed fs.rm (-r|-rf|-fr) ' "$S/calls" | grep -q . \
+  && [[ "$(data infrared-store-paths-applied staleUploads)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z\ deleted\ 4\ $((GIB3 + 11 + 13 + 12))$ ]] \
+  && [ "$(grep -c '^the sweep: deleted ' "$S/applier.log")" = 4 ] \
+  && grep -qxF "the sweep: deleted $R/zot/zot/acme/web/.uploads/s1, $GIB3 bytes, untouched since $(jq -rn --argjson t "$TWO_DAYS_AGO" '$t | todate')" "$S/applier.log" \
+  && ok "sweep: the path rules' run deletes each stale session in a registry repository's .uploads/, before the layout and in it, nested, and what retire left, file by file, each logged; never a young one, the bucket's own .uploads/, a file deeper in a .uploads/ or outside one, or another bucket's; staleUploads says what it deleted" \
+  || { bad "sweep: exit $rc, staleUploads '$(data infrared-store-paths-applied staleUploads)', removed $(grep '^removed ' "$S/calls" | tr '\n' ' ')"; show; }
+# A sweep that fails says so in the log and in staleUploads; the path rules'
+# result stays theirs.
+put "$R/acme/images/web/.uploads/s6" session-six "$TWO_DAYS_AGO"
+before="$(tree_of /buckets)"
+rc=0
+run_applier FAKE_RM_FAIL='*/s6' || rc=$?
+[ "$rc" = 0 ] && [ "$(data infrared-store-paths-applied result)" = applied ] && [ "$(tree_of /buckets)" = "$before" ] \
+  && [[ "$(data infrared-store-paths-applied staleUploads)" == *" failed 0 0 1 of them still there after their deletion, acme/images/web/.uploads/s6 first: "* ]] \
+  && grep -q "^the sweep failed, .*; the path rules' result is not changed by it$" "$S/applier.log" \
+  && ok "sweep: a sweep that cannot delete a session says so in the log and in staleUploads, and the path rules' result is theirs: applied" \
+  || { bad "sweep failed: exit $rc, $(jq -c .data "$S/cm/infrared-store-paths-applied.json")"; show; }
+# STALE_UPLOADS: refused unless a positive whole number, before anything is
+# done; taken when it is.
+mark="$(grep -c . "$S/calls")"
+applied="$(jq -c .data "$S/cm/infrared-store-paths-applied.json")"
+rc=0
+run_applier STALE_UPLOADS=1d || rc=$?
+refused=$rc
+refused_log="$(cat "$S/applier.log")"
+calls_after="$(calls_from "$mark" | grep -c . || true)"
+applied_after="$(jq -c .data "$S/cm/infrared-store-paths-applied.json")"
+rc=0
+run_applier STALE_UPLOADS=300 || rc=$?
+[ "$refused" != 0 ] && [ "$calls_after" = 0 ] && [ "$applied_after" = "$applied" ] \
+  && grep -q 'STALE_UPLOADS is "1d", not a positive whole number of seconds' <<<"$refused_log" \
+  && [ "$rc" = 0 ] && [[ "$(data infrared-store-paths-applied staleUploads)" == *" deleted 3 21" ]] \
+  && [ ! -e "$S/fs$R/zot/zot/acme/web/.uploads/young" ] && [ ! -e "$S/fs$R/acme/images/web/.uploads/young" ] \
+  && ok "sweep: STALE_UPLOADS that is not a positive whole number stops the run before any call; one of 300 seconds sweeps the sessions ten minutes old too" \
+  || { bad "sweep STALE_UPLOADS: refused exit $refused with $calls_after calls, then exit $rc, $(data infrared-store-paths-applied staleUploads)"; show; }
+
+# The sweep while a migration runs: it waits in a run that carries the
+# migration's want; between its wants it deletes a stale session at a source,
+# then a session verified young since gone stale and its copy; the final, its
+# verification and the retire hold.
+new_state sweep-move
+registry_repos
+unput "$WEB/.uploads/u1"
+put_size "$WEB/.uploads/old" "$GIB3" "$TWO_DAYS_AGO"
+put "$WEB/.uploads/young" young-web "$TEN_MINUTES_AGO"
+put "$WEB/api/.uploads/young" young-api "$TEN_MINUTES_AGO"
+paths_cm "" "" ""
+cm infrared-store-paths-applied '{"format": "1"}'
+journal "$ID" "$FROM" "$TO" "$MOVES" 1 $'precopy 1\nprecopy 2\nmeasure delta\n'
+run_applier || true
+waited="$([ -f "$S/fs$WEB/.uploads/old" ] && grep -qx "stale 2 1 $GIB3" <<<"$(data infrared-store-moves measured)" \
+  && [ -z "$(data infrared-store-paths-applied staleUploads)" ] && grep -q 'wait for a run without one$' "$S/applier.log" && echo yes)"
+# Its want done, a run of the path rules: the sweep deletes the stale session
+# at the source, and the migration's journal takes nothing.
+run_applier || true
+first="$(data infrared-store-paths-applied staleUploads)"
+gone_old="$([ ! -e "$S/fs$WEB/.uploads/old" ] && grep -q 'has its outcome already' "$S/applier.log" && echo yes)"
+journal "$ID" "$FROM" "$TO" "$MOVES" 2 $'final 1\nfinal 2\nunmark 2\n'
+run_applier || true
+v1="$(line_of 1 verified)"
+v2="$(line_of 2 verified)"
+# A day on: both young sessions untouched since, at their sources and at
+# their copies; the sweep deletes all four, and no step of the migration.
+for f in "$WEB/.uploads/young" "$NEW/.uploads/young" "$WEB/api/.uploads/young" "$NEW/api/.uploads/young"; do echo "$TWO_DAYS_AGO" >"$S/mtime$f"; done
+states="$(data infrared-store-moves state.1)$(data infrared-store-moves state.2)"
+run_applier || true
+second="$(data infrared-store-paths-applied staleUploads)"
+gone_young="$([ ! -e "$S/fs$WEB/.uploads/young" ] && [ ! -e "$S/fs$NEW/.uploads/young" ] && [ ! -e "$S/fs$WEB/api/.uploads/young" ] \
+  && [ ! -e "$S/fs$NEW/api/.uploads/young" ] && [ "$(data infrared-store-moves state.1)$(data infrared-store-moves state.2)" = "$states" ] && echo yes)"
+# The window redone for move 1, move 2 retired on the verification that
+# listed its young session: both hold.
+mark="$(grep -c . "$S/calls")"
+journal "$ID" "$FROM" "$TO" "$MOVES" 3 $'final 1\nunmark 1\nretire 1\nretire 2\n'
+run_applier || true
+[ "$waited" = yes ] && [ "$gone_old" = yes ] && [[ "$first" == *" deleted 1 $GIB3" ]] \
+  && [ "$(cut -d' ' -f4 <<<"$v1")/$(cut -d' ' -f4 <<<"$v2")" = 3/5 ] \
+  && [ "$gone_young" = yes ] && [[ "$second" == *" deleted 4 36" ]] \
+  && [ "$(steps 1)" = "precopying precopied copying copied verified copying copied verified unmarked deleted" ] \
+  && [ "$(line_of 1 verified | cut -d' ' -f4)" = 2 ] && [ "$(line_of 1 deleted | cut -d' ' -f4,5)" = "2 0" ] \
+  && [ "$(steps 2)" = "precopying precopied copying copied verified unmarking unmarked deleted" ] \
+  && [ "$(line_of 2 deleted | cut -d' ' -f4,5)" = "3 0" ] && [ ! -e "$S/fs$WEB" ] \
+  && [ -z "$(cd "$S/fs$NEW" && find . -type f -path '*/.uploads/*')" ] && [ -f "$S/fs$NEW/index.json" ] && [ -f "$S/fs$NEW/api/index.json" ] \
+  && ! calls_from "$mark" | grep -q '^s3 copy .*\.uploads/' \
+  && ok "sweep-move: the sweep waits while a run carries the migration's want; between its wants it deletes a stale session at a source, then one verified young since gone stale and its copy; a final after it verifies, and a retire on the verification that listed it deletes the rest" \
+  || { bad "sweep-move: waited '$waited', old gone '$gone_old' ($first), young gone '$gone_young' ($second), state.1 '$(steps 1)', state.2 '$(steps 2)'"; show; }
 
 # --- Moving back: the repositories found ------------------------------------------------------
 new_state rollback

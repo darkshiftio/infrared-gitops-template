@@ -273,8 +273,10 @@
 #     scripts/store-applier-test.sh runs them against a pretend SeaweedFS and
 #     API: nothing deleted before its copy is verified at its new path, a
 #     failed or mismatched copy leaves the source, a call that stalls times
-#     out and fails its step, a stopped run resumes, and the path rules,
-#     purges and log prune as the operator's contract says
+#     out and fails its step, a stopped run resumes, a move leaves the
+#     registry's stale upload sessions where they are and the sweep deletes
+#     them and nothing else, and the path rules, purges and log prune as the
+#     operator's contract says
 #   - kubeconform accepts all of it (-strict; CRD kinds are checked against the
 #     public CRDs-catalog schemas, Agent Substrate's against its vendored CRDs,
 #     and kinds neither has are skipped)
