@@ -239,6 +239,10 @@ spec:
                   value: seaweedfs-filer-client.stores:18888
                 - name: MASTER_GRPC
                   value: seaweedfs-master.stores:19333
+                # Each master by its own name: only the raft leader answers
+                # its gRPC, and the Service above names them all.
+                - name: MASTER_GRPC_PEERS
+                  value: "[[ if .StoresSingleNode ]]seaweedfs-master-0.seaweedfs-master.stores:19333[[ else ]]seaweedfs-master-0.seaweedfs-master.stores:19333 seaweedfs-master-1.seaweedfs-master.stores:19333 seaweedfs-master-2.seaweedfs-master.stores:19333[[ end ]]"
 [[- if $mtls ]]
                 # gRPC under mutual TLS: the CA and the client certificate below.
                 - name: GRPC_TLS

@@ -108,6 +108,12 @@ case "$url" in
       exit 2
     fi
     ;;
+  http://seaweedfs-master.stores:9333/cluster/status)
+    # Every master answers it: FAKE_CLUSTER_STATUS, or 503 with
+    # FAKE_CLUSTER_STATUS_FAIL.
+    called "cluster status"
+    if [ -n "${FAKE_CLUSTER_STATUS_FAIL:-}" ] || [ -z "${FAKE_CLUSTER_STATUS:-}" ]; then code=503; else printf '%s' "$FAKE_CLUSTER_STATUS" >"$body"; fi
+    ;;
   http://*/status)
     id="${url#http://}"
     id="${id%/status}"

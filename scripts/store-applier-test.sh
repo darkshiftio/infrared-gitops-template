@@ -18,6 +18,8 @@
 #                    done in infrared-store-paths-applied
 #   paths-refused    a purge of the platform's own files, a rule outside an
 #                    org's kind, or a hash that does not match: nothing done
+#   leader           the masters' calls follow the raft leader: /cluster/status,
+#                    else each master by name; none answering fails the run
 #   measure          each move's files, the free space, the repositories found
 #   copy             copying recorded before the first copy; each file copied
 #                    as new data with its source's time, a repository's own
@@ -232,6 +234,44 @@ for refused in "platform-purge" "outside" "hash"; do
     && [ -f "$S/fs/buckets/media/platform/pictures/owner" ] && ! grep -q '^weed fs.rm\|^weed fs.configure -' "$S/calls" \
     && ok "paths-refused ($refused): nothing applied, nothing removed, and the failure recorded: $(data infrared-store-paths-applied message)" \
     || { bad "paths-refused ($refused): exit $rc, $(jq -c .data "$S/cm/infrared-store-paths-applied.json")"; show; }
+done
+
+# --- The masters: only the raft leader answers a master's gRPC ----------------------
+# MASTER_GRPC is a headless Service, every master's name (three of them off
+# one node): a follower answers "raft.Server: Not current leader". The
+# measure's VolumeList follows the leader /cluster/status names, else each
+# master by its own name; with none answering, it fails, and nothing is done.
+LEADER=seaweedfs-master-2.seaweedfs-master.stores:19333
+PEERS="seaweedfs-master-0.seaweedfs-master.stores:19333 seaweedfs-master-1.seaweedfs-master.stores:19333 $LEADER"
+STATUS='{"IsLeader":false,"Leader":"seaweedfs-master-2.seaweedfs-master.stores:9333.19333","Peers":["seaweedfs-master-0.seaweedfs-master.stores:9333.19333","seaweedfs-master-1.seaweedfs-master.stores:9333.19333"]}'
+for how in status names none; do
+  new_state "leader-$how"
+  registry_repos
+  journal 20261117T101500Z "$FROM" "$TO" "$MOVES" 1 $'measure\n'
+  rc=0
+  case "$how" in
+    status) run_applier FAKE_MASTER_LEADER="$LEADER" FAKE_CLUSTER_STATUS="$STATUS" || rc=$? ;;
+    names) run_applier FAKE_MASTER_LEADER="$LEADER" FAKE_CLUSTER_STATUS_FAIL=true MASTER_GRPC_PEERS="$PEERS" || rc=$? ;;
+    none) run_applier FAKE_MASTER_LEADER=seaweedfs-master-9.seaweedfs-master.stores:19333 FAKE_CLUSTER_STATUS_FAIL=true \
+      MASTER_GRPC_PEERS="$PEERS" || rc=$? ;;
+  esac
+  m="$(data infrared-store-moves measured)"
+  answered="$(grep '^master ' "$S/calls" | awk '{ print $2 }' | tr '\n' ' ')"
+  case "$how" in
+    status)
+      [ "$rc" = 0 ] && grep -qx 'free 40000000000' <<<"$m" && [ "$answered" = "seaweedfs-master.stores:19333 $LEADER " ] \
+        && ok "leader: a follower behind the masters' Service, then the leader /cluster/status names answers the measure's VolumeList" \
+        || { bad "leader-status: exit $rc, asked $answered, measured $m"; show; } ;;
+    names)
+      [ "$rc" = 0 ] && grep -qx 'free 40000000000' <<<"$m" && [ "$answered" = "seaweedfs-master.stores:19333 $PEERS " ] \
+        && ok "leader: with /cluster/status down, each master by its name until the leader answers" \
+        || { bad "leader-names: exit $rc, asked $answered, measured $m"; show; } ;;
+    none)
+      [ "$rc" != 0 ] && [ -z "$m" ] && [[ "$(data infrared-store-moves outcome)" == *"Not current leader"* ]] \
+        && ! grep -q '^s3 copy \|^removed ' "$S/calls" \
+        && ok "leader: with no master answering, the run fails saying why, and nothing is measured, copied or removed" \
+        || { bad "leader-none: exit $rc, outcome $(data infrared-store-moves outcome)"; show; } ;;
+  esac
 done
 
 # --- The migration: measure, copy and verify, delete ------------------------------

@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
 # A fake grpcurl for scripts/store-applier-test.sh: the filer's and master's
-# calls the applier makes, on the pretend SeaweedFS in FAKE_STATE.
+# calls the applier makes, on the pretend SeaweedFS in FAKE_STATE. With
+# FAKE_MASTER_LEADER, a master's call to any other address fails as a raft
+# follower's does.
 # shellcheck source-path=SCRIPTDIR source=fake-lib.sh
 . "$(dirname "$0")/fake-lib.sh"
-method=""
-for a in "$@"; do method=$a; done
+method="" address="" prev=""
+for a in "$@"; do address=$prev; prev=$a; method=$a; done
 case " $* " in
   *" -plaintext "* | *" -cacert "*) ;;
   *) echo "fake grpcurl: neither -plaintext nor TLS" >&2; exit 2 ;;
 esac
 req="$(cat)"
 called "grpcurl $method"
+# FAKE_MASTER_LEADER: the one master that answers a master's call; any other
+# says so, as a raft follower does.
+case "$method" in
+  master_pb.*)
+    called "master $address $method"
+    if [ -n "${FAKE_MASTER_LEADER:-}" ] && [ "$address" != "$FAKE_MASTER_LEADER" ]; then
+      printf 'ERROR:\n  Code: Unknown\n  Message: raft.Server: Not current leader\n' >&2
+      exit 66
+    fi
+    ;;
+esac
 case "$method" in
   filer_pb.SeaweedFiler/ListEntries)
     dir="$(jq -r .directory <<<"$req")"
