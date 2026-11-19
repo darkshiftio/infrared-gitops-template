@@ -15,7 +15,9 @@
 #
 #   runner    the runner image in its one-shot serve mode with --dry-run
 #             (its own files as the step's repo, so no forge is reached), a
-#             canary in its environment
+#             canary in its environment, started as the operator starts it:
+#             through substrate-actor-launch.sh, the CNB launcher without its
+#             exec.d, which gVisor's missing cgroup filesystem breaks
 #   selftest  the same image, as the same user, printing what it can see and
 #             reach from beside the runner (substrate-actor-check-selftest.js)
 #             to the worker's log
@@ -67,6 +69,7 @@ cleanup() {
 
 { client_preamble; cat "$here/substrate-actor-check-job.sh"; } >"$work/check.sh"
 k -n "$ns" create configmap "$job" --from-file=selftest.js="$here/substrate-actor-check-selftest.js" --from-file=check.sh="$work/check.sh" \
+  --from-file=launch.sh="$here/substrate-actor-launch.sh" \
   --dry-run=client -o yaml | k apply -f - >/dev/null
 k label -n "$ns" configmap "$job" app.kubernetes.io/part-of=substrate-actor-check --overwrite >/dev/null
 

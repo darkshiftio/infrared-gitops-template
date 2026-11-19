@@ -59,16 +59,16 @@ router() { # router <method> <path> [curl args...]: an HTTPS request to the acto
     -H "ate-target-actor: $A/check" -X "$m" "$@" "https://atenet-router.ate-system.svc$p"
 }
 echo "{\"atespace\":{\"metadata\":{\"name\":\"$A\"}}}" | ate CreateAtespace >/dev/null
-jq -n --arg a "$A" --arg img "$RUNNER_IMAGE" --arg canary "$CANARY" --rawfile js /check/selftest.js '{actorTemplate: {
+jq -n --arg a "$A" --arg img "$RUNNER_IMAGE" --arg canary "$CANARY" --rawfile js /check/selftest.js --rawfile launch /check/launch.sh '{actorTemplate: {
   metadata: {atespace: $a, name: "check"},
   workerSelector: {matchLabels: {"infrared.darkshift.io/worker-pool": "agents"}},
   containers: [
     {name: "runner", image: $img,
-     command: ["/cnb/lifecycle/launcher", "node", "dist/main.js", "--serve", "--listen", "0.0.0.0:80", "--workdir", "/tmp/work", "--dry-run",
-       "--local-repo", "/workspace/dist"],
+     command: ["/bin/sh", "-c", $launch, "launch", "node", "dist/main.js", "--serve", "--listen", "0.0.0.0:80", "--workdir", "/tmp/work",
+       "--dry-run", "--local-repo", "/workspace/dist"],
      env: [{name: "HOME", value: "/tmp"}, {name: "INFRARED_WORKDIR", value: "/tmp/work"}, {name: "ACTORCHECK_CANARY", value: $canary}],
      wakeupProbe: {httpGet: {path: "/healthz", port: 80}, timeoutSeconds: 120}},
-    {name: "selftest", image: $img, command: ["/cnb/lifecycle/launcher", "node", "-e", $js],
+    {name: "selftest", image: $img, command: ["/bin/sh", "-c", $launch, "launch", "node", "-e", $js],
      env: [{name: "HOME", value: "/tmp"}, {name: "STEP_ID", value: "actor-check-step"}]}],
   resources: {limits: {cpuMillicores: "1000", memoryBytes: "2147483648"}},
   snapshotConfig: {preferredFidelity: "SNAPSHOT_FIDELITY_VOLUMES", goldenSnapshotConfig: {mode: "GOLDEN_SNAPSHOT_MODE_DISABLED"}}}}' |

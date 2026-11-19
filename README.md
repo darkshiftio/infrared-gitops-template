@@ -1202,7 +1202,11 @@ makes an atespace of its own and an actor of two containers on the WorkerPool
 `agents`: the runner in its one-shot serve mode with `--dry-run` (its own files
 as the step's repo) and a canary in its environment, and a self-test container
 beside it from the same image, as the same user
-(`scripts/substrate-actor-check-selftest.js`). It starts one step through the
+(`scripts/substrate-actor-check-selftest.js`). Both start as the operator
+starts an actor's containers, through `scripts/substrate-actor-launch.sh`: the
+CNB launcher without its exec.d, since gVisor's sandbox mounts no cgroup
+filesystem and the Paketo node-engine buildpack's exec.d `0-optimize-memory`
+reads the memory limit from it. It starts one step through the
 router with a dummy credential, polls it to its end, and passes when the step
 was taken and answered DRY-RUN; the self-test saw none of the runner's
 processes, no other process's environment or memory, and got 409 for a second
