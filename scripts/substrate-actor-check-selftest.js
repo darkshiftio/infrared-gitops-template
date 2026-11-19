@@ -25,6 +25,20 @@ function req(method, path, body, headers = {}) {
   });
 }
 
+// httpTo(url): an HTTP GET's status, or the error that stopped it: what a
+// step's runner meets dialling an in-cluster service through the egress
+// gateway (CHECK_HTTP_URLS, space-separated; none by default).
+function httpTo(url) {
+  return new Promise((resolve) => {
+    const r = http.get(url, { timeout: 10000 }, (res) => {
+      res.resume();
+      resolve(`status:${res.statusCode}`);
+    });
+    r.on("error", (e) => resolve(`error:${e.code || e.message}`));
+    r.on("timeout", () => r.destroy(Object.assign(new Error("timeout"), { code: "TIMEOUT" })));
+  });
+}
+
 function tlsTo(host) {
   return new Promise((resolve) => {
     const s = tls.connect({ host, port: 443, servername: host, timeout: 10000 }, () => {
@@ -74,6 +88,9 @@ async function round(n) {
   out("poll-wrong-token", await req("GET", `/steps/${process.env.STEP_ID}`, null, { authorization: `Bearer ${"y".repeat(64)}` }));
   out("egress-listed", await tlsTo("api.anthropic.com"));
   out("egress-unlisted", await tlsTo("example.com"));
+  for (const [i, url] of (process.env.CHECK_HTTP_URLS || "").split(" ").filter(Boolean).entries()) {
+    out(`http-${i}`, `${url} ${await httpTo(url)}`);
+  }
 }
 
 (async () => {
