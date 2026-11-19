@@ -1186,13 +1186,35 @@ actors and access policies at 1.0 are records in `substrate_v1` and start
 empty. Before an install with `.SubstrateRegistry` moves, copy each image of
 the new pins there by digest.
 
-Two checks run against a cluster, never from CI, from the place the policy
+Three checks run against a cluster, never from CI, from the place the policy
 admits:
 
 ```bash
 scripts/substrate-serve-check.sh <context>   # the control plane serves: every workload ready, the trust bundles published, the identity provider's keys, and the API answering, and authorizing, a caller
 scripts/substrate-fence-check.sh <context>   # the API refuses a caller with no token and one that is no owner, the router a client not on its allowlist, and neither answers an organization's namespace or ate-workers
+scripts/substrate-actor-check.sh <context>   # with the WorkerPool agents: an actor keeps the runner's secrets from the container beside it
 ```
+
+The actor check is the gate before any real credential enters an actor
+(infrared-docs-internal ADR 0089 D4). From a Job in Infrared's namespace that
+runs as the operator's ServiceAccount with the operator's pod certificate, it
+makes an atespace of its own and an actor of two containers on the WorkerPool
+`agents`: the runner in its one-shot serve mode with `--dry-run` (its own files
+as the step's repo) and a canary in its environment, and a self-test container
+beside it from the same image, as the same user
+(`scripts/substrate-actor-check-selftest.js`). Both start as the operator
+starts an actor's containers, through `scripts/substrate-actor-launch.sh`: the
+CNB launcher without its exec.d, since gVisor's sandbox mounts no cgroup
+filesystem and the Paketo node-engine buildpack's exec.d `0-optimize-memory`
+reads the memory limit from it. It starts one step through the
+router with a dummy credential, polls it to its end, and passes when the step
+was taken and answered DRY-RUN; the self-test saw none of the runner's
+processes, no other process's environment or memory, and got 409 for a second
+step and 401 for a poll without the step's token or with another; egress
+reached the one host the actor's policy names and not another; and the dummy
+credential is in neither the template nor Substrate's database. A self-test that
+sees the runner's processes means the containers share a PID namespace: no org
+goes on actors. Everything it made is deleted unless `KEEP=1`.
 
 The atespaces, the templates and every actor are records in Substrate's
 database: removing `substrate-actors` leaves them. Within 1.x, upstream moves
