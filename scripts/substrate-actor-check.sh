@@ -33,6 +33,10 @@
 # Everything it made is deleted afterwards, whatever the outcome, unless
 # KEEP=1. CLEANUP=<atespace> deletes what a run that died midway left in that
 # atespace (its actor, its template and the atespace) and checks nothing.
+# CHECK_HTTP_URLS="http://<host>:<port>/<path> ..." also has the self-test GET
+# each in-cluster URL through the egress gateway, its host named in the policy
+# plain on its port as the operator names a step's services, and prints what
+# each answered: whether a name resolves inside an actor.
 # Needs: kubectl, jq, openssl. The WorkerPool agents (runner.actors on).
 # =============================================================================
 set -euo pipefail
@@ -139,6 +143,8 @@ spec:
               value: "${KEEP:-0}"
             - name: CLEANUP_ONLY
               value: "${CLEANUP:+1}"
+            - name: CHECK_HTTP_URLS
+              value: "${CHECK_HTTP_URLS:-}"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -208,7 +214,7 @@ fi
 
 # The self-test's lines, from the worker that ran the actor: its last round.
 self="$(for p in $(k -n ate-workers get pods -o name); do k -n ate-workers logs "$p" --all-containers 2>/dev/null || true; done |
-  grep -o 'ACTOR-CHECK [a-z-]* [^;]*;;' | sed 's/ *;;$//' || true)"
+  grep -o 'ACTOR-CHECK [a-z0-9-]* [^;]*;;' | sed 's/ *;;$//' || true)"
 last() { grep "^ACTOR-CHECK $1 " <<<"$self" | tail -n 1 | sed "s/^ACTOR-CHECK $1 //"; }
 
 # Substrate's database holds no credential of the step.
@@ -243,6 +249,14 @@ check "a poll without the step's token" "$(last poll-without-token)" '401'
 check "a poll with another token" "$(last poll-wrong-token)" '401'
 check "egress to a host the policy names" "$(last egress-listed)" 'connected:verified'
 check "egress to a host it does not name" "$(last egress-unlisted)" 'error:.*'
+if [ -n "${CHECK_HTTP_URLS:-}" ]; then
+  log "in-cluster services, each named in the policy, plain on its port (CHECK_HTTP_URLS)"
+  i=0
+  for _ in $CHECK_HTTP_URLS; do
+    echo "  info  $(last "http-$i")"
+    i=$((i + 1))
+  done
+fi
 log "where a credential must never be"
 check "the dummy credential in the template" "$(jl template-holds-secret)" '0'
 check "the dummy credential in Substrate's database" "$in_db" '0'
