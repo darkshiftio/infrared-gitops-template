@@ -108,6 +108,11 @@ WEED="${WEED:-/tools/weed}"
 GRPCURL="${GRPCURL:-/tools/grpcurl}"
 FILER_GRPC="${FILER_GRPC:-seaweedfs-filer-client.stores:18888}"
 MASTER_GRPC="${MASTER_GRPC:-seaweedfs-master.stores:19333}"
+# The masters' HTTP address, which answers /cluster/status on every master,
+# and each master by its own name: only the raft leader answers a master's
+# gRPC, and MASTER_GRPC names them all (master_grpc).
+MASTER_HTTP="${MASTER_HTTP:-${WEED_CLUSTER_SW_MASTER:-seaweedfs-master.stores:9333}}"
+MASTER_GRPC_PEERS="${MASTER_GRPC_PEERS:-}"
 S3_ENDPOINT="${S3_ENDPOINT:-http://seaweedfs-s3.stores.svc:8333}"
 GRPC_TLS="${GRPC_TLS:-false}"
 BUCKET_COPIES="${BUCKET_COPIES:-2}"
@@ -169,10 +174,59 @@ weed_shell() {
 # answer(s) on stdout, JSON.
 grpc() {
   if [ "$GRPC_TLS" = true ]; then
-    "$GRPCURL" -max-time 3600 -cacert "$GRPC_CA" -cert "$GRPC_CERT" -key "$GRPC_KEY" -d @ "$1" "$2"
+    # [3]: the name the server's certificate is checked against, when the
+    # address is one a master named (master_grpc).
+    "$GRPCURL" -max-time 3600 -cacert "$GRPC_CA" -cert "$GRPC_CERT" -key "$GRPC_KEY" ${3:+-servername "$3"} -d @ "$1" "$2"
   else
     "$GRPCURL" -max-time 3600 -plaintext -d @ "$1" "$2"
   fi
+}
+
+# grpc_address <server address>: a SeaweedFS server address as the masters
+# name one, <host>:<http port>.<grpc port> or <host>:<http port>, as its gRPC
+# address (SeaweedFS's ServerAddress.ToGrpcAddress): the port after the last
+# dot, else the HTTP port and 10000.
+grpc_address() {
+  local host=${1%:*} ports=${1##*:}
+  case "$ports" in
+    *.*) printf '%s:%s' "$host" "${ports##*.}" ;;
+    "" | *[!0-9]*) return 1 ;;
+    *) printf '%s:%s' "$host" $((10#$ports + 10000)) ;;
+  esac
+}
+
+# master_grpc <service/method>: one call to the masters, the request on
+# stdin, the answer on stdout: only the raft leader answers, and MASTER_GRPC
+# (a headless Service, every master's name) may reach another, which says
+# "raft.Server: Not current leader". So: MASTER_GRPC; else the leader
+# /cluster/status names on MASTER_HTTP, and the peers it names; else each
+# master by its own name (MASTER_GRPC_PEERS). Under mutual TLS each is checked
+# against MASTER_GRPC's name, which the masters' one certificate holds. The
+# last error is in $tmp/master.err.
+master_grpc() {
+  local req=$tmp/master.req out=$tmp/master.out addr tried=" "
+  cat >"$req"
+  if grpc "$MASTER_GRPC" "$1" <"$req" >"$out" 2>"$tmp/master.err"; then
+    cat "$out"
+    return 0
+  fi
+  : >"$tmp/master.addrs"
+  if curl -sS -f --connect-timeout 10 --max-time 30 "http://$MASTER_HTTP/cluster/status" >"$tmp/master.status" 2>>"$tmp/master.err"; then
+    jq -r '[.Leader // empty] + [.Peers // [] | if type == "object" then keys[] else .[] end] | .[] | select(type == "string" and . != "")' \
+      "$tmp/master.status" 2>/dev/null | while IFS= read -r addr; do grpc_address "$addr" && echo; done >>"$tmp/master.addrs" || true
+  fi
+  # shellcheck disable=SC2086 # the masters' names, one a word
+  printf '%s\n' $MASTER_GRPC_PEERS >>"$tmp/master.addrs"
+  while IFS= read -r addr <&3; do
+    case "$addr" in "" | "$MASTER_GRPC") continue ;; esac
+    case "$tried" in *" $addr "*) continue ;; esac
+    tried="$tried$addr "
+    if grpc "$addr" "$1" "${MASTER_GRPC%:*}" <"$req" >"$out" 2>>"$tmp/master.err"; then
+      cat "$out"
+      return 0
+    fi
+  done 3<"$tmp/master.addrs"
+  return 1
 }
 
 # The S3 identities' keys, for curl, in files only this container reads.
@@ -1368,7 +1422,10 @@ discard_move() {
 # the bucket's copies.
 free_bytes() {
   local id least="" servers=0 all free avail
-  printf '{}\n' | grpc "$MASTER_GRPC" master_pb.Seaweed/VolumeList >"$tmp/topology.json" 2>"$tmp/topology.err" || return 1
+  if ! printf '{}\n' | master_grpc master_pb.Seaweed/VolumeList >"$tmp/topology.json"; then
+    tail -c 400 "$tmp/master.err" >"$tmp/topology.err"
+    return 1
+  fi
   for id in $(jq -r '.. | objects | select(has("dataNodeInfos")) | .dataNodeInfos[] | .id' "$tmp/topology.json"); do
     curl -sS -f --connect-timeout 10 --max-time 60 "http://$id/status" >"$tmp/status.json" 2>"$tmp/status.err" || return 1
     all="$(jq -r '[.DiskStatuses[]?.all // 0] | add // 0 | floor' "$tmp/status.json")"

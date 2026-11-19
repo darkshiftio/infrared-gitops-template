@@ -3077,6 +3077,15 @@ bucket_mounts() { sel "$1/components/seaweedfs/prepare.yaml" 'select(.kind == "J
   && [ "$(weed_env "$work/paths-single" BUCKET_COPIES)" = 1 ] \
   && ok "paths-sec: under mutual TLS the container weed mounts what seaweedfs-buckets does, of the CA its certificate alone; without cert-manager, plain gRPC and no certificate; on one node a file is one copy" \
   || bad "paths-sec: the applier's TLS is wrong: $(weed_mounts "$work/paths-sec")"
+# Only the masters' raft leader answers their gRPC: the applier follows it
+# (store-paths.sh master_grpc), by /cluster/status, else by each master's own
+# name: three of them, or the one master of one node.
+masters3="seaweedfs-master-0.seaweedfs-master.stores:19333 seaweedfs-master-1.seaweedfs-master.stores:19333 seaweedfs-master-2.seaweedfs-master.stores:19333"
+[ "$(weed_env "$work/paths-sec" MASTER_GRPC_PEERS)" = "$masters3" ] \
+  && [ "$(weed_env "$work/paths-single" MASTER_GRPC_PEERS)" = "seaweedfs-master-0.seaweedfs-master.stores:19333" ] \
+  && [ "$(weed_env "$work/paths-sec" MASTER_GRPC)" = "seaweedfs-master.stores:19333" ] \
+  && ok "paths: the container weed names each master, three or the one of one node, beside the masters' Service, so it reaches the raft leader" \
+  || bad "paths: the masters the applier names: '$(weed_env "$work/paths-sec" MASTER_GRPC_PEERS)' and '$(weed_env "$work/paths-single" MASTER_GRPC_PEERS)'"
 if kubectl kustomize "$work/paths-sec/components/seaweedfs" >"$work/paths-sec-seaweedfs.yaml" \
   && kubeconform -strict -ignore-missing-schemas -summary "$work/paths-sec-seaweedfs.yaml" >/dev/null; then
   ok "paths-sec: components/seaweedfs builds and passes kubeconform"
