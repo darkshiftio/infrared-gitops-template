@@ -92,9 +92,10 @@ imagePullSecrets:
 # =============================================================================
 # The buildpacks kpack may use, pinned by tag AND digest.
 # =============================================================================
-# Versions are the ones Paketo's own Ubuntu Noble builder ships
-# (github.com/paketo-buildpacks/ubuntu-noble-builder, builders/builder/builder.toml,
-# read 2026-09-28), but web-servers: 4.16.3 since 2026-11-20, whose nginx buildpack (1.3.8)
+# Each the newest release on 2026-11-20 (the upgrade sweep, workspace TODO 742): go 4.23.5,
+# whose go-dist (2.11.4) offers Go 1.27.4, the fix for GO-2026-6859 (an HTTP/1 server crash
+# in net/http); nodejs 10.17.0, whose node-engine (8.12.3) offers Node 22.23.5, 24.22.3 and
+# 26.13.1; web-servers 4.16.3, whose nginx buildpack (1.3.8)
 # serves nginx 1.31.9 by default, the fix for nginx2root (CVE-2026-123007, -123633, -123634,
 # -121810 and -113425). Digests from `crane digest docker.io/paketobuildpacks/<bp>:<v>`.
 # To bump: change tag and digest together, in one pull request.
@@ -107,8 +108,8 @@ metadata:
   name: paketo
 spec:
   sources:
-    - image: docker.io/paketobuildpacks/go:4.23.1@sha256:5ce653b1df0be9d746812a981642db6c3780c0b78c575b92029d0bbbc04270ea
-    - image: docker.io/paketobuildpacks/nodejs:10.13.0@sha256:370e0352f0131a328b8fde4fcef208b377e8617ff686aa76932213e18881bbdf
+    - image: docker.io/paketobuildpacks/go:4.23.5@sha256:db78f48f0b6d51607537db04c91e1611cea283bc05e09ab9554ddb9af7b33253
+    - image: docker.io/paketobuildpacks/nodejs:10.17.0@sha256:ba6341b9dee1a3733f912fcf843e4c0e4b251dbf0ea5abdc09a819f2c3015f79
     - image: docker.io/paketobuildpacks/web-servers:4.16.3@sha256:a01f811143ca2629a1cfb2b053a63de0b845cf6e38d19ca375f2c3d6c62c6e97
 ---
 # =============================================================================
@@ -128,9 +129,9 @@ metadata:
 spec:
   id: io.buildpacks.stacks.noble
   buildImage:
-    image: docker.io/paketobuildpacks/ubuntu-noble-build:0.0.136@sha256:d516afab8a0e034fb35a78dc1db080e6e46c03c5a46de5588f78b377c25694a7
+    image: docker.io/paketobuildpacks/ubuntu-noble-build:0.0.162@sha256:20752810c913fb51847cbf9159e0ad9769dd34db040cc89b6b588761269c68c4
   runImage:
-    image: docker.io/paketobuildpacks/ubuntu-noble-run:0.0.136@sha256:1fc3397ff5fb46923b8dd91548b9196ecc7d56fd7ea79d9814cef8e3bcc3450a
+    image: docker.io/paketobuildpacks/ubuntu-noble-run:0.0.162@sha256:00209cf68f2a1ed1cdb2f5a9502384433f0194fa11e1a9ac674bd0a2b54601b5
 ---
 # =============================================================================
 # `infrared-builder`: Go services, Go services with a UI built by Node, and web
