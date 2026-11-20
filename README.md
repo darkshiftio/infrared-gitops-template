@@ -324,11 +324,11 @@ pull secret, existing Secrets, build registry, and the install's settings in
 |---|---|---|---|
 | — | `registry-<cluster>` (root) | this repo, `registry/clusters/<cluster>/components` | `.DefaultBranch` |
 | 0 | `appprojects` | `components/appprojects` | — |
-| 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.2 |
+| 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.3 |
 | 10 | `external-secrets` | https://charts.external-secrets.io `external-secrets` | 2.11.0 |
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
 | 11 | `platform-tokens` (gateway, backups, Substrate's pull secret, or the code index) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
-| 11 | `envoy-gateway` (gateway only) | `docker.io/envoyproxy` `gateway-crds-helm` (its own CRDs) and `gateway-helm` | v1.9.2 |
+| 11 | `envoy-gateway` (gateway only) | `docker.io/envoyproxy` `gateway-crds-helm` (its own CRDs) and `gateway-helm` | v1.9.4 |
 | 11 | `origin-ca-issuer` (gateway only, without a tunnel) | `ghcr.io/cloudflare/origin-ca-issuer-charts` `origin-ca-issuer`, CRDs from https://github.com/cloudflare/origin-ca-issuer `deploy/crds` | chart 0.6.10, v0.15.0 |
 | 12 | `external-dns` (gateway only, without a tunnel) | https://kubernetes-sigs.github.io/external-dns/ `external-dns` + `components/external-dns` | 1.22.0 (v0.22.0) |
 | 12 | `external-dns-domain` (gateway, with `.DomainTokenKey`, without a tunnel) | the same chart as `external-dns`, release `external-dns-domain` in the namespace `external-dns`, + `components/external-dns-domain` | 1.22.0 (v0.22.0) |
