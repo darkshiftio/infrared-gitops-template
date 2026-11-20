@@ -18,7 +18,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.3}"
+ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.8}"
 url="https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
 out="template/components/argocd/install.yaml"
 

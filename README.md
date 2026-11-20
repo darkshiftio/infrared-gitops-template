@@ -350,7 +350,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 30 | `telemetry` (with `.Telemetry.URL`, and the metrics stack left out) | `components/telemetry`: one vmagent that remote-writes to that URL (see "The telemetry plane") | vmagent v1.154.0, by digest |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
 | 41 | `code-index` (with the code index's pin and `.ImageRegistry`) | `components/code-index`: Infrared's code index, Zoekt and the code service | `<ImageRegistry>/infrared-codeindex`, the pin in `.Images` |
-| 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.3 |
+| 100 | `argocd` | `components/argocd` (vendored `install.yaml`) | v3.5.8 |
 
 Every component Application has a sync wave, `SkipDryRunOnMissingResource=true`
 (on an empty cluster CRDs arrive from sibling Applications in the background),
