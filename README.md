@@ -324,7 +324,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 |---|---|---|---|
 | — | `registry-<cluster>` (root) | this repo, `registry/clusters/<cluster>/components` | `.DefaultBranch` |
 | 0 | `appprojects` | `components/appprojects` | — |
-| 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.2 |
+| 10 | `cert-manager` | https://charts.jetstack.io `cert-manager` | v1.21.3 |
 | 10 | `external-secrets` | https://charts.external-secrets.io `external-secrets` | 2.11.0 |
 | 10 | `aws-load-balancer-controller` (eks only) | https://aws.github.io/eks-charts | 3.5.0 |
 | 11 | `platform-tokens` (gateway, backups, Substrate's pull secret, or the code index) | `components/platform-tokens`: ClusterSecretStore `infrared-platform` | — |
