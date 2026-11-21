@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1136,6 +1138,88 @@ func TestTunnelBesideAndSignInPrivate(t *testing.T) {
 		{"the private sign-in without Infrared's host", func(d *Data) { d.InfraredHost, d.SignInPrivate = "", true }, false},
 		{"the private sign-in without a platform domain", func(d *Data) { d.PlatformDomain, d.SignInPrivate = "", true }, false},
 		{"the private sign-in with the edge's proof", func(d *Data) { d.SignInPrivate, d.EdgeProofSecret = true, "infrared-edge-proof" }, false},
+	} {
+		d := base
+		c.change(&d)
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}
+
+// The tunnel's hostnames (infrared-docs-internal ADR 0090, workspace TODO
+// 745): the operator hands TunnelHostnames by its Go name, absent is none, as
+// an operator from before it leaves it out; -tunnel-hostnames takes a JSON
+// array and overrides the data file; and they need a tunnel, lower-case DNS
+// names with no wildcard, each once, never InfraredHost, at most 100, alone
+// or beside.
+func TestTunnelHostnames(t *testing.T) {
+	id := "6ff42ae2-765d-4adf-8112-31c55c1551ef"
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "google.internal.darkshift.io",
+		"TunnelID": "` + id + `", "TunnelMode": "beside", "TunnelHostnames": ["hooks.darkshift.io", "support.darkshift.io"]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(d.TunnelHostnames, []string{"hooks.darkshift.io", "support.darkshift.io"}) {
+		t.Errorf("loaded TunnelHostnames %q", d.TunnelHostnames)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway", "TunnelID": "`+id+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.TunnelHostnames != nil {
+		t.Errorf("an operator's data without them loaded TunnelHostnames %q, %v; want none", d.TunnelHostnames, err)
+	}
+	var names []string
+	f := namesFlag{&names, "tunnel-hostnames"}
+	if err := f.Set(`["hive.football"]`); err != nil || !slices.Equal(names, []string{"hive.football"}) || f.String() != `["hive.football"]` {
+		t.Errorf("-tunnel-hostnames [\"hive.football\"]: %q, %v, %q", names, err, f.String())
+	}
+	if err := f.Set(""); err != nil || names != nil || f.String() != "" {
+		t.Errorf("-tunnel-hostnames empty: %q, %v", names, err)
+	}
+	if err := f.Set("hive.football"); err == nil || !strings.Contains(err.Error(), "-tunnel-hostnames") {
+		t.Errorf("-tunnel-hostnames that is no JSON array: %v, want an error naming the flag", err)
+	}
+	many := make([]string, 101)
+	for i := range many {
+		many[i] = fmt.Sprintf("h%d.example.com", i)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0", Edge: "gateway", PlatformDomain: "google.internal.darkshift.io",
+		InfraredHost: "infrared.internal.darkshift.io", TunnelID: id}
+	for _, c := range []struct {
+		name          string
+		change        func(*Data)
+		wantValidated bool
+	}{
+		{"none", func(*Data) {}, true},
+		{"an empty list", func(d *Data) { d.TunnelHostnames = []string{} }, true},
+		{"behind the tunnel alone", func(d *Data) { d.TunnelHostnames = []string{"shop.example.com"} }, true},
+		{"beside", func(d *Data) {
+			d.TunnelMode, d.TunnelHostnames = "beside", []string{"hive.football", "hooks.darkshift.io", "xn--bcher-kva.example"}
+		}, true},
+		{"one hundred", func(d *Data) { d.TunnelHostnames = many[:100] }, true},
+		{"without a tunnel", func(d *Data) { d.TunnelID, d.TunnelHostnames = "", []string{"hooks.darkshift.io"} }, false},
+		{"in capitals", func(d *Data) { d.TunnelHostnames = []string{"Hooks.darkshift.io"} }, false},
+		{"a wildcard", func(d *Data) { d.TunnelHostnames = []string{"*.darkshift.io"} }, false},
+		{"one label", func(d *Data) { d.TunnelHostnames = []string{"localhost"} }, false},
+		{"a trailing dot", func(d *Data) { d.TunnelHostnames = []string{"hooks.darkshift.io."} }, false},
+		{"a port", func(d *Data) { d.TunnelHostnames = []string{"hooks.darkshift.io:443"} }, false},
+		{"an empty name", func(d *Data) { d.TunnelHostnames = []string{""} }, false},
+		{"a name twice", func(d *Data) { d.TunnelHostnames = []string{"hooks.darkshift.io", "hooks.darkshift.io"} }, false},
+		{"Infrared's own host", func(d *Data) { d.TunnelHostnames = []string{"infrared.internal.darkshift.io"} }, false},
+		{"a label past 63", func(d *Data) { d.TunnelHostnames = []string{strings.Repeat("a", 64) + ".example.com"} }, false},
+		{"past 253", func(d *Data) {
+			d.TunnelHostnames = []string{strings.Repeat(strings.Repeat("a", 60)+".", 4) + "example.com"}
+		}, false},
+		{"more than 100", func(d *Data) { d.TunnelHostnames = many }, false},
 	} {
 		d := base
 		c.change(&d)

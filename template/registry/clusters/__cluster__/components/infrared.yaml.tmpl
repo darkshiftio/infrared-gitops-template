@@ -227,6 +227,14 @@ spec:
               publish: true
 [[- end ]]
 [[- end ]]
+[[- with .TunnelHostnames ]]
+              # The other names that reach the edge through the tunnel, each
+              # by a route of its own (ADR 0090).
+              hostnames:
+[[- range . ]]
+                - [[ . | quote ]]
+[[- end ]]
+[[- end ]]
 [[- end ]]
 [[- end ]]
 [[- if .Stores ]]

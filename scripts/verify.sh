@@ -45,8 +45,8 @@
 #     no OriginIssuer and no Cloudflare token, the domain's own token unread;
 #     cloudflared beside Envoy, its credentials copied through
 #     infrared-platform, its image by digest, two replicas on two nodes, its
-#     routes rendered for each case (Infrared's name, the platform domain's
-#     wildcard, 404 or with custom hostnames Envoy for anything else), in
+#     routes rendered for each case (Infrared's name, the tunnel's hostnames,
+#     the platform domain's wildcard, then 404, custom hostnames or not), in
 #     waves after the Gateway; no external-dns, external-dns-domain or origin
 #     issuer, nor their components; the tunnel changes only the edge's files,
 #     those it leaves out, the store, the README and the infrared Application,
@@ -70,9 +70,9 @@
 #     as without a tunnel (host ports, the Origin CA, external-dns, the origin
 #     issuer), the store admits external-dns, and cloudflared runs beside it
 #     with its routes, first match wins: the Let's Encrypt challenge path to
-#     Envoy's plain HTTP, Infrared's name, the platform domain's wildcard,
-#     then every other name to Envoy, none with a caPool, and no edge-ca
-#     volume; the fence admits cloudflared on 10080 too; beside changes only
+#     Envoy's plain HTTP, Infrared's name, the tunnel's hostnames, the
+#     platform domain's wildcard, then cloudflared's 404, none with a caPool,
+#     and no edge-ca volume; the fence admits cloudflared on 10080 too; beside changes only
 #     cloudflared, the edge's comments and kustomization, the store's comment,
 #     the README and the infrared Application, which carries mode beside;
 #     with TunnelPublish the Gateway edge carries external-dns's target
@@ -85,13 +85,26 @@
 #     edge (none at all on the platform domain's own token), no cloudflared
 #     route for it behind or beside a tunnel, and no edge's proof; Grafana's
 #     sign-in still names it; the infrared Application carries it
+#   - the tunnel's hostnames (TunnelHostnames, ADR 0090, workspace TODO
+#     745): each name with a listener of its own gets a route of its own,
+#     which reaches Envoy by that name (originServerName), after Infrared's
+#     and before the platform domain's wildcard, so no connection cloudflared
+#     reuses carries another name's TLS name, alone or beside; a name listed
+#     nowhere gets cloudflared's 404; the infrared Application carries them;
+#     they change only cloudflared and the infrared Application, an empty
+#     list renders as none, and without hostnames, custom hostnames or a
+#     tunnel beside cloudflared renders byte for byte as v0.1.27 did
 #   - cloudflared's own check of every rendered config (cloudflared tunnel
-#     ingress validate), and which rule each kind of name matches beside the
-#     nodes' ports (ingress rule), where cloudflared is installed; the gate
-#     says so where it is not; and hack/render refuses a mode other than
+#     ingress validate), and which rule each kind of name matches (ingress
+#     rule): beside, with the tunnel's hostnames, and behind the tunnel alone
+#     with a custom hostname listed, every listed name its own route and an
+#     unknown name the 404; where cloudflared is installed; the gate says so
+#     where it is not; and hack/render refuses a mode other than
 #     beside, beside without a tunnel, publish without beside, the private
 #     sign-in without a gateway edge, an Infrared host or a platform domain,
-#     and the private sign-in with the edge's proof
+#     the private sign-in with the edge's proof, and hostnames without a
+#     tunnel, not lower-case DNS names, wildcards, twice, Infrared's own name
+#     or more than 100
 #   - the stores: with Stores, CloudNativePG and one Postgres instance on one
 #     20Gi volume (Linode's Retain class on Linode), with a role and a database
 #     each for seaweedfs and substrate, and with Agent Substrate substrate_v1's
@@ -398,8 +411,10 @@ yq -p json -o json '. + {"DomainTokenKey": "'"$split_key"'"}' "$work/gateway-zon
 # The edge behind a Cloudflare Tunnel (ADR 0064), with the tunnel's id and its
 # credentials key as the operator hands them: the gateway's Data; the hosted
 # plane's shape, its tenants' domain on a token of its own, which the tunnel
-# leaves unread, with a credentials key of its own; and custom hostnames, where
-# anything else goes to Envoy too. The cases with one name alone are below.
+# leaves unread, with a credentials key of its own; and custom hostnames,
+# which still end in cloudflared's 404: a custom hostname reaches Envoy only by
+# a route of its own (the tunnel's hostnames, below). The cases with one name
+# alone are below.
 tn_id=6ff42ae2-765d-4adf-8112-31c55c1551ef
 tn_key=cloudflare-tunnel-credentials
 yq -p json -o json '. + {"TunnelID": "'"$tn_id"'", "TunnelCredentialsKey": "'"$tn_key"'"}' "$work/gateway.json" >"$work/tunnel.json"
@@ -432,6 +447,16 @@ yq -p json -o json '. + {"SignInPrivate": true}' "$work/private-off.json" >"$wor
 yq -p json -o json '. + {"SignInPrivate": true}' "$work/gateway-split.json" >"$work/private-split.json"
 yq -p json -o json '. + {"SignInPrivate": true}' "$work/tunnel-split.json" >"$work/tunnel-private.json"
 yq -p json -o json '. + {"InfraredHost": "'"$priv_host"'", "SignInPrivate": true}' "$work/beside-publish.json" >"$work/beside-private.json"
+# The tunnel's hostnames (ADR 0090, workspace TODO 745), as the operator hands
+# them, sorted: beside the home's shape, with custom hostnames and the
+# previews, a custom hostname moved onto the tunnel and two names a gitops repo
+# outside the template serves; the same publishing, with Infrared's name kept
+# off the edge; and behind the tunnel alone with custom hostnames, one of them
+# listed.
+tn_hosts='["hive.football","hooks.example.org","support.example.org"]'
+yq -p json -o json '. + {"TunnelHostnames": '"$tn_hosts"'}' "$work/beside.json" >"$work/beside-hosts.json"
+yq -p json -o json '. + {"TunnelHostnames": '"$tn_hosts"'}' "$work/beside-private.json" >"$work/beside-hosts-private.json"
+yq -p json -o json '. + {"TunnelHostnames": ["shop.example.net"]}' "$work/tunnel-custom.json" >"$work/tunnel-hosts.json"
 
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
@@ -572,6 +597,9 @@ variants=(
   "private-split demo-px k3s - -data $work/private-split.json"
   "tunnel-private demo-tv k3s - -data $work/tunnel-private.json"
   "beside-private demo-bv k3s - -data $work/beside-private.json"
+  "beside-hosts demo-bh k3s - -data $work/beside-hosts.json"
+  "beside-hosts-private demo-bq k3s - -data $work/beside-hosts-private.json"
+  "tunnel-hosts demo-th k3s - -data $work/tunnel-hosts.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
@@ -650,26 +678,29 @@ one_doc() { sel "$1" "select(.kind == \"$2\" and .metadata.name == \"$3\")"; }
 # none.
 of() { [ -n "$1" ] && yq -N -r "$2" <<<"$1" 2>/dev/null || true; }
 
-# check_cloudflared <built edge> <label> <tunnel id> <credentials key> <host> <domain> <custom hostnames>:
+# check_cloudflared <built edge> <label> <tunnel id> <credentials key> <host> <domain> <hostnames>:
 # behind a Cloudflare Tunnel (ADR 0064), cloudflared routes Infrared's name to
-# Envoy's Service as that name, the platform domain's wildcard as each
-# request's own, and anything else to a 404, or with custom hostnames to Envoy
-# as well, each route checking Envoy's certificate against the edge's own
-# authority over HTTP/2. Its credentials are the key of infrared-platform-tokens
-# the Installation names, copied through infrared-platform; its image is
-# pinned by digest; two replicas on two nodes, not root, on a read-only
-# filesystem with no ServiceAccount token, everything mounted read-only and
-# only the authority's certificate of its Secret; ready and alive on /ready;
-# the pods carry the routes, so a change rolls them; and a disruption budget
-# keeps one up. With the mode beside (ADR 0090), beside the nodes' own ports:
-# first the Let's Encrypt challenge path, any name, to Envoy's plain HTTP;
-# then the routes above, none checking against an authority of the edge's
-# (cloudflared holds Cloudflare's Origin CA and the system's roots), and
-# anything else to Envoy; no volume of edge-ca; and the annotation says beside.
+# Envoy's Service as that name, then each of the tunnel's hostnames (ADR 0090,
+# space-separated, in the order the operator hands them) as that name, the
+# platform domain's wildcard as each request's own, and anything else to a
+# 404, custom hostnames or not, each route checking Envoy's certificate
+# against the edge's own authority over HTTP/2. Its credentials are the key
+# of infrared-platform-tokens the Installation names, copied through
+# infrared-platform; its image is pinned by digest; two replicas on two
+# nodes, not root, on a read-only filesystem with no ServiceAccount token,
+# everything mounted read-only and only the authority's certificate of its
+# Secret; ready and alive on /ready; the pods carry the routes, so a change
+# rolls them; and a disruption budget keeps one up. With the mode beside
+# (ADR 0090), beside the nodes' own ports: first the Let's Encrypt challenge
+# path, any name, to Envoy's plain HTTP; then the routes above, none checking
+# against an authority of the edge's (cloudflared holds Cloudflare's Origin
+# CA and the system's roots), and then the 404; no volume of edge-ca; and the
+# annotation says beside. The annotation names every route, so a change of
+# any rolls the pods.
 check_cloudflared() {
-  local e="$1" label="$2" id="$3" key="$4" host="$5" domain="$6" custom="$7" mode="${8:-}"
+  local e="$1" label="$2" id="$3" key="$4" host="$5" domain="$6" hosts="$7" mode="${8:-}"
   local svc=https://edge.envoy-gateway-system.svc.cluster.local:443 ca=" ca=/etc/cloudflared/ca/ca.crt"
-  local cfg rules want d pod c image ann n nm mounts volumes where=""
+  local cfg rules want d pod c image ann n nm h mounts volumes where=""
   [ "$mode" = beside ] && where=" beside the nodes' ports"
   cfg="$(sel "$e" 'select(.kind == "ConfigMap" and .metadata.name == "cloudflared") | .data["config.yaml"]')"
   rules="$(yq -o json -I0 '.ingress' <<<"$cfg" | jq -r '.[] | (.hostname // (if .path then "path=" + .path else "else" end)) + ">" + .service
@@ -686,8 +717,9 @@ check_cloudflared() {
     volumes="config=cloudflared credentials=cloudflared-credentials"
   fi
   [ -n "$host" ] && want="$want$host>$svc name=$host$ca h2"$'\n'
+  for h in $hosts; do want="$want$h>$svc name=$h$ca h2"$'\n'; done
   [ -n "$domain" ] && want="$want*.$domain>$svc sni$ca h2"$'\n'
-  if [ "$custom" = true ] || [ "$mode" = beside ]; then want="${want}else>$svc sni$ca h2"; else want="${want}else>http_status:404"; fi
+  want="${want}else>http_status:404"
   if [ "$rules" = "$want" ] \
     && [ "$(yq -r '.tunnel + " " + .["credentials-file"] + " " + .metrics + " " + (.["no-autoupdate"] | tostring)' <<<"$cfg")" \
       = "$id /etc/cloudflared/credentials/credentials.json 0.0.0.0:2000 true" ]; then
@@ -701,7 +733,10 @@ check_cloudflared() {
   image="$(sel "$e" "$c | .image")"
   ann="$(sel "$e" "$d | .spec.template.metadata.annotations[\"infrared.darkshift.io/tunnel\"]")"
   n=0
-  for nm in "$id" "$key" ${host:+"$host"} ${domain:+"*.$domain"} ${mode:+"$mode"}; do grep -qF -- " $nm " <<<" $ann " || n=$((n + 1)); done
+  # shellcheck disable=SC2086 # the hostnames split on purpose
+  for nm in "$id" "$key" ${host:+"$host"} $hosts ${domain:+"*.$domain"} ${mode:+"$mode"} 404; do
+    grep -qF -- " $nm " <<<" $ann " || n=$((n + 1))
+  done
   if [[ "$image" =~ ^docker\.io/cloudflare/cloudflared:[0-9]{4}\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] \
     && [ "$(sel "$e" "$d | .spec.replicas")" = 2 ] \
     && [ "$(sel "$e" "$pod | .affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0] | .topologyKey + \" \" + .labelSelector.matchLabels[\"app.kubernetes.io/name\"]")" \
@@ -873,7 +908,7 @@ for v in "${variants[@]}"; do
   # out and forge, by flag or in its -data file.
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" token_key="" disabled="[]"
-  tunnel_id="" tunnel_key="" custom=false proof="" tunnel_mode="" publish=false private=false
+  tunnel_id="" tunnel_key="" custom=false proof="" tunnel_mode="" publish=false private=false tunnel_hosts="" tunnel_hosts_json="[]"
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
@@ -903,6 +938,8 @@ for v in "${variants[@]}"; do
     tunnel_mode="$(jq -r '.TunnelMode // ""' "$data_file")"
     publish="$(jq -r '.TunnelPublish // false' "$data_file")"
     private="$(jq -r '.SignInPrivate // false' "$data_file")"
+    tunnel_hosts="$(jq -r '(.TunnelHostnames // []) | join(" ")' "$data_file")"
+    tunnel_hosts_json="$(jq -c '.TunnelHostnames // []' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
     forge="$(yq -p json -r '.Forge // ""' "$data_file")"
     zot_addr="$(yq -p json -r '.Registry // ""' "$data_file")"
@@ -1135,10 +1172,11 @@ for v in "${variants[@]}"; do
     [ -n "$domain" ] && [ -n "$host" ] \
       && want="$want, previews: {domain: \"$domain\", signInURL: \"https://$host\"${token_key:+, domainTokenKey: \"$token_key\"}$signin_private}"
     # The tunnel, alone or beside the nodes' own ports, with its mode and
-    # publish when beside (ADR 0090).
+    # publish when beside, and its hostnames, alone or beside (ADR 0090).
     tunnel_carried=""
     [ "$beside" = true ] && tunnel_carried=", mode: beside"
     [ "$beside" = true ] && [ "$publish" = true ] && tunnel_carried="$tunnel_carried, publish: true"
+    [ "$tunnel_hosts_json" != "[]" ] && tunnel_carried="$tunnel_carried, hostnames: $tunnel_hosts_json"
     { [ "$tunnel" = true ] || [ "$beside" = true ]; } \
       && want="$want, tunnel: {id: \"$tunnel_id\", credentialsKey: \"${tunnel_key:-cloudflare-tunnel-credentials}\"$tunnel_carried}"
     want="$want}"$'\n'
@@ -1558,7 +1596,7 @@ for v in "${variants[@]}"; do
         || bad "$variant: without EdgeProofSecret the edge has a filter, a ClientTrafficPolicy, a second rule or their wait"
     fi
     if [ "$tunnel" = true ]; then
-      check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$ihost" "$domain" "$custom"
+      check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$ihost" "$domain" "$tunnel_hosts"
       # The wait: the CRDs the edge uses behind a tunnel, never the origin issuer's.
       waits="$(sel "$e" 'select(.kind == "Job" and .metadata.name == "edge-wait") | .spec.template.spec.containers[0].env[] | select(.name == "WAIT_CRDS") | .value')"
       grep -qw -- issuers.cert-manager.io <<<"$waits" && ! grep -q originissuers <<<"$waits" \
@@ -1566,7 +1604,7 @@ for v in "${variants[@]}"; do
         || bad "$variant: behind the tunnel the edge waits for '$waits'"
     else
     # Beside the nodes' own ports (ADR 0090): cloudflared beside the edge.
-    [ "$beside" = true ] && check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$ihost" "$domain" "$custom" beside
+    [ "$beside" = true ] && check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$ihost" "$domain" "$tunnel_hosts" beside
     # external-dns publishes the edge's labelled route only, as this cluster's owner.
     label="$(sel "$dns" '.spec.sources[0].helm.valuesObject.labelFilter')"
     [ "$(sel "$e" "select(.metadata.name == \"https-redirect\") | .metadata.labels[\"${label%%=*}\"]")" = "${label#*=}" ] \
@@ -3743,7 +3781,8 @@ done
 # Application, which carries it, and the comments that say it is not read.
 # With one of the two names alone, cloudflared routes that one and nothing
 # else, and the edge builds; with custom hostnames and Infrared's name alone,
-# anything else goes to Envoy too. hack/render refuses a tunnel without a
+# anything else is cloudflared's 404 too (a custom hostname takes a route of
+# its own from the tunnel's hostnames, ADR 0090). hack/render refuses a tunnel without a
 # gateway edge, an id that is no lower-case UUID, a key no Secret takes, and a
 # key of its own without a tunnel.
 "$work/render" -out "$work/tunnel-none" -cluster demo-tx -flavor k3s -build-registry "" -data "$work/gateway.json" >/dev/null
@@ -3778,7 +3817,7 @@ for c in "zones:PlatformDomain=$split_domain InfraredHost=:false" "host:Platform
     "$work/tunnel.json" >"$work/tunnel-$name.json"
   "$work/render" -out "$work/tunnel-$name" -cluster "demo-t$name" -flavor k3s -build-registry "" -data "$work/tunnel-$name.json" >/dev/null
   if kubectl kustomize "$work/tunnel-$name/components/edge" >"$work/tunnel-$name-edge.yaml"; then
-    check_cloudflared "$work/tunnel-$name-edge.yaml" "tunnel-$name" "$tn_id" "$tn_key" "$c_host" "$c_domain" "$c_custom"
+    check_cloudflared "$work/tunnel-$name-edge.yaml" "tunnel-$name" "$tn_id" "$tn_key" "$c_host" "$c_domain" ""
     want_names="${c_domain:+*.$c_domain}"
     [ -n "$c_host" ] && want_names="${want_names:+$want_names,}$c_host"
     [ "$(sel "$work/tunnel-$name-edge.yaml" 'select(.kind == "Certificate" and .metadata.name == "edge") | (.spec.dnsNames | join(",")) + "@" + .spec.issuerRef.name')" = "$want_names@edge-ca" ] \
@@ -3893,15 +3932,88 @@ for refused in "-edge gateway -platform-domain $split_domain -tunnel-mode beside
     ok "hack/render $refused: refused"
   fi
 done
+# --- The tunnel's hostnames (ADR 0090, workspace TODO 745) ------------------------
+# cloudflared keeps one pool of connections to Envoy for each route and reuses
+# them for any request the route takes, while Envoy picks a listener by a
+# connection's TLS name: so every name with a listener of its own has a route
+# of its own, with its name fixed, and a name listed nowhere gets cloudflared's
+# 404 (each variant's routes: check_cloudflared). Hostnames change only
+# cloudflared and the infrared Application, which carries them, beside the
+# nodes' ports and behind the tunnel alone, and an empty list renders every
+# file as none does. Without hostnames, custom hostnames or a tunnel beside,
+# cloudflared renders byte for byte as template v0.1.27 did (its digest
+# below; scripts/compare-render.sh v0.1.27 shows every file of those installs
+# unchanged). hack/render refuses hostnames without a tunnel, a name that is
+# no lower-case DNS name, a wildcard, a name twice, Infrared's own name, and
+# more than 100.
+for c in beside:demo-hb tunnel-custom:demo-hc; do
+  base="${c%%:*}" hc="${c#*:}"
+  "$work/render" -out "$work/hosts-off-$base" -cluster "$hc" -flavor k3s -build-registry "" -data "$work/$base.json" >/dev/null
+  yq -p json -o json '. + {"TunnelHostnames": '"$tn_hosts"'}' "$work/$base.json" >"$work/hosts-on-$base.json"
+  "$work/render" -out "$work/hosts-on-$base" -cluster "$hc" -flavor k3s -build-registry "" -data "$work/hosts-on-$base.json" >/dev/null
+  changed="$({ diff -rq "$work/hosts-off-$base" "$work/hosts-on-$base" || true; } \
+    | sed -E "s#^Files $work/hosts-off-$base/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//')"
+  want="$(words "components/edge/tunnel.yaml registry/clusters/$hc/components/infrared.yaml")"
+  [ "$changed" = "$want" ] \
+    && ok "$base: the tunnel's hostnames change only cloudflared and the infrared Application" \
+    || bad "$base: the tunnel's hostnames change '$changed', want '$want'"
+  yq -p json -o json '. + {"TunnelHostnames": []}' "$work/$base.json" >"$work/hosts-empty-$base.json"
+  "$work/render" -out "$work/hosts-empty-$base" -cluster "$hc" -flavor k3s -build-registry "" -data "$work/hosts-empty-$base.json" >/dev/null
+  diff -r "$work/hosts-off-$base" "$work/hosts-empty-$base" >/dev/null \
+    && ok "$base: an empty list of hostnames renders every file as none does" \
+    || bad "$base: an empty list of hostnames renders otherwise than none"
+done
+# digest <file>: its sha256, in hex.
+digest() { if command -v sha256sum >/dev/null; then sha256sum <"$1"; else shasum -a 256 <"$1"; fi | cut -d' ' -f1; }
+# Template v0.1.27's components/edge/tunnel.yaml for these variants, from the
+# same data: the tunnel alone with no custom hostnames (the hosted plane's
+# shape among them, with the edge's proof and with Infrared's name private),
+# and a gateway edge with no tunnel, custom hostnames on or off.
+for c in tunnel:ae96c887eaa0e6bd8823ddaddef68a01e507ad9b7f7bb568e3810213f85df1f6 \
+    tunnel-split:a2c79401108f0115a1eff83589ae3699183a84f075360de51efec46c031c9846 \
+    tunnel-proof:a2c79401108f0115a1eff83589ae3699183a84f075360de51efec46c031c9846 \
+    tunnel-private:f28cf98c6272d9bd904eb01c49c9b19900fb59faa000004f68c4cead2f5873ce \
+    gateway:527ba2975894f5a7a4980ef25d8811c46696fb5c703a5bc549cefd946598060c \
+    gateway-nocloud:527ba2975894f5a7a4980ef25d8811c46696fb5c703a5bc549cefd946598060c \
+    k3s:527ba2975894f5a7a4980ef25d8811c46696fb5c703a5bc549cefd946598060c; do
+  v="${c%%:*}" was="${c#*:}"
+  got="$(digest "$work/$v/components/edge/tunnel.yaml")"
+  [ "$got" = "$was" ] \
+    && ok "$v: without hostnames, custom hostnames or a tunnel beside, cloudflared renders byte for byte as v0.1.27 did" \
+    || bad "$v: components/edge/tunnel.yaml is no longer v0.1.27's (sha256 $got, was $was): scripts/compare-render.sh v0.1.27 with this variant's data shows how"
+done
+i=0
+# shellcheck disable=SC2089 # the JSON's quotes are the flag's, literal on purpose
+for refused in "-edge gateway -platform-domain $split_domain -tunnel-hostnames [\"support.example.org\"]" \
+    "-edge traefik -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [\"support.example.org\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [\"Support.example.org\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [\"*.example.org\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [\"localhost\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [\"support.example.org.\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [\"a.example.org\",\"a.example.org\"]" \
+    "-edge gateway -platform-domain $split_domain -infrared-host $split_host -tunnel-id $tn_id -tunnel-hostnames [\"$split_host\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames [$(printf '"h%d.example.org",' $(seq 1 100))\"h101.example.org\"]" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-hostnames support.example.org"; do
+  i=$((i + 1))
+  # shellcheck disable=SC2086,SC2090 # the flags split on purpose, the JSON's quotes literal
+  if "$work/render" -out "$work/hosts-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
+    bad "hack/render $(cut -c1-160 <<<"$refused"): rendered, want a refusal"
+  else
+    ok "hack/render $(cut -c1-160 <<<"$refused"): refused"
+  fi
+done
+
 # cloudflared's own check of every config rendered above, where it is
-# installed (CI installs the image's version): each validates, and beside the
-# nodes' ports each kind of name matches its rule, the first that matches
-# winning: a challenge for any name the plain-HTTP rule, Infrared's name its
-# own, a zone the wildcard, and any other name the last.
+# installed (CI installs the image's version): each validates, and each kind
+# of name matches its rule, the first that matches winning. Beside the nodes'
+# ports: a challenge for any name the plain-HTTP rule, Infrared's name its
+# own, each of the tunnel's hostnames its own, a zone the wildcard, and any
+# other name, a custom hostname not listed among them, cloudflared's 404;
+# behind the tunnel alone the same without the challenge's rule.
 if command -v cloudflared >/dev/null; then
   validated=0
   for v in tunnel tunnel-split tunnel-custom tunnel-proof tunnel-private beside beside-publish beside-split beside-private \
-      tunnel-zones tunnel-host tunnel-custom-host; do
+      beside-hosts beside-hosts-private tunnel-hosts tunnel-zones tunnel-host tunnel-custom-host; do
     built="$work/$v-built/edge.yaml"
     [ -f "$built" ] || built="$work/$v-edge.yaml"
     cfg="$work/$v-cloudflared.yaml"
@@ -3913,12 +4025,48 @@ if command -v cloudflared >/dev/null; then
     fi
   done
   ok "cloudflared $(cloudflared --version 2>&1 | awk '{print $3}') validates the routes of $validated rendered configs"
-  rule() { cloudflared tunnel --config "$work/beside-cloudflared.yaml" ingress rule "$1" 2>/dev/null | sed -n -E 's/^Matched rule #([0-9]+).*/\1/p'; }
-  matched="$(rule https://hive.football/.well-known/acme-challenge/token) $(rule "https://$gw_host/api/v1/orgs")"
-  matched="$matched $(rule "https://snw.$gw_domain/") $(rule https://support.example.org/) $(rule "https://$gw_host/.well-known/acme-challenge/token")"
-  [ "$matched" = "0 1 2 3 0" ] \
-    && ok "beside: cloudflared sends a challenge to Envoy's plain HTTP, Infrared's name, a zone and any other name to Envoy's HTTPS (rules $matched)" \
-    || bad "beside: cloudflared matches rules '$matched', want '0 1 2 3 0'"
+  # rule <variant> <url>: the rule cloudflared matches for the URL in the
+  # variant's rendered config, as <number> <hostname or path> <service>, or
+  # <number> <service> for the last rule, which names neither.
+  rule() {
+    cloudflared tunnel --config "$work/$1-cloudflared.yaml" ingress rule "$2" 2>/dev/null \
+      | sed -n -E 's/^Matched rule #([0-9]+).*/\1/p; s/^[[:space:]]+(hostname|path|service): (.*)$/\2/p' | paste -s -d ' ' - \
+      | sed -E 's#https://edge\.envoy-gateway-system\.svc\.cluster\.local:443#envoy#; s#http://edge\.envoy-gateway-system\.svc\.cluster\.local:80#envoy-http#'
+  }
+  acme='^/\.well-known/acme-challenge/'
+  # rules <variant> <url>...: rule for each URL, joined with "; ".
+  rules() { local v="$1" u; shift; for u in "$@"; do rule "$v" "$u"; done | paste -s -d ';' - | sed 's/;/; /g'; }
+  matched="$(rules beside https://hive.football/.well-known/acme-challenge/token "https://$gw_host/api/v1/orgs" "https://snw.$gw_domain/" \
+    https://support.example.org/ "https://$gw_host/.well-known/acme-challenge/token")"
+  want="0 $acme envoy-http; 1 $gw_host envoy; 2 *.$gw_domain envoy; 3 http_status:404; 0 $acme envoy-http"
+  [ "$matched" = "$want" ] \
+    && ok "beside: cloudflared sends a challenge for any name to Envoy's plain HTTP, Infrared's name and a zone to Envoy's HTTPS, and any other name to its 404 ($matched)" \
+    || bad "beside: cloudflared matches '$matched', want '$want'"
+  matched="$(rules beside-hosts https://www.hive.football/.well-known/acme-challenge/token "https://$gw_host/" https://hive.football/ \
+    https://hooks.example.org/api/v1/webhooks/github https://support.example.org/widget "https://snw.$gw_domain/" https://www.hive.football/ \
+    https://unknown.example.org/)"
+  want="0 $acme envoy-http; 1 $gw_host envoy; 2 hive.football envoy; 3 hooks.example.org envoy; 4 support.example.org envoy"
+  want="$want; 5 *.$gw_domain envoy; 6 http_status:404; 6 http_status:404"
+  [ "$matched" = "$want" ] \
+    && ok "beside-hosts: each of the tunnel's hostnames matches a route of its own, and a name listed nowhere, a custom hostname among them, the 404 ($matched)" \
+    || bad "beside-hosts: cloudflared matches '$matched', want '$want'"
+  matched="$(rules beside-hosts-private "https://$priv_host/" https://hooks.example.org/)"
+  want="5 http_status:404; 2 hooks.example.org envoy"
+  [ "$matched" = "$want" ] \
+    && ok "beside-hosts-private: Infrared's private name reaches no route but the 404, the tunnel's hostnames theirs ($matched)" \
+    || bad "beside-hosts-private: cloudflared matches '$matched', want '$want'"
+  matched="$(rules tunnel-hosts "https://$gw_host/" https://shop.example.net/ "https://snw.$gw_domain/" https://other.example.net/)"
+  want="0 $gw_host envoy; 1 shop.example.net envoy; 2 *.$gw_domain envoy; 3 http_status:404"
+  [ "$matched" = "$want" ] \
+    && ok "tunnel-hosts: behind the tunnel alone, a listed custom hostname matches its own route and any other name the 404 ($matched)" \
+    || bad "tunnel-hosts: cloudflared matches '$matched', want '$want'"
+  # The routes cloudflared matched each name to, and their originServerName,
+  # are the ones its config lists (check_cloudflared): a route of one name
+  # reaches Envoy by that name alone.
+  [ "$(yq -o json -I0 '[.ingress[] | select(.hostname and (.hostname | test("^[*]") | not)) | select(.originRequest.originServerName != .hostname)] | length' \
+      "$work/beside-hosts-cloudflared.yaml")" = 0 ] \
+    && ok "beside-hosts: every route of one name reaches Envoy by that name (originServerName)" \
+    || bad "beside-hosts: a route of one name reaches Envoy by another"
 else
   echo "note: cloudflared is not installed, so its own check of the rendered routes (cloudflared tunnel ingress validate) did not run"
 fi

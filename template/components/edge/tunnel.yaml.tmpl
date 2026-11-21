@@ -14,10 +14,11 @@
 # these, rendered from the Installation's names and never kept in Cloudflare's
 # dashboard. It runs beside the edge on the nodes' own ports, which stays as
 # it renders without a tunnel (gateway.yaml, certificate.yaml, routes.yaml):
-# a name reaches Envoy through the tunnel once its record is a proxied CNAME
-# to [[ .TunnelID ]].cfargotunnel.com, and through the nodes'
-# ports until then, so each name moves onto the tunnel, and back, by its
-# record alone.
+# a name with a route below reaches Envoy through the tunnel once its record
+# is a proxied CNAME to [[ .TunnelID ]].cfargotunnel.com, and
+# through the nodes' ports until then, so each name moves onto the tunnel, and
+# back, by its record alone: list a name (spec.tunnel.hostnames) before its
+# record moves, or the tunnel answers it 404.
 [[- if .TunnelPublish ]] With spec.tunnel.publish external-dns publishes the
 # edge's own names there (gateway.yaml); a person makes the others' records.
 [[- else ]] external-dns publishes the edge's own names at the nodes'
@@ -27,7 +28,7 @@
 # cloudflared dials out to Cloudflare on port 7844 (QUIC on UDP, or HTTP/2 on
 # TCP), and Cloudflare's edge sends each request for the tunnel's names down
 # that connection. cloudflared forwards it to Envoy's Service edge
-# (gateway.yaml), as the request's own name. Over HTTPS it checks Envoy's
+# (gateway.yaml), by the name its route gives. Over HTTPS it checks Envoy's
 # certificate against the roots it holds, the system's and Cloudflare's Origin
 # CA, built into cloudflared: every certificate this edge shows comes from one
 # of them (Let's Encrypt for custom hostnames, the Origin CA for the rest), so
@@ -40,11 +41,28 @@
 [[- if $infrared ]]
 #   [[ .InfraredHost ]]  Infrared, by that name (originServerName)
 [[- end ]]
+[[- range .TunnelHostnames ]]
+#   [[ . ]]  by that name (originServerName)
+[[- end ]]
 [[- if .PlatformDomain ]]
 #   *.[[ .PlatformDomain ]]  the zones, each by its own name (matchSNItoHost)
 [[- end ]]
-#   anything else  Envoy as well, by its own name: custom hostnames, zones'
-#                  own addresses and the names a person routes to the tunnel
+#   anything else  404, never Envoy
+#
+# Envoy picks a listener by the TLS name a connection carries (SNI), and each
+# name it serves on a listener of its own, Infrared's, a zone's own address, a
+# custom hostname or a name a person adds, finds its routes only there.
+# cloudflared keeps one pool of connections to Envoy for each route here, and
+# reuses one for any request its route takes, whatever the request's name: a
+# route that took two such names would send one name's request down a
+# connection made for the other, which Envoy answers 404 (NR). So each of
+# those names has a route of its own, with its name fixed (originServerName):
+# the Installation's spec.tunnel.hostnames lists the ones the template cannot
+# see, among them a zone's own addresses and the custom hostnames once their
+# records point at the tunnel. The zones share one listener, the wildcard,
+# so their one route may take each request's own name. A name listed nowhere
+# gets cloudflared's 404, so only the names above reach Envoy through the
+# tunnel; any other name keeps the nodes' ports.
 #
 # Two replicas, never on one node, each holding connections of its own, so a
 # node that goes takes one replica and none of the names. cloudflared reads
@@ -77,14 +95,23 @@
 [[- if $infrared ]]
 #   [[ .InfraredHost ]]  Infrared, by that name (originServerName)
 [[- end ]]
+[[- range .TunnelHostnames ]]
+#   [[ . ]]  by that name (originServerName)
+[[- end ]]
 [[- if .PlatformDomain ]]
 #   *.[[ .PlatformDomain ]]  the zones, each by its own name (matchSNItoHost)
 [[- end ]]
-[[- if .CustomHostnames ]]
-#   anything else  Envoy as well, by its own name: the custom hostnames of
-#                  orgs' own domains (spec.previews.customHostnames)
-[[- else ]]
 #   anything else  404
+[[- if or .TunnelHostnames .CustomHostnames ]]
+#
+# Envoy picks a listener by the TLS name a connection carries (SNI), and each
+# name it serves on a listener of its own finds its routes only there.
+# cloudflared keeps one pool of connections to Envoy for each route here, and
+# reuses one for any request its route takes, whatever the request's name, so
+# each such name has a route of its own, with its name fixed
+# (originServerName): the Installation's spec.tunnel.hostnames lists them, a
+# custom hostname (spec.previews.customHostnames) among them. A name listed
+# nowhere gets cloudflared's 404.
 [[- end ]]
 #
 # Two replicas, never on one node, each holding connections of its own, so a
@@ -145,6 +172,13 @@ data:
           originServerName: [[ .InfraredHost | quote ]]
           http2Origin: true
 [[- end ]]
+[[- range .TunnelHostnames ]]
+      - hostname: [[ . | quote ]]
+        service: [[ $edge ]]
+        originRequest:
+          originServerName: [[ . | quote ]]
+          http2Origin: true
+[[- end ]]
 [[- if .PlatformDomain ]]
       - hostname: [[ printf "*.%s" .PlatformDomain | quote ]]
         service: [[ $edge ]]
@@ -152,10 +186,7 @@ data:
           matchSNItoHost: true
           http2Origin: true
 [[- end ]]
-      - service: [[ $edge ]]
-        originRequest:
-          matchSNItoHost: true
-          http2Origin: true
+      - service: http_status:404
 [[- else ]]
 [[- if $infrared ]]
       - hostname: [[ .InfraredHost | quote ]]
@@ -165,6 +196,14 @@ data:
           caPool: /etc/cloudflared/ca/ca.crt
           http2Origin: true
 [[- end ]]
+[[- range .TunnelHostnames ]]
+      - hostname: [[ . | quote ]]
+        service: [[ $edge ]]
+        originRequest:
+          originServerName: [[ . | quote ]]
+          caPool: /etc/cloudflared/ca/ca.crt
+          http2Origin: true
+[[- end ]]
 [[- if .PlatformDomain ]]
       - hostname: [[ printf "*.%s" .PlatformDomain | quote ]]
         service: [[ $edge ]]
@@ -173,15 +212,7 @@ data:
           caPool: /etc/cloudflared/ca/ca.crt
           http2Origin: true
 [[- end ]]
-[[- if .CustomHostnames ]]
-      - service: [[ $edge ]]
-        originRequest:
-          matchSNItoHost: true
-          caPool: /etc/cloudflared/ca/ca.crt
-          http2Origin: true
-[[- else ]]
       - service: http_status:404
-[[- end ]]
 [[- end ]]
 ---
 apiVersion: apps/v1
@@ -211,7 +242,7 @@ spec:
         app.kubernetes.io/name: cloudflared
       annotations:
         # The tunnel, its credentials' key and its routes, read at start.
-        infrared.darkshift.io/tunnel: "[[ .TunnelID ]] [[ $key ]][[ if $beside ]] beside acme[[ end ]][[ with $infrared ]] [[ . ]][[ end ]][[ with .PlatformDomain ]] *.[[ . ]][[ end ]][[ if or $beside .CustomHostnames ]] *[[ else ]] 404[[ end ]]"
+        infrared.darkshift.io/tunnel: "[[ .TunnelID ]] [[ $key ]][[ if $beside ]] beside acme[[ end ]][[ with $infrared ]] [[ . ]][[ end ]][[ range .TunnelHostnames ]] [[ . ]][[ end ]][[ with .PlatformDomain ]] *.[[ . ]][[ end ]] 404"
     spec:
       affinity:
         podAntiAffinity:

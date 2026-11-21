@@ -112,11 +112,22 @@ type Data struct {
 	// names moves onto the tunnel when its record points there
 	// (infrared-docs-internal ADR 0090, workspace TODO 745). cloudflared's
 	// routes, the first that matches wins: a Let's Encrypt challenge to
-	// Envoy's plain HTTP, InfraredHost, *.<PlatformDomain>, then every other
-	// name to Envoy's HTTPS by its own name. "" is the tunnel alone, as
-	// before: the operator hands mode only as "", and leaves it out of the
-	// data.
+	// Envoy's plain HTTP, InfraredHost and each of TunnelHostnames to Envoy's
+	// HTTPS by that name, *.<PlatformDomain> by each request's own, then 404.
+	// "" is the tunnel alone, as before: the operator hands mode only as "",
+	// and leaves it out of the data.
 	TunnelMode string `json:"TunnelMode,omitempty"`
+	// TunnelHostnames are spec.tunnel.hostnames, with TunnelID, alone or
+	// beside (infrared-docs-internal ADR 0090, workspace TODO 745): the other
+	// names a record sends to the tunnel, each served on the edge by a
+	// listener of its own that the template does not render (a name a gitops
+	// repo outside it serves, a zone's own address, a custom hostname).
+	// cloudflared gives each a route to Envoy's HTTPS by that name
+	// (originServerName), after InfraredHost's and before *.<PlatformDomain>,
+	// and answers 404 for a name listed nowhere. The operator hands them
+	// sorted, each once, lower case and without InfraredHost; empty, it
+	// leaves them out of the data.
+	TunnelHostnames []string `json:"TunnelHostnames,omitempty"`
 	// TunnelPublish is spec.tunnel.publish with TunnelMode beside: the
 	// Gateway edge carries external-dns's target annotation,
 	// <TunnelID>.cfargotunnel.com, so the names external-dns publishes from
@@ -594,6 +605,32 @@ func (f backupFlag) Set(s string) error {
 
 // disabledFlag reads -disabled: a JSON array of component names, as the
 // operator's INFRARED_DISABLED_COMPONENTS carries it.
+// namesFlag reads a flag that takes a JSON array of names, such as
+// -tunnel-hostnames; empty is none.
+type namesFlag struct {
+	d    *[]string
+	name string
+}
+
+func (f namesFlag) String() string {
+	if f.d == nil || len(*f.d) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(*f.d)
+	return string(b)
+}
+
+func (f namesFlag) Set(s string) error {
+	var d []string
+	if strings.TrimSpace(s) != "" {
+		if err := json.Unmarshal([]byte(s), &d); err != nil {
+			return fmt.Errorf("-%s: %w", f.name, err)
+		}
+	}
+	*f.d = d
+	return nil
+}
+
 type disabledFlag struct{ d *[]string }
 
 func (f disabledFlag) String() string {
@@ -753,6 +790,8 @@ func main() {
 		`TunnelMode: "beside", cloudflared beside the edge on the nodes' own ports, with -tunnel-id (empty: the tunnel alone)`)
 	flag.BoolVar(&d.TunnelPublish, "tunnel-publish", false,
 		"TunnelPublish: external-dns publishes the edge's names to the tunnel; needs -tunnel-mode beside")
+	flag.Var(namesFlag{&d.TunnelHostnames, "tunnel-hostnames"}, "tunnel-hostnames",
+		`TunnelHostnames, as a JSON array: ["support.example.com"], the other names that reach the edge through the tunnel, each by its own route; needs -tunnel-id (empty: none)`)
 	flag.BoolVar(&d.SignInPrivate, "sign-in-private", false,
 		"SignInPrivate: Infrared's own name kept off the edge; needs -edge gateway, -platform-domain and -infrared-host")
 	flag.StringVar(&d.EdgeProofSecret, "edge-proof-secret", "",
@@ -873,6 +912,7 @@ func mergeDataFile(d *Data, path string) error {
 		"tunnel-credentials-key": func() { d.TunnelCredentialsKey = explicit.TunnelCredentialsKey },
 		"tunnel-mode":            func() { d.TunnelMode = explicit.TunnelMode },
 		"tunnel-publish":         func() { d.TunnelPublish = explicit.TunnelPublish },
+		"tunnel-hostnames":       func() { d.TunnelHostnames = explicit.TunnelHostnames },
 		"sign-in-private":        func() { d.SignInPrivate = explicit.SignInPrivate },
 		"edge-proof-secret":      func() { d.EdgeProofSecret = explicit.EdgeProofSecret },
 		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
@@ -1107,6 +1147,9 @@ func validateDomainTokenKey(d Data) []error {
 // writes, and the Installation's default.
 const defaultTunnelCredentialsKey = "cloudflare-tunnel-credentials"
 
+// maxTunnelHostnames is the most names spec.tunnel.hostnames takes.
+const maxTunnelHostnames = 100
+
 // tunnelBeside is the one TunnelMode the operator hands: the tunnel beside
 // the nodes' own ports (ADR 0090); mode only arrives as "".
 const tunnelBeside = "beside"
@@ -1134,8 +1177,12 @@ func validateTunnel(d Data) []error {
 		if d.TunnelCredentialsKey != "" && d.TunnelCredentialsKey != defaultTunnelCredentialsKey {
 			errs = append(errs, errors.New("TunnelCredentialsKey needs a TunnelID: it names the credentials of the tunnel the edge is reached through"))
 		}
+		if len(d.TunnelHostnames) > 0 {
+			errs = append(errs, errors.New("TunnelHostnames needs a TunnelID: they are the names that reach the edge through that tunnel"))
+		}
 		return errs
 	}
+	errs = append(errs, validateTunnelHostnames(d)...)
 	if !tunnelID.MatchString(d.TunnelID) {
 		errs = append(errs, fmt.Errorf("TunnelID must be a Cloudflare Tunnel's UUID, lower case, e.g. 6ff42ae2-765d-4adf-8112-31c55c1551ef, got %q", d.TunnelID))
 	}
@@ -1144,6 +1191,31 @@ func validateTunnel(d Data) []error {
 	}
 	if k := d.TunnelCredentialsKey; k != "" && (!secretKey.MatchString(k) || k == "." || strings.HasPrefix(k, "..")) {
 		errs = append(errs, fmt.Errorf("TunnelCredentialsKey must be a Secret's key: letters, digits, '-', '_' and '.', at most 253, not . or .., got %q", k))
+	}
+	return errs
+}
+
+// validateTunnelHostnames checks TunnelHostnames as the operator hands them
+// (ADR 0090): at most maxTunnelHostnames, each a DNS name of two labels or
+// more, lower case, with no wildcard, at most 253 characters, listed once,
+// and never InfraredHost, whose route is the template's own and which
+// SignInPrivate keeps off the edge.
+func validateTunnelHostnames(d Data) []error {
+	var errs []error
+	if len(d.TunnelHostnames) > maxTunnelHostnames {
+		errs = append(errs, fmt.Errorf("TunnelHostnames lists %d names, at most %d", len(d.TunnelHostnames), maxTunnelHostnames))
+	}
+	seen := map[string]bool{}
+	for _, h := range d.TunnelHostnames {
+		switch {
+		case len(h) > 253 || !hostname.MatchString(h):
+			errs = append(errs, fmt.Errorf("TunnelHostnames: %q must be a DNS name, lower case, with no wildcard, e.g. support.example.com", h))
+		case seen[h]:
+			errs = append(errs, fmt.Errorf("TunnelHostnames: %q is listed twice", h))
+		case h == d.InfraredHost:
+			errs = append(errs, fmt.Errorf("TunnelHostnames: %q is InfraredHost, whose route is the template's own (the operator never lists it)", h))
+		}
+		seen[h] = true
 	}
 	return errs
 }
@@ -1290,6 +1362,10 @@ var (
 	backupPrefix = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	// secretKey is a key of a Secret's data.
 	secretKey = regexp.MustCompile(`^[-._a-zA-Z0-9]{1,253}$`)
+	// hostname is a name of TunnelHostnames: a DNS name of two labels or
+	// more, lower case, with no wildcard (the CRD's pattern for
+	// spec.tunnel.hostnames).
+	hostname = regexp.MustCompile(`^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 	// tunnelID is a Cloudflare Tunnel's UUID, lower case.
 	tunnelID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	// dnsSubdomain is an object's name, such as a Secret's: DNS labels joined
