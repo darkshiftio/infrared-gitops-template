@@ -3,7 +3,9 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") -]]
+[[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
 [[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey (not $tunnel) -]]
 [[- $layout := and .Stores .Registry .StoresOrgLayout -]]
 # [[ .GitopsRepoName ]]
@@ -35,7 +37,7 @@ components/
 [[- if $tunnel ]]
   edge/                    the Gateway, its certificate from a certificate authority inside the cluster, cloudflared and the edge's routes
 [[- else if eq .Edge "gateway" ]]
-  edge/                    the Gateway, its origin certificate[[ if $split ]]s, one for each Cloudflare zone,[[ end ]] and the edge's routes
+  edge/                    the Gateway, its origin certificate[[ if $split ]]s, one for each Cloudflare zone,[[ end ]] and the edge's routes[[ if $beside ]]; cloudflared beside them[[ end ]]
   external-dns/            external-dns's Cloudflare token, copied from the platform's tokens
 [[- if $split ]]
   external-dns-domain/     external-dns-domain's token for the platform domain's own zone, copied the same way
@@ -104,9 +106,11 @@ products/                  yours: one directory per product (see "Products")
 [[- end ]]
 [[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
 [[- if $tunnel ]]
-| 13 | `edge` | Gateway `edge` behind the Cloudflare Tunnel `[[ .TunnelID ]]`: cloudflared, the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
+| 13 | `edge` | Gateway `edge` behind the Cloudflare Tunnel `[[ .TunnelID ]]`: cloudflared, the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if $infrared ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
+[[- else if $beside ]]
+| 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if $infrared ]], Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] and, beside the nodes' own ports, cloudflared for the Cloudflare Tunnel `[[ .TunnelID ]]`[[ if .TunnelPublish ]], where external-dns points the edge's names[[ end ]] |
 [[- else ]]
-| 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if .InfraredHost ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
+| 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if $infrared ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
 [[- end ]]
 [[- end ]]
 [[- end ]]
@@ -180,9 +184,9 @@ Every Application here carries the label
 `app.kubernetes.io/part-of: infrared-gitops`; Infrared finds them by it.
 
 ## Getting in
-[[ if and (eq .Edge "gateway") .InfraredHost ]]
+[[ if and (eq .Edge "gateway") $infrared ]]
 Infrared answers at **https://[[ .InfraredHost ]]**, through Cloudflare's
-proxy[[ if $tunnel ]] and the cluster's Cloudflare Tunnel[[ end ]].[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
+proxy[[ if $tunnel ]] and the cluster's Cloudflare Tunnel[[ else if $beside ]], and the cluster's Cloudflare Tunnel once the name's record points there[[ end ]].[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
 Everything else is reached by port-forward.
 [[- if .EdgeProofSecret ]]
 
@@ -191,6 +195,11 @@ The edge stamps every request for Infrared's API with the value of the Secret
 rotate it, replace the value in place; never delete the Secret, or every API
 request through the edge answers 500 until Infrared makes it again.
 [[- end ]]
+[[- else if and (eq .Edge "gateway") .InfraredHost ]]
+Infrared answers at **https://[[ .InfraredHost ]]** through the install's own
+private ingress alone: the edge keeps the name off (the Installation's
+`spec.previews.signInPrivate`).[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
+Everything else is reached by port-forward.
 [[- else ]]
 Everything is reached by port-forward; nothing is exposed.
 [[- end ]]

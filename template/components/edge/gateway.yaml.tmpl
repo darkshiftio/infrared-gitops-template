@@ -1,7 +1,11 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 [[- /* The platform domain on a Cloudflare token of its own (ADR 0063): the zones' wildcard listener takes the certificate edge-domain (certificate.yaml). */ -]]
 [[- /* Behind a Cloudflare Tunnel (spec.tunnel, ADR 0064) Envoy binds no node's ports, its Service is a ClusterIP, and one certificate from the cluster's own authority serves every listener: no token splits it. */ -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
+[[- /* With mode beside (spec.tunnel.mode, ADR 0090) cloudflared runs beside an edge that renders as it does without a tunnel. */ -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") -]]
+[[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090). */ -]]
+[[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
 [[- $split := and .PlatformDomain .DomainTokenKey (not $tunnel) -]]
 [[- if $tunnel -]]
 # =============================================================================
@@ -39,6 +43,18 @@
 # Its node ports are only what makes Envoy Gateway report the ExternalIP of
 # every node with a ready Envoy as the Gateway's addresses, which external-dns
 # publishes; the firewall keeps them closed from outside.
+[[- if $beside ]]
+#
+# Beside the cluster's Cloudflare Tunnel (the Installation's spec.tunnel, mode
+# beside, infrared-docs-internal ADR 0090): cloudflared (tunnel.yaml) sends
+# Envoy, through the Service edge, the requests for every name whose record
+# points at the tunnel, and the nodes' ports keep taking the rest, so a name
+# moves onto the tunnel, and back, by its record alone.
+[[- if .TunnelPublish ]] With
+# spec.tunnel.publish the Gateway names the tunnel as external-dns's target,
+# so the names it publishes from this Gateway point there, not at the nodes.
+[[- end ]]
+[[- end ]]
 # =============================================================================
 [[- end ]]
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -116,7 +132,7 @@ spec:
 # =============================================================================
 [[- if $split ]]
 # Two certificates (certificate.yaml), one for each Cloudflare zone:
-# edge-domain-tls, *.[[ .PlatformDomain ]], for the zones' listener https[[ if .InfraredHost ]], and edge-tls,
+# edge-domain-tls, *.[[ .PlatformDomain ]], for the zones' listener https[[ if $infrared ]], and edge-tls,
 # Infrared's own name, for its listener infrared-https[[ end ]].
 [[- else ]]
 # One certificate, edge-tls (certificate.yaml), for every HTTPS listener.
@@ -143,11 +159,18 @@ spec:
 # listener `https` from a zone's namespace only, which Infrared labels
 # infrared.darkshift.io/zone.
 [[- end ]]
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
 #
 # Infrared: https://[[ .InfraredHost ]], on listeners of its own. A listener
 # for an exact name takes the name from a wildcard one, so no route elsewhere
 # can answer for Infrared, and only Infrared's namespace may attach.
+[[- else if .InfraredHost ]]
+#
+# Infrared's own name, [[ .InfraredHost ]], is kept off this Gateway (the
+# Installation's spec.previews.signInPrivate, infrared-docs-internal ADR 0090):
+# no listener, route or certificate serves it here, so nothing publishes it,
+# and the install's own private ingress serves it. Keep the name outside
+# *.<platform domain>: the zones' listener would take one label under it.
 [[- end ]]
 #
 # Every Gateway API default is written out, so Argo CD compares like with like.
@@ -157,6 +180,12 @@ kind: Gateway
 metadata:
   name: edge
   namespace: envoy-gateway-system
+[[- if and $beside .TunnelPublish ]]
+  annotations:
+    # external-dns writes the names it publishes from this Gateway as proxied
+    # CNAMEs to the cluster's Cloudflare Tunnel (spec.tunnel.publish, ADR 0090).
+    external-dns.alpha.kubernetes.io/target: [[ printf "%s.cfargotunnel.com" .TunnelID | quote ]]
+[[- end ]]
 spec:
   gatewayClassName: edge
   allowedListeners:
@@ -189,7 +218,7 @@ spec:
               - key: infrared.darkshift.io/zone
                 operator: Exists
 [[- end ]]
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
     - name: infrared-http
       protocol: HTTP
       port: 80
@@ -238,7 +267,7 @@ spec:
   timeout:
     http:
       requestTimeout: 0s
-[[- if and .InfraredHost .EdgeProofSecret ]]
+[[- if and $infrared .EdgeProofSecret ]]
 ---
 # The edge's proof (routes.yaml): before routing, on every listener, Envoy
 # drops any X-Infrared-Edge-Proof a client sent, so only the edge's own stamp

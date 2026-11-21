@@ -2,7 +2,7 @@
 [[- if not $on -]]
 # origin-ca-issuer is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
-[[- else if and (eq .Edge "gateway") .TunnelID -]]
+[[- else if and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
 # Cloudflare's origin issuer is left out behind a Cloudflare Tunnel (the
 # Installation's spec.tunnel, infrared-docs-internal ADR 0064): cloudflared
 # checks the edge's certificate against a certificate authority inside the
