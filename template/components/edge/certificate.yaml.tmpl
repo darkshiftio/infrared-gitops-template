@@ -1,6 +1,10 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 [[- /* Behind a Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064) the edge's certificate comes from a certificate authority inside the cluster, which cloudflared trusts: no origin issuer, no Cloudflare token, and no split by zone. */ -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID ]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") ]]
+[[- /* Beside the nodes' own ports (spec.tunnel.mode beside, ADR 0090) the edge keeps the certificates it has without a tunnel, which cloudflared trusts as Cloudflare does. */ -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") ]]
+[[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090): then no certificate names it. */ -]]
+[[- $infrared := and (not .SignInPrivate) .InfraredHost ]]
 [[- /* The platform domain in a Cloudflare zone of its own, on a token of its own (spec.previews.domainTokenKey, infrared-docs-internal ADR 0063): its wildcard takes a copy of that token, an issuer and a certificate of their own, and the certificate edge keeps Infrared's name alone. */ -]]
 [[- $split := and .PlatformDomain .DomainTokenKey (not $tunnel) ]]
 [[- /* Infrared's name needs a name of its own on the certificate only when the wildcard does not cover it: one label under the platform domain. A wildcard on a certificate of its own covers it nowhere. */ -]]
@@ -103,7 +107,7 @@ spec:
 [[- if .PlatformDomain ]]
     - [[ printf "*.%s" .PlatformDomain | quote ]]
 [[- end ]]
-[[- if and .InfraredHost (not $covered) ]]
+[[- if and $infrared (not $covered) ]]
     - [[ .InfraredHost | quote ]]
 [[- end ]]
   privateKey:
@@ -121,6 +125,14 @@ spec:
 # every record), and it checks the origin's certificate against Cloudflare's
 # Origin CA (SSL/TLS mode Full (strict)). The browser sees Cloudflare's own edge
 # certificate, never this one: a name served with it must stay proxied.
+[[- if $beside ]]
+#
+# Beside the cluster's Cloudflare Tunnel (spec.tunnel, mode beside,
+# infrared-docs-internal ADR 0090) cloudflared is a client too, for the names
+# whose records point at the tunnel, and it checks the same certificates
+# against the same roots, which it holds built in (tunnel.yaml): a name moves
+# onto the tunnel with the certificate it has.
+[[- end ]]
 #
 # An OriginIssuer next to the Gateway, not a ClusterOriginIssuer: only
 # certificates in this namespace can use it, and its token stays here too. The
@@ -136,7 +148,7 @@ spec:
 # the wildcard *.[[ .PlatformDomain ]] has a copy of that token, the OriginIssuer
 # cloudflare-origin-domain and the Certificate edge-domain (Secret
 # edge-domain-tls) of its own, in the same waves. cloudflare-origin, on
-# cloudflare-api-token, signs [[ if .InfraredHost ]]the Certificate edge, Infrared's name alone, and [[ end ]]the
+# cloudflare-api-token, signs [[ if $infrared ]]the Certificate edge, Infrared's name alone, and [[ end ]]the
 # certificates Infrared asks for a zone's own addresses.
 [[- end ]]
 #
@@ -186,7 +198,7 @@ spec:
     tokenRef:
       name: cloudflare-api-token
       key: api-token
-[[- if or (not $split) .InfraredHost ]]
+[[- if or (not $split) $infrared ]]
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -202,7 +214,7 @@ spec:
 [[- if and .PlatformDomain (not $split) ]]
     - [[ printf "*.%s" .PlatformDomain | quote ]]
 [[- end ]]
-[[- if and .InfraredHost (not $covered) ]]
+[[- if and $infrared (not $covered) ]]
     - [[ .InfraredHost | quote ]]
 [[- end ]]
   privateKey:
@@ -297,6 +309,12 @@ spec:
 # port, where the address has no certificate yet, so none reaches http-any
 # (infrared-docs-internal ADR 0064). Its wave, 2, comes after cloudflared's,
 # so the tunnel never waits for Let's Encrypt.
+[[- else if $beside ]]
+#
+# Beside the Cloudflare Tunnel (spec.tunnel, mode beside, ADR 0090) the
+# challenge for a name on the tunnel passes too: cloudflared's first route
+# sends the challenge path to Envoy's plain HTTP (tunnel.yaml), and so to
+# http-any, as the nodes' port 80 does for the rest.
 [[- end ]]
 apiVersion: cert-manager.io/v1
 kind: Issuer

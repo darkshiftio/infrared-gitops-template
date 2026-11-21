@@ -1,6 +1,64 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) .TunnelID -]]
 [[- $key := default "cloudflare-tunnel-credentials" .TunnelCredentialsKey ]]
 [[- $edge := "https://edge.envoy-gateway-system.svc.cluster.local:443" -]]
+[[- /* Beside the nodes' own ports (spec.tunnel.mode beside, ADR 0090) the edge keeps Cloudflare's Origin CA, which cloudflared trusts built in: no edge-ca, no caPool. */ -]]
+[[- $beside := eq .TunnelMode "beside" -]]
+[[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090). */ -]]
+[[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
+[[- if $beside -]]
+# =============================================================================
+# cloudflared: the edge's Cloudflare Tunnel, beside the nodes' own ports.
+# =============================================================================
+# The Installation's spec.tunnel with mode beside (infrared-docs-internal ADR
+# 0090): a locally managed tunnel, [[ .TunnelID ]], whose routes are
+# these, rendered from the Installation's names and never kept in Cloudflare's
+# dashboard. It runs beside the edge on the nodes' own ports, which stays as
+# it renders without a tunnel (gateway.yaml, certificate.yaml, routes.yaml):
+# a name reaches Envoy through the tunnel once its record is a proxied CNAME
+# to [[ .TunnelID ]].cfargotunnel.com, and through the nodes'
+# ports until then, so each name moves onto the tunnel, and back, by its
+# record alone.
+[[- if .TunnelPublish ]] With spec.tunnel.publish external-dns publishes the
+# edge's own names there (gateway.yaml); a person makes the others' records.
+[[- else ]] external-dns publishes the edge's own names at the nodes'
+# addresses, as before, and a person points a name at the tunnel.
+[[- end ]]
+#
+# cloudflared dials out to Cloudflare on port 7844 (QUIC on UDP, or HTTP/2 on
+# TCP), and Cloudflare's edge sends each request for the tunnel's names down
+# that connection. cloudflared forwards it to Envoy's Service edge
+# (gateway.yaml), as the request's own name. Over HTTPS it checks Envoy's
+# certificate against the roots it holds, the system's and Cloudflare's Origin
+# CA, built into cloudflared: every certificate this edge shows comes from one
+# of them (Let's Encrypt for custom hostnames, the Origin CA for the rest), so
+# no route needs a caPool.
+#
+# Its routes, the first that matches wins:
+#   /.well-known/acme-challenge/  Envoy's plain HTTP, for any name: a custom
+#                  hostname's Let's Encrypt challenge reaches the solver on the
+#                  listener http-any (certificate.yaml) through the tunnel too
+[[- if $infrared ]]
+#   [[ .InfraredHost ]]  Infrared, by that name (originServerName)
+[[- end ]]
+[[- if .PlatformDomain ]]
+#   *.[[ .PlatformDomain ]]  the zones, each by its own name (matchSNItoHost)
+[[- end ]]
+#   anything else  Envoy as well, by its own name: custom hostnames, zones'
+#                  own addresses and the names a person routes to the tunnel
+#
+# Two replicas, never on one node, each holding connections of its own, so a
+# node that goes takes one replica and none of the names. cloudflared reads
+# its config and credentials only at start, so the pods carry the tunnel, its
+# credentials' key and its routes in an annotation, and a change of any rolls
+# them.
+#
+# Waves: the credentials' copy first (-7), before the edge's certificates,
+# since External Secrets' webhook admits it; cloudflared last (2), after the
+# Gateway and its certificate, and after Let's Encrypt's issuer (1), which
+# cert-manager's webhook admits and so keeps a wave of its own. Beside the
+# nodes' ports the tunnel is no name's only way in, so it may wait for it.
+# =============================================================================
+[[- else -]]
 # =============================================================================
 # cloudflared: the edge's Cloudflare Tunnel.
 # =============================================================================
@@ -16,7 +74,7 @@
 # [[ .TunnelID ]].cfargotunnel.com: nothing here writes DNS.
 #
 # Its routes, the first that matches wins:
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
 #   [[ .InfraredHost ]]  Infrared, by that name (originServerName)
 [[- end ]]
 [[- if .PlatformDomain ]]
@@ -40,6 +98,7 @@
 # Gateway and its certificate, since it takes visitors the moment it
 # connects.
 # =============================================================================
+[[- end ]]
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
@@ -68,7 +127,7 @@ metadata:
   name: cloudflared
   namespace: envoy-gateway-system
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "[[ if $beside ]]2[[ else ]]1[[ end ]]"
 data:
   config.yaml: |
     tunnel: [[ .TunnelID | quote ]]
@@ -76,7 +135,29 @@ data:
     metrics: 0.0.0.0:2000
     no-autoupdate: true
     ingress:
-[[- if .InfraredHost ]]
+[[- if $beside ]]
+      - path: ^/\.well-known/acme-challenge/
+        service: http://edge.envoy-gateway-system.svc.cluster.local:80
+[[- if $infrared ]]
+      - hostname: [[ .InfraredHost | quote ]]
+        service: [[ $edge ]]
+        originRequest:
+          originServerName: [[ .InfraredHost | quote ]]
+          http2Origin: true
+[[- end ]]
+[[- if .PlatformDomain ]]
+      - hostname: [[ printf "*.%s" .PlatformDomain | quote ]]
+        service: [[ $edge ]]
+        originRequest:
+          matchSNItoHost: true
+          http2Origin: true
+[[- end ]]
+      - service: [[ $edge ]]
+        originRequest:
+          matchSNItoHost: true
+          http2Origin: true
+[[- else ]]
+[[- if $infrared ]]
       - hostname: [[ .InfraredHost | quote ]]
         service: [[ $edge ]]
         originRequest:
@@ -101,6 +182,7 @@ data:
 [[- else ]]
       - service: http_status:404
 [[- end ]]
+[[- end ]]
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -110,7 +192,7 @@ metadata:
   labels:
     app.kubernetes.io/name: cloudflared
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "[[ if $beside ]]2[[ else ]]1[[ end ]]"
 spec:
   replicas: 2
   selector:
@@ -129,7 +211,7 @@ spec:
         app.kubernetes.io/name: cloudflared
       annotations:
         # The tunnel, its credentials' key and its routes, read at start.
-        infrared.darkshift.io/tunnel: "[[ .TunnelID ]] [[ $key ]][[ with .InfraredHost ]] [[ . ]][[ end ]][[ with .PlatformDomain ]] *.[[ . ]][[ end ]][[ if .CustomHostnames ]] *[[ else ]] 404[[ end ]]"
+        infrared.darkshift.io/tunnel: "[[ .TunnelID ]] [[ $key ]][[ if $beside ]] beside acme[[ end ]][[ with $infrared ]] [[ . ]][[ end ]][[ with .PlatformDomain ]] *.[[ . ]][[ end ]][[ if or $beside .CustomHostnames ]] *[[ else ]] 404[[ end ]]"
     spec:
       affinity:
         podAntiAffinity:
@@ -193,9 +275,11 @@ spec:
             - name: credentials
               mountPath: /etc/cloudflared/credentials
               readOnly: true
+[[- if not $beside ]]
             - name: ca
               mountPath: /etc/cloudflared/ca
               readOnly: true
+[[- end ]]
       volumes:
         - name: config
           configMap:
@@ -203,6 +287,7 @@ spec:
         - name: credentials
           secret:
             secretName: cloudflared-credentials
+[[- if not $beside ]]
         # The authority's certificate alone, never its key.
         - name: ca
           secret:
@@ -210,6 +295,7 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+[[- end ]]
 ---
 # A drain keeps one replica, and with it the tunnel, up.
 apiVersion: policy/v1
@@ -218,7 +304,7 @@ metadata:
   name: cloudflared
   namespace: envoy-gateway-system
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "[[ if $beside ]]2[[ else ]]1[[ end ]]"
 spec:
   minAvailable: 1
   selector:

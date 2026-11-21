@@ -1,6 +1,8 @@
 [[- $oci := true ]][[ range .Disabled ]][[ if eq . "origin-ca-issuer" ]][[ $oci = false ]][[ end ]][[ end ]]
 [[- /* Behind a Cloudflare Tunnel (spec.tunnel, ADR 0064) no Application makes origin-ca-issuer's namespace, and no node's port reaches Envoy. */ -]]
-[[- if .TunnelID ]][[ $oci = false ]][[ end ]]
+[[- if and .TunnelID (ne .TunnelMode "beside") ]][[ $oci = false ]][[ end ]]
+[[- /* Beside the nodes' own ports (spec.tunnel.mode beside, ADR 0090) Envoy keeps its host ports and cloudflared reaches it on both of its ports. */ -]]
+[[- $beside := and .TunnelID (eq .TunnelMode "beside") ]]
 [[- if and .NetworkPolicies (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 # =============================================================================
 # The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
@@ -11,12 +13,17 @@
 # operator (its HTTPS check of a zone's addresses goes to the Service edge, on
 # 443), and vmagent on the metrics port. Every other pod here admits the
 # platform, and the control plane on Envoy Gateway's topology injector.
-[[- if .TunnelID ]]
+[[- if and .TunnelID (not $beside) ]]
 #
 # Behind the Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064)
 # Envoy binds no node's port, so it admits no one from outside the cluster:
 # cloudflared, beside it, is the tunnel's one way in. The origin issuer is
 # left out, and its namespace with it.
+[[- else if $beside ]]
+#
+# Beside the Cloudflare Tunnel (spec.tunnel, mode beside, infrared-docs-internal
+# ADR 0090) Envoy keeps the nodes' ports, and cloudflared reaches it on 10443
+# and, for a Let's Encrypt challenge, on 10080.
 [[- end ]]
 # =============================================================================
 apiVersion: networking.k8s.io/v1
@@ -62,7 +69,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-[[- if not .TunnelID ]]
+[[- if or (not .TunnelID) $beside ]]
     # Cloudflare, through the nodes' hostPorts 80 and 443 (Envoy's 10080 and
     # 10443): the world, which on Dataplane V2 is never a pod or a node.
     - from:
@@ -93,6 +100,10 @@ spec:
             matchLabels:
               app.kubernetes.io/name: cloudflared
       ports:
+[[- if $beside ]]
+        - protocol: TCP
+          port: 10080
+[[- end ]]
         - protocol: TCP
           port: 10443
     # vmagent: Envoy's metrics, every zone's requests (VMPodScrape edge-envoy).

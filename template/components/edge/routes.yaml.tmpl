@@ -1,5 +1,9 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID -]]
+[[- /* With mode beside (spec.tunnel.mode, ADR 0090) cloudflared runs beside an edge that routes as it does without a tunnel. */ -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") -]]
+[[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090). */ -]]
+[[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
 # =============================================================================
 # The edge's own routes. Every Gateway API default is written out (parentRef
 # group and kind, the PathPrefix / match, backendRef group, kind and weight), or
@@ -18,7 +22,7 @@
 [[- if .PlatformDomain ]]
 #   [[ printf "*.%s" .PlatformDomain ]]  one wildcard record, for every zone
 [[- end ]]
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
 #   [[ .InfraredHost ]]  Infrared's own record
 [[- end ]]
 # The label below stays, so the routes are the same either way.
@@ -29,16 +33,22 @@
 [[- if .PlatformDomain ]]
 #   [[ printf "*.%s" .PlatformDomain ]]  one proxied wildcard record, for every zone
 [[- end ]]
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
 #   [[ .InfraredHost ]]  Infrared's own record
 [[- end ]]
+[[- if and $beside .TunnelPublish ]]
+# external-dns publishes only routes with the label below, as proxied CNAMEs to
+# the cluster's Cloudflare Tunnel, [[ .TunnelID ]].cfargotunnel.com,
+# the Gateway's target (gateway.yaml; spec.tunnel.publish, ADR 0090).
+[[- else ]]
 # external-dns publishes only routes with the label below, at the Gateway's
 # addresses: the ExternalIP of each node with a ready Envoy (gateway.yaml).
+[[- end ]]
 [[- end ]]
 [[- if and .PlatformDomain .DomainTokenKey (not $tunnel) ]]
 # Two of them read these routes, one for each Cloudflare zone (ADR 0063):
 # external-dns-domain, on the platform domain's own token, publishes
-# *.[[ .PlatformDomain ]] and edge.[[ .PlatformDomain ]][[ if .InfraredHost ]], and external-dns, on
+# *.[[ .PlatformDomain ]] and edge.[[ .PlatformDomain ]][[ if $infrared ]], and external-dns, on
 # cloudflare-api-token, [[ .InfraredHost ]][[ end ]]. Each skips the names in a zone its token
 # cannot see.
 [[- end ]]
@@ -57,7 +67,7 @@ spec:
       name: edge
       sectionName: http
 [[- end ]]
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: edge
@@ -120,7 +130,7 @@ spec:
             scheme: https
             statusCode: 301
 [[- end ]]
-[[- if .InfraredHost ]]
+[[- if $infrared ]]
 [[- if .EdgeProofSecret ]]
 ---
 # The edge's proof (workspace TODO 473, F4; infrared-docs-internal ADR 0066
@@ -210,6 +220,11 @@ spec:
           name: infrared
           port: 80
           weight: 1
+[[- else if .InfraredHost ]]
+# Infrared's own name, [[ .InfraredHost ]], is kept off the edge (the
+# Installation's spec.previews.signInPrivate, infrared-docs-internal ADR 0090):
+# no route for it here, and no edge's proof. The install's own private ingress
+# serves it.
 [[- end ]]
 [[- else -]]
 # The edge is not a Gateway with a name to serve: no routes.

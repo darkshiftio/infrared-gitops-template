@@ -106,6 +106,33 @@ type Data struct {
 	// default, cloudflare-tunnel-credentials, and an operator leaves it out of
 	// the data without a tunnel.
 	TunnelCredentialsKey string `json:"TunnelCredentialsKey,omitempty"`
+	// TunnelMode is spec.tunnel.mode beside, with TunnelID: cloudflared runs
+	// beside an edge that stays as it renders without a tunnel (the nodes'
+	// own ports, Cloudflare's Origin CA, external-dns), so each of the edge's
+	// names moves onto the tunnel when its record points there
+	// (infrared-docs-internal ADR 0090, workspace TODO 745). cloudflared's
+	// routes, the first that matches wins: a Let's Encrypt challenge to
+	// Envoy's plain HTTP, InfraredHost, *.<PlatformDomain>, then every other
+	// name to Envoy's HTTPS by its own name. "" is the tunnel alone, as
+	// before: the operator hands mode only as "", and leaves it out of the
+	// data.
+	TunnelMode string `json:"TunnelMode,omitempty"`
+	// TunnelPublish is spec.tunnel.publish with TunnelMode beside: the
+	// Gateway edge carries external-dns's target annotation,
+	// <TunnelID>.cfargotunnel.com, so the names external-dns publishes from
+	// the edge become proxied CNAMEs to the tunnel instead of the nodes'
+	// addresses. false renders as before, and an operator leaves it out of
+	// the data.
+	TunnelPublish bool `json:"TunnelPublish,omitempty"`
+	// SignInPrivate is spec.previews.signInPrivate on a gateway edge with an
+	// InfraredHost: Infrared's own name is kept off the edge, which renders
+	// no listener, route, cloudflared route or certificate name for it, and
+	// no edge's proof; the install's own private ingress serves the name
+	// (infrared-docs-internal ADR 0090). InfraredHost stays set, and what
+	// else renders from it (Grafana's sign-in, the README, the infrared
+	// Application) is as before. false renders as before, and an operator
+	// leaves it out of the data.
+	SignInPrivate bool `json:"SignInPrivate,omitempty"`
 	// EdgeProofSecret is the operator's INFRARED_EDGE_PROOF_SECRET (the
 	// Infrared chart's api.clientAddressProof.enabled) on a gateway edge with
 	// an InfraredHost: the Secret in InfraredNamespace whose key credential
@@ -722,6 +749,12 @@ func main() {
 		"TunnelID: the UUID, lower case, of the Cloudflare Tunnel the edge is reached through; needs -edge gateway (empty: the edge on the nodes' own ports)")
 	flag.StringVar(&d.TunnelCredentialsKey, "tunnel-credentials-key", defaultTunnelCredentialsKey,
 		"TunnelCredentialsKey: the key of infrared-platform-tokens with the tunnel's credentials file, with -tunnel-id")
+	flag.StringVar(&d.TunnelMode, "tunnel-mode", "",
+		`TunnelMode: "beside", cloudflared beside the edge on the nodes' own ports, with -tunnel-id (empty: the tunnel alone)`)
+	flag.BoolVar(&d.TunnelPublish, "tunnel-publish", false,
+		"TunnelPublish: external-dns publishes the edge's names to the tunnel; needs -tunnel-mode beside")
+	flag.BoolVar(&d.SignInPrivate, "sign-in-private", false,
+		"SignInPrivate: Infrared's own name kept off the edge; needs -edge gateway, -platform-domain and -infrared-host")
 	flag.StringVar(&d.EdgeProofSecret, "edge-proof-secret", "",
 		"EdgeProofSecret: the Secret in -namespace whose key credential the edge stamps on requests for Infrared's API (INFRARED_EDGE_PROOF_SECRET); needs -edge gateway and -infrared-host (empty: no stamp)")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
@@ -838,6 +871,9 @@ func mergeDataFile(d *Data, path string) error {
 		"domain-token-key":       func() { d.DomainTokenKey = explicit.DomainTokenKey },
 		"tunnel-id":              func() { d.TunnelID = explicit.TunnelID },
 		"tunnel-credentials-key": func() { d.TunnelCredentialsKey = explicit.TunnelCredentialsKey },
+		"tunnel-mode":            func() { d.TunnelMode = explicit.TunnelMode },
+		"tunnel-publish":         func() { d.TunnelPublish = explicit.TunnelPublish },
+		"sign-in-private":        func() { d.SignInPrivate = explicit.SignInPrivate },
 		"edge-proof-secret":      func() { d.EdgeProofSecret = explicit.EdgeProofSecret },
 		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
 		"images":                 func() { d.Images = explicit.Images },
@@ -919,6 +955,7 @@ func validate(d Data) error {
 	}
 	errs = append(errs, validateDomainTokenKey(d)...)
 	errs = append(errs, validateTunnel(d)...)
+	errs = append(errs, validateSignInPrivate(d)...)
 	errs = append(errs, validateEdgeProof(d)...)
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
@@ -1070,18 +1107,35 @@ func validateDomainTokenKey(d Data) []error {
 // writes, and the Installation's default.
 const defaultTunnelCredentialsKey = "cloudflare-tunnel-credentials"
 
+// tunnelBeside is the one TunnelMode the operator hands: the tunnel beside
+// the nodes' own ports (ADR 0090); mode only arrives as "".
+const tunnelBeside = "beside"
+
 // validateTunnel checks the Cloudflare Tunnel: none, or a tunnel's UUID in
 // lower case, as the Installation takes it, on a gateway edge, the one edge
 // it fronts, with its credentials key a key of a Secret. A credentials key
-// other than the default needs the tunnel it is for.
+// other than the default needs the tunnel it is for. TunnelMode is beside,
+// with a tunnel, or empty, and TunnelPublish needs it beside (ADR 0090).
 func validateTunnel(d Data) []error {
+	var errs []error
+	switch d.TunnelMode {
+	case "":
+	case tunnelBeside:
+		if d.TunnelID == "" {
+			errs = append(errs, errors.New("TunnelMode beside needs a TunnelID: it runs that tunnel beside the nodes' own ports"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("TunnelMode must be beside or empty, the tunnel alone (the operator hands mode only as empty), got %q", d.TunnelMode))
+	}
+	if d.TunnelPublish && d.TunnelMode != tunnelBeside {
+		errs = append(errs, errors.New("TunnelPublish needs TunnelMode beside: only beside the nodes' own ports does external-dns publish the edge's names"))
+	}
 	if d.TunnelID == "" {
 		if d.TunnelCredentialsKey != "" && d.TunnelCredentialsKey != defaultTunnelCredentialsKey {
-			return []error{errors.New("TunnelCredentialsKey needs a TunnelID: it names the credentials of the tunnel the edge is reached through")}
+			errs = append(errs, errors.New("TunnelCredentialsKey needs a TunnelID: it names the credentials of the tunnel the edge is reached through"))
 		}
-		return nil
+		return errs
 	}
-	var errs []error
 	if !tunnelID.MatchString(d.TunnelID) {
 		errs = append(errs, fmt.Errorf("TunnelID must be a Cloudflare Tunnel's UUID, lower case, e.g. 6ff42ae2-765d-4adf-8112-31c55c1551ef, got %q", d.TunnelID))
 	}
@@ -1094,9 +1148,23 @@ func validateTunnel(d Data) []error {
 	return errs
 }
 
+// validateSignInPrivate checks SignInPrivate: only on a gateway edge with an
+// InfraredHost, the one edge that serves the name, and a PlatformDomain,
+// which the Installation's previews always carry with it (ADR 0090).
+func validateSignInPrivate(d Data) []error {
+	if !d.SignInPrivate {
+		return nil
+	}
+	if d.Edge != "gateway" || d.InfraredHost == "" || d.PlatformDomain == "" {
+		return []error{errors.New("SignInPrivate needs Edge gateway, an InfraredHost and a PlatformDomain: only the Gateway edge serves Infrared's own name")}
+	}
+	return nil
+}
+
 // validateEdgeProof checks EdgeProofSecret: empty, or a Secret's name, and
-// only on a gateway edge with an InfraredHost, the one edge whose route for
-// Infrared stamps the proof, as the operator hands it.
+// only on a gateway edge with an InfraredHost it serves (no SignInPrivate),
+// the one edge whose route for Infrared stamps the proof, as the operator
+// hands it.
 func validateEdgeProof(d Data) []error {
 	if d.EdgeProofSecret == "" {
 		return nil
@@ -1107,6 +1175,9 @@ func validateEdgeProof(d Data) []error {
 	}
 	if d.Edge != "gateway" || d.InfraredHost == "" {
 		errs = append(errs, errors.New("EdgeProofSecret needs Edge gateway and an InfraredHost: only the Gateway edge's route for Infrared stamps the proof"))
+	}
+	if d.SignInPrivate {
+		errs = append(errs, errors.New("EdgeProofSecret takes no SignInPrivate: with Infrared's own name off the edge, no route of Infrared's stamps the proof"))
 	}
 	return errs
 }

@@ -23,6 +23,19 @@ jobs:
           curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin kubeconform
           kubeconform -v
+      # cloudflared at the version components/edge/tunnel.yaml runs, for its own
+      # check of the rendered routes (cloudflared tunnel ingress validate, in
+      # scripts/verify.sh); the checksum is the release's.
+      - name: Install cloudflared
+        env:
+          CLOUDFLARED_VERSION: 2026.10.5
+          CLOUDFLARED_SHA256: e1bc0cf084fd9e590554fe769a86b1db46701c3f847a43d902f7b974a4e16298
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cloudflared" \
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          echo "${CLOUDFLARED_SHA256}  $RUNNER_TEMP/cloudflared" | sha256sum -c -
+          sudo install -m 0755 "$RUNNER_TEMP/cloudflared" /usr/local/bin/cloudflared
+          cloudflared --version
       # kubectl and yq (mikefarah v4) are preinstalled on ubuntu-latest.
       - run: kubectl version --client && yq --version
       - run: make verify

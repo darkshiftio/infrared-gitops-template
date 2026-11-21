@@ -1081,6 +1081,70 @@ func TestTunnel(t *testing.T) {
 	}
 }
 
+// A tunnel beside the nodes' own ports and Infrared's name kept off the edge
+// (infrared-docs-internal ADR 0090): the operator hands TunnelMode,
+// TunnelPublish and SignInPrivate by their Go names, absent is off, as an
+// operator from before them leaves them out; TunnelMode is beside, with a
+// tunnel, or empty, TunnelPublish needs it beside, SignInPrivate needs a
+// gateway edge with Infrared's host and a platform domain, and the edge's
+// proof takes no SignInPrivate.
+func TestTunnelBesideAndSignInPrivate(t *testing.T) {
+	id := "6ff42ae2-765d-4adf-8112-31c55c1551ef"
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "google.internal.darkshift.io",
+		"InfraredHost": "infrared.internal.darkshift.io", "TunnelID": "` + id + `", "TunnelMode": "beside",
+		"TunnelPublish": true, "SignInPrivate": true}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil {
+		t.Fatal(err)
+	}
+	if d.TunnelMode != "beside" || !d.TunnelPublish || !d.SignInPrivate {
+		t.Errorf("loaded TunnelMode %q, TunnelPublish %t, SignInPrivate %t", d.TunnelMode, d.TunnelPublish, d.SignInPrivate)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway", "TunnelID": "`+id+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.TunnelMode != "" || d.TunnelPublish || d.SignInPrivate {
+		t.Errorf("an operator's data without them loaded TunnelMode %q, TunnelPublish %t, SignInPrivate %t, %v; want none",
+			d.TunnelMode, d.TunnelPublish, d.SignInPrivate, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0", Edge: "gateway", PlatformDomain: "google.internal.darkshift.io",
+		InfraredHost: "infrared.internal.darkshift.io"}
+	for _, c := range []struct {
+		name          string
+		change        func(*Data)
+		wantValidated bool
+	}{
+		{"none", func(*Data) {}, true},
+		{"beside, with a tunnel", func(d *Data) { d.TunnelID, d.TunnelMode = id, "beside" }, true},
+		{"beside, publishing", func(d *Data) { d.TunnelID, d.TunnelMode, d.TunnelPublish = id, "beside", true }, true},
+		{"the private sign-in", func(d *Data) { d.SignInPrivate = true }, true},
+		{"the private sign-in behind a tunnel alone", func(d *Data) { d.TunnelID, d.SignInPrivate = id, true }, true},
+		{"all three", func(d *Data) { d.TunnelID, d.TunnelMode, d.TunnelPublish, d.SignInPrivate = id, "beside", true, true }, true},
+		{"beside without a tunnel", func(d *Data) { d.TunnelMode = "beside" }, false},
+		{"mode only, which the operator hands as empty", func(d *Data) { d.TunnelID, d.TunnelMode = id, "only" }, false},
+		{"a mode of neither", func(d *Data) { d.TunnelID, d.TunnelMode = id, "both" }, false},
+		{"publish behind a tunnel alone", func(d *Data) { d.TunnelID, d.TunnelPublish = id, true }, false},
+		{"publish without a tunnel", func(d *Data) { d.TunnelPublish = true }, false},
+		{"the private sign-in on Traefik", func(d *Data) { d.Edge, d.SignInPrivate = "traefik", true }, false},
+		{"the private sign-in without Infrared's host", func(d *Data) { d.InfraredHost, d.SignInPrivate = "", true }, false},
+		{"the private sign-in without a platform domain", func(d *Data) { d.PlatformDomain, d.SignInPrivate = "", true }, false},
+		{"the private sign-in with the edge's proof", func(d *Data) { d.SignInPrivate, d.EdgeProofSecret = true, "infrared-edge-proof" }, false},
+	} {
+		d := base
+		c.change(&d)
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+}
+
 // The edge's proof (workspace TODO 473, F4; ADR 0066 D2): EdgeProofSecret
 // loads from the operator's Data by its Go name, absent is none, as an
 // operator from before it leaves it out, and it is refused unless it is a

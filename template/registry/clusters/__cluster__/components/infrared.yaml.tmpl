@@ -208,6 +208,10 @@ spec:
               # The domain's own Cloudflare token (ADR 0063).
               domainTokenKey: [[ .DomainTokenKey | quote ]]
 [[- end ]]
+[[- if .SignInPrivate ]]
+              # Infrared's own name kept off the edge (ADR 0090).
+              signInPrivate: true
+[[- end ]]
 [[- end ]]
 [[- if .TunnelID ]]
             # The Cloudflare Tunnel the edge is reached through
@@ -216,6 +220,13 @@ spec:
             tunnel:
               id: [[ .TunnelID | quote ]]
               credentialsKey: [[ default "cloudflare-tunnel-credentials" .TunnelCredentialsKey | quote ]]
+[[- if eq .TunnelMode "beside" ]]
+              # Beside the nodes' own ports (ADR 0090).
+              mode: beside
+[[- if .TunnelPublish ]]
+              publish: true
+[[- end ]]
+[[- end ]]
 [[- end ]]
 [[- end ]]
 [[- if .Stores ]]

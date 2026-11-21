@@ -14,7 +14,8 @@
 #   [[ default "cloudflare-tunnel-credentials" .TunnelCredentialsKey ]], the Cloudflare Tunnel's credentials (spec.tunnel)
 #                          envoy-gateway-system/cloudflared-credentials
 #                          (cloudflared's, components/edge/tunnel.yaml)
-[[- else if eq .Edge "gateway" ]]
+[[- end ]]
+[[- if and (eq .Edge "gateway") (or (not .TunnelID) (eq .TunnelMode "beside")) ]]
 #   cloudflare-api-token   external-dns/cloudflare-api-token (DNS records)
 #                          envoy-gateway-system/cloudflare-api-token (origin
 #                          certificates)
@@ -99,7 +100,7 @@ spec:
   conditions:
     - namespaces:
 [[- if eq .Edge "gateway" ]]
-[[- if not .TunnelID ]]
+[[- if or (not .TunnelID) (eq .TunnelMode "beside") ]]
         - external-dns
 [[- end ]]
         - envoy-gateway-system
