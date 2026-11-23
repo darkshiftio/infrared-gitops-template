@@ -7,9 +7,10 @@
 # The edge (components/edge): one Gateway behind Cloudflare's proxy, its origin
 # certificate, the redirect from port 80, Infrared's own route, and cloudflared
 # beside it (the Installation's spec.tunnel, mode beside, infrared-docs-internal
-# ADR 0090): a name reaches Envoy through the cluster's Cloudflare Tunnel once
-# its record points there, and through the nodes' ports until then. Wave 13,
-# after Envoy Gateway and the origin issuer (11) and external-dns (12).
+# ADR 0090): a name cloudflared routes reaches Envoy through the cluster's
+# Cloudflare Tunnel once its record points there, and through the nodes' ports
+# until then. Wave 13, after Envoy Gateway and the origin issuer (11) and
+# external-dns (12).
 [[- else if .TunnelID -]]
 # The edge (components/edge): one Gateway behind the cluster's Cloudflare
 # Tunnel (the Installation's spec.tunnel, infrared-docs-internal ADR 0064),

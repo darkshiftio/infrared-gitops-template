@@ -61,6 +61,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.TunnelCredentialsKey` | absent or ``, `cloudflare-tunnel-credentials` | the Installation's `spec.tunnel.credentialsKey`, with `.TunnelID`: the key of the Secret `infrared-platform-tokens` that holds the tunnel's credentials file, which cloudflared runs it with; empty is `cloudflare-tunnel-credentials` |
 | `.TunnelMode` | absent or ``, `beside` | the Installation's `spec.tunnel.mode` `beside`, with `.TunnelID` (infrared-docs-internal ADR 0090): cloudflared runs beside an edge that renders as it does without a tunnel (the nodes' own ports, Cloudflare's Origin CA, external-dns), so each of the edge's names moves onto the tunnel when its record points there (see "Beside the nodes' own ports"); empty, mode `only` or none, is the tunnel alone, as before, and the operator leaves it out of its data |
 | `.TunnelPublish` | absent or `false`, `true` | the Installation's `spec.tunnel.publish`, with `.TunnelMode` `beside`: the Gateway `edge` carries external-dns's target annotation, `<TunnelID>.cfargotunnel.com`, so external-dns publishes the edge's names as proxied CNAMEs to the tunnel instead of at the nodes' addresses; `false`, as before |
+| `.TunnelHostnames` | absent or `[]`, `["hooks.example.com", "support.example.com"]` | the Installation's `spec.tunnel.hostnames`, with `.TunnelID`, alone or beside (ADR 0090, workspace TODO 745): the other names a record sends to the tunnel, each served on the edge by a listener of its own this template does not render (a name a gitops repo outside it serves, and a zone's own address or a custom hostname once it moves onto the tunnel), sorted, each once, lower case and never `.InfraredHost`. cloudflared gives each a route of its own to Envoy by that name, and answers 404 for a name listed nowhere (see "Beside the nodes' own ports"); empty, the operator leaves it out of its data |
 | `.SignInPrivate` | absent or `false`, `true` | the Installation's `spec.previews.signInPrivate`, in gateway mode with an `.InfraredHost` and a `.PlatformDomain` only (ADR 0090): Infrared's own name is kept off the edge, which renders no listener `infrared-http` or `infrared-https`, no route `infrared` and no parent `infrared-http` on `https-redirect` (so external-dns publishes nothing for it), no cloudflared route and no certificate name for it, and no edge's proof; the install's own private ingress serves the name. `.InfraredHost` stays set: Grafana's sign-in, the README and the `infrared` Application still name it (see "Infrared's name kept off the edge"); `false`, as before |
 | `.EdgeProofSecret` | absent or ``, `infrared-edge-proof` | the operator's `INFRARED_EDGE_PROOF_SECRET`, the Infrared chart's `api.clientAddressProof.enabled`, in gateway mode with an `.InfraredHost` only: the Secret in `.InfraredNamespace` whose key `credential` the edge stamps on every request for Infrared's API, as `X-Infrared-Edge-Proof`, so the API believes the client-address header (`CF-Connecting-IP`) only on a request that came through the edge (workspace TODO 473, F4; infrared-docs-internal ADR 0066 D2). The `infrared` route then has a first rule for the API's paths through the HTTPRouteFilter `infrared-edge-proof`, and the ClientTrafficPolicy `edge` strips a client's copy (see "The edge's proof"); the operator makes the Secret before it renders them. Empty, no stamp, as before |
 | `.ImageRegistry` | `` or `ghcr.io/darkshiftio` | the registry of Infrared's own images (`INFRARED_IMAGE_REGISTRY`); empty keeps the chart's |
@@ -116,7 +117,8 @@ array, exactly as the operator's environment carries them, `-forge` with
 (with `-edge gateway` and `-platform-domain`); `-tunnel-id` with
 `-tunnel-credentials-key` (with `-edge gateway`; the key's default is
 `cloudflare-tunnel-credentials`); `-tunnel-mode beside` (with `-tunnel-id`)
-and `-tunnel-publish` (with `-tunnel-mode beside`); `-sign-in-private` (with
+and `-tunnel-publish` (with `-tunnel-mode beside`); `-tunnel-hostnames` as a
+JSON array (with `-tunnel-id`); `-sign-in-private` (with
 `-edge gateway`, `-platform-domain` and `-infrared-host`);
 `-edge-proof-secret` (with `-edge gateway` and `-infrared-host`, never with
 `-sign-in-private`); `-network-policies`; `-registry-pulls` and
@@ -132,7 +134,7 @@ certificates, the Cluster's WAL archiver, `postgres/backup.yaml`, and the
 waits for them); with it `true`, those files render as they did. Only `.Edge`, `.Stores`, `.Disabled`,
 `.Forge`, `.Registry`, `.SubstrateCapable`, on a gateway edge with a
 `.PlatformDomain` `.DomainTokenKey`, on a gateway edge `.TunnelID` and with it
-`.TunnelMode` and `.TunnelPublish`, and on a gateway edge with an
+`.TunnelMode`, `.TunnelPublish` and `.TunnelHostnames`, and on a gateway edge with an
 `.InfraredHost` `.SignInPrivate` and `.EdgeProofSecret` turn anything on or off: a Traefik
 cluster that carries `spec.previews` by hand, on any cloud, renders the same
 files as one without (`make verify` checks it). A `.Backup` without the stores
@@ -184,7 +186,13 @@ and the `infrared` Application, never Grafana's sign-in. `hack/render` refuses
 `.TunnelPublish` without `beside`, and `.SignInPrivate` without a gateway edge,
 an `.InfraredHost` and a `.PlatformDomain`, or with `.EdgeProofSecret`; the
 operator leaves all three out of its data while they are unset (`make verify`
-checks it). `.NetworkPolicies` adds a
+checks it). `.TunnelHostnames` changes only cloudflared (a route each, the
+annotation and the comments) and the `infrared` Application, which carries
+them, alone or beside, and an empty list renders as none; `hack/render`
+refuses it without `.TunnelID`, with a name that is no lower-case DNS name, a
+wildcard, a name twice, `.InfraredHost` among them, or more than 100, and the
+operator leaves it out of its data while it is empty (`make verify` checks
+it). `.NetworkPolicies` adds a
 `fence.yaml` to the components that make a platform namespace (`builds`,
 `edge`, `external-dns`, `postgres`, `substrate`, `substrate-actors`,
 `substrate-podcert`, `telemetry`), each of which holds no objects without
@@ -275,7 +283,7 @@ set, so a cluster without it renders the same file as before:
 | `.ImageRegistry`, `.Images` | `image.registry`, each `<component>.image` (see "Images") |
 | `.Edge` `gateway` | `installation.edge: gateway` |
 | `.PlatformDomain` and `.InfraredHost`, in gateway mode | `installation.previews.domain`, and `installation.previews.signInURL: https://<InfraredHost>`; with `.DomainTokenKey`, `installation.previews.domainTokenKey` too |
-| `.TunnelID`, in gateway mode | `installation.tunnel: {id, credentialsKey}`, the key `.TunnelCredentialsKey` or `cloudflare-tunnel-credentials`, with `mode: beside` for `.TunnelMode` `beside` and `publish: true` for `.TunnelPublish`; its credentials stay in `infrared-platform-tokens` |
+| `.TunnelID`, in gateway mode | `installation.tunnel: {id, credentialsKey}`, the key `.TunnelCredentialsKey` or `cloudflare-tunnel-credentials`, with `mode: beside` for `.TunnelMode` `beside`, `publish: true` for `.TunnelPublish` and `hostnames` for `.TunnelHostnames`; its credentials stay in `infrared-platform-tokens` |
 | `.SignInPrivate`, in gateway mode with the previews | `installation.previews.signInPrivate: true` |
 | `.Stores` | `stores.enabled: true` |
 | `.StoresSingleNode`, with `.Stores` | `stores.singleNode: true` |
@@ -608,8 +616,9 @@ is left out:
 | Name | To | As |
 |---|---|---|
 | `.InfraredHost` | `https://edge.envoy-gateway-system.svc.cluster.local:443` | that name (`originServerName`) |
+| each of `.TunnelHostnames` | the same | that name (`originServerName`) |
 | `*.<PlatformDomain>` | the same | the request's own name (`matchSNItoHost`) |
-| anything else | a 404; with `.CustomHostnames`, the same Service | the request's own name |
+| anything else | a 404 from cloudflared, custom hostnames or not | |
 
 Each route checks Envoy's certificate against the edge's authority (`caPool`,
 the Secret `edge-ca`'s `ca.crt`, mounted alone) and speaks HTTP/2 to Envoy.
@@ -660,19 +669,45 @@ empty is left out:
 |---|---|---|
 | the path `^/\.well-known/acme-challenge/`, any name | `http://edge.envoy-gateway-system.svc.cluster.local:80` | plain HTTP, the request's own name: a custom hostname's Let's Encrypt challenge reaches the solver on `http-any` through the tunnel too |
 | `.InfraredHost`, unless `.SignInPrivate` | `https://edge.envoy-gateway-system.svc.cluster.local:443` | that name (`originServerName`) |
+| each of `.TunnelHostnames` | the same | that name (`originServerName`) |
 | `*.<PlatformDomain>` | the same | the request's own name (`matchSNItoHost`) |
-| anything else | the same | the request's own name: custom hostnames, zones' own addresses, and the names a person routes to the tunnel |
+| anything else | a 404 from cloudflared: the name never reaches Envoy | |
+
+Every name Envoy serves on a listener of its own has a route of its own,
+whose name is fixed. Envoy picks a listener by the TLS name (SNI) a
+connection carries, and finds a name's routes only on its listener; cloudflared
+keeps one pool of connections to Envoy for each route (one `http.Transport`
+each, cloudflared 2026.10.5's `ingress/ingress.go` and
+`ingress/origin_service.go`), and reuses a connection for any request the
+route takes. With `matchSNItoHost` a route sets the TLS name only when it dials
+a new connection, so a route that took two such names would send one name's
+request down a connection made for the other, and Envoy would answer 404
+(`NR`): what infrared-cp-google's access log showed on 2026-11-21, a request
+for a custom hostname on a connection whose TLS name was `support.darkshift.io`.
+The zones share one listener, the wildcard `https`, which every name one label
+under `.PlatformDomain` reaches whatever its TLS name, so their one route may
+take each request's own. `.TunnelHostnames` names the rest: the names a gitops
+repo outside this template serves on the edge, and, until Infrared lists them
+itself, a zone's own addresses and the custom hostnames once their records, or
+the custom hostnames' fallback origin, point at the tunnel. A name listed
+nowhere gets cloudflared's 404, so it reaches Envoy through the nodes' ports
+alone: list a name before its record moves. A zone address two labels or more
+under `.PlatformDomain` has a listener of its own too, and needs listing as
+well. The challenge path is the one route for any name, and takes plain HTTP
+to Envoy, where the solver answers a challenge it holds and everything else is
+redirected.
 
 No route carries a `caPool`: every certificate the edge shows comes from
 Cloudflare's Origin CA or, for custom hostnames, Let's Encrypt, and cloudflared
 holds both roots (the system's and Cloudflare's, built in). Each HTTPS route
 speaks HTTP/2 to Envoy. With `.NetworkPolicies`, the fence admits cloudflared
 on Envoy's 10080 as well as 10443. The pods' annotation
-`infrared.darkshift.io/tunnel` carries `beside acme` with the routes, so a
-change of mode rolls them. In the edge's waves cloudflared's credentials come
-first (-7) and cloudflared last (2), after the Gateway and, with
-`.CustomHostnames`, the Issuer `letsencrypt-http` (1), which keeps its wave
-alone; every other object keeps its wave without a tunnel.
+`infrared.darkshift.io/tunnel` carries `beside acme` with the routes, each of
+`.TunnelHostnames` among them, so a change of mode or of a name rolls them. In
+the edge's waves cloudflared's credentials come first (-7) and cloudflared last
+(2), after the Gateway and, with `.CustomHostnames`, the Issuer
+`letsencrypt-http` (1), which keeps its wave alone; every other object keeps
+its wave without a tunnel.
 
 With `.TunnelPublish` (the Installation's `spec.tunnel.publish`), the Gateway
 `edge` carries `external-dns.alpha.kubernetes.io/target:
@@ -682,8 +717,8 @@ edge's labelled routes (`*.<PlatformDomain>`, `edge.<PlatformDomain>` and
 `.InfraredHost`) become proxied CNAMEs to the tunnel, and a zone's own
 addresses, CNAMEs to `edge.<PlatformDomain>`, follow. Without it they stay at
 the nodes' addresses, and a person points a name at the tunnel by its record.
-The `infrared` Application carries `installation.tunnel` with `mode: beside`
-and `publish: true`.
+The `infrared` Application carries `installation.tunnel` with `mode: beside`,
+`publish: true` and its `hostnames`.
 
 #### Infrared's name kept off the edge
 
