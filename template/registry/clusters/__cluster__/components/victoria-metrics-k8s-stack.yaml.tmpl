@@ -14,6 +14,12 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: platform
+  # Three syncs of history, not Argo CD's ten: each history entry carries this Application's whole valuesObject
+  # (about 84 KB on 2026-11-23, most of it extraObjects), so ten of them took the object to 1.44 MB, and on
+  # infrared-cp-google the controller could no longer save a finished sync under etcd's 1.5 MiB limit ("etcdserver:
+  # request is too large"; infrared-docs-internal docs/home-defense.md, step 5). Nothing reads the history but a
+  # rollback by hand, and three keeps one.
+  revisionHistoryLimit: 3
   source:
     repoURL: https://victoriametrics.github.io/helm-charts/
     chart: victoria-metrics-k8s-stack
