@@ -218,19 +218,27 @@ spec:
 [[- end ]]
             # Read-only below 10% free, well before the kubelet evicts pods.
             minFreeSpacePercent: 10
-[[- if .StoresSecurity ]]
-            # A write or a delete needs a token the master or a filer signed.
             extraEnvironmentVars:
+              # Go collects garbage harder as the heap nears this, well under
+              # the 3Gi limit: without it the heap overshot the limit between
+              # collections and the kernel killed the server.
+              GOMEMLIMIT: 2560MiB
+[[- if .StoresSecurity ]]
+              # A write or a delete needs a token the master or a filer signed.
               WEED_JWT_SIGNING_KEY:
                 secretKeyRef:
                   name: seaweedfs-jwt
                   key: volume-write
 [[- end ]]
-            # Uploads past 512 MB in flight wait (up to the server's 60s) for
-            # room rather than grow the server: weed's default is no limit, so
-            # a large push grew it to any memory limit and was OOMKilled.
+            # Uploads and downloads past 256 MB in flight each wait (up to the
+            # server's 60s) for room rather than grow the server: weed's
+            # default is no limit. At an upload limit of 512 MB alone all three
+            # servers were still OOMKilled at 3Gi while a large image built
+            # (infrared-cp-google, 2026-11-23): replication between servers is
+            # outside the upload limit, and the build's reads had none.
             extraArgs:
-              - -concurrentUploadLimitMB=512
+              - -concurrentUploadLimitMB=256
+              - -concurrentDownloadLimitMB=256
             # At 1Gi all three volume servers were OOMKilled while a build
             # pushed an 838 MB layer (infrared-cp-google, 2026-11-11), failing
             # the registry's writes with 500s.
@@ -327,6 +335,9 @@ spec:
             podAnnotations:
               infrared.darkshift.io/s3-identities: ate-snapshots[[ if $substrate ]] ate-snapshots-v1[[ end ]] registry[[ if $media ]] media storage-reader[[ end ]][[ if .Backup.Bucket ]] backup[[ end ]][[ if $restore ]] restore[[ end ]]
             extraEnvironmentVars:
+              # Go collects garbage harder as the heap nears this, under the
+              # 2Gi limit.
+              GOMEMLIMIT: 1600MiB
               S3_ATE_SNAPSHOTS_ACCESS_KEY_ID:
                 secretKeyRef:
                   name: seaweedfs-s3-ate-snapshots
