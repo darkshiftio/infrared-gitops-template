@@ -76,7 +76,7 @@
 #     cloudflared, the edge's comments and kustomization, the store's comment,
 #     the README and the infrared Application, which carries mode beside;
 #     with TunnelPublish the Gateway edge carries external-dns's target
-#     annotation, <id>.cfargotunnel.com, and nothing else changes but
+#     annotation under both prefixes, <id>.cfargotunnel.com, and nothing else changes but
 #     comments and the infrared Application; no other variant has the
 #     annotation
 #   - Infrared's name kept off the edge (SignInPrivate, ADR 0090): no
@@ -1417,13 +1417,16 @@ for v in "${variants[@]}"; do
       && ok "$variant: Gateway edge serves *.$domain${ihost:+ and $ihost}, plain HTTP for any name, and ListenerSets from its own namespace" || bad "$variant: Gateway edge listeners are wrong"
     # external-dns's target (ADR 0090): the tunnel's, beside the nodes' own
     # ports with publish; on no other Gateway.
+    # Under both prefixes: external-dns v0.22.0 reads only the stable one by
+    # default, older releases only the alpha one.
     target="$(sel "$e" 'select(.kind == "Gateway") | .metadata.annotations["external-dns.alpha.kubernetes.io/target"] // ""')"
+    stable="$(sel "$e" 'select(.kind == "Gateway") | .metadata.annotations["external-dns.kubernetes.io/target"] // ""')"
     if [ "$beside" = true ] && [ "$publish" = true ]; then
-      [ "$target" = "$tunnel_id.cfargotunnel.com" ] \
-        && ok "$variant: the Gateway edge names the tunnel, $target, as external-dns's target" \
-        || bad "$variant: the Gateway edge's external-dns target is '$target', want $tunnel_id.cfargotunnel.com"
+      [ "$target" = "$tunnel_id.cfargotunnel.com" ] && [ "$stable" = "$target" ] \
+        && ok "$variant: the Gateway edge names the tunnel, $target, as external-dns's target under both prefixes" \
+        || bad "$variant: the Gateway edge's external-dns target is '$target' (alpha) and '$stable' (stable), want $tunnel_id.cfargotunnel.com under both"
     else
-      [ -z "$target" ] && ok "$variant: the Gateway edge names no external-dns target" || bad "$variant: the Gateway edge names an external-dns target, $target"
+      [ -z "$target$stable" ] && ok "$variant: the Gateway edge names no external-dns target" || bad "$variant: the Gateway edge names an external-dns target, $target$stable"
     fi
     # The edge's tokens, issuers and certificates. On the one token: one
     # certificate, edge (Secret edge-tls), for *.<domain> and Infrared's name

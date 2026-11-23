@@ -184,7 +184,12 @@ metadata:
   annotations:
     # external-dns writes the names it publishes from this Gateway as proxied
     # CNAMEs to the cluster's Cloudflare Tunnel (spec.tunnel.publish, ADR 0090).
+    # The same target under both prefixes: external-dns v0.22.0, which the
+    # home runs, reads only external-dns.kubernetes.io/ by default (its
+    # --annotation-prefix), and older ones only the alpha prefix. With the alpha
+    # key alone, publish moved nothing at the home on 2026-11-23.
     external-dns.alpha.kubernetes.io/target: [[ printf "%s.cfargotunnel.com" .TunnelID | quote ]]
+    external-dns.kubernetes.io/target: [[ printf "%s.cfargotunnel.com" .TunnelID | quote ]]
 [[- end ]]
 spec:
   gatewayClassName: edge
