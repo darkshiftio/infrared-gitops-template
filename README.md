@@ -97,6 +97,10 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.BuildCaps` | absent or `""`, one line of JSON | the operator's `INFRARED_BUILD_CAPS`, the Infrared chart's `tenancy.buildCaps` as `{"enabled":true,"deadlineMinutes":...,"minutesPerOrgPerDay":...}`: each tenant build's deadline and its org's build minutes a UTC day (workspace TODO 473). The operator keeps them; the `infrared` Application carries the setting (see "The caps"). `hack/render` refuses anything but one line of JSON with `"enabled":true` and those two keys |
 | `.TenantStorage` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_STORAGE`, the chart's `tenancy.tenantStorage` as `{"enabled":true,"capGi":...,"minDiskGi":...}`: the cap on every tenant org's volumes together (workspace TODO 473), which the `infrared` Application carries |
 | `.MetricsStorage` | absent or ``, `40Gi` | the operator's `INFRARED_METRICS_STORAGE`, the Infrared chart's `operator.metricsStorage`: the size of the install's own metrics store, VMSingle's claim, or on k3s with the stores the `emptyDir` its data is on (infrared-docs-internal ADR 0075; see "The metrics store's size"). The canonical form of a whole number above zero of `Mi`, `Gi` or `Ti` (`hack/render` refuses anything else); empty is `10Gi`, as before the field existed |
+| `.MetricsAuth` | absent or ``, `door`, `enforced` | the operator's `INFRARED_METRICS_AUTH`, the Infrared chart's `observability.metricsAuth.stage` (infrared-docs-internal `docs/home-defense.md`, step 5; see "The metrics' door"): `door` puts vmauth in front of the metrics store and Alertmanager, with a user for Grafana, which reads through it, and with `.MetricsAuthIssuer` and `.MetricsAuthAudience` one each for Infrared's API and operator; `enforced` also closes the stack's back doors by NetworkPolicy. The chart's `clients` is `door` here, since what it changes is the chart's (`hack/render` refuses it); empty renders as before the field existed |
+| `.MetricsAuthIssuer` | absent or ``, `https://container.googleapis.com/v1/projects/<project>/locations/<location>/clusters/<cluster>` | with `.MetricsAuth`, the cluster's service account issuer, which the operator reads from the Kubernetes API's discovery document at start: the door's users for the API and the operator check a token against it, by the discovery document and keys the issuer publishes, so it must publish them (GKE's and EKS's do; k3s's does not). An `https` URL with no query or fragment; empty renders no such user |
+| `.MetricsAuthAudience` | absent or ``, `infrared-metrics` | with `.MetricsAuth`, the operator's `INFRARED_METRICS_TOKEN_AUDIENCE`, the chart's `observability.metricsAuth.audience`: the `aud` claim those users match, a DNS label (vmauth reads the value as a regular expression) |
+| `.NodeExporterAuth` | absent or `false`, `true` | the operator's `INFRARED_NODE_EXPORTER_AUTH`, the chart's `observability.nodeExporterAuth.enabled`: node-exporter answers only behind kube-rbac-proxy, which vmagent's own token gets through (see "The metrics' door") |
 | `.MediaStore` | absent or ``, `both`, `objectStore` | the operator's `INFRARED_MEDIA_STORE`, the Infrared chart's `summaryvideo.store` (infrared-docs-internal ADR 0087 D4 and D7): with `.Stores`, Infrared's API keeps its videos and pictures in SeaweedFS's bucket `media`, which the S3 identity `media` alone reaches and only the API holds, beside `storage-reader`, which lists each bucket for the storage views; media joins the hourly copy and the restore, and the stores' fence admits the API's pods to the S3 gateway (see "The bucket media"). Both values render the same files: the chart and the API tell them apart. The `infrared` Application does not carry it, since the install's values file moves `summaryvideo.store` both ways and a value carried there would win over it. Empty, the chart's `volume`, renders as before the field existed; without `.Stores` it changes nothing; `hack/render` refuses any other value |
 | `.StoresOrgLayout` | absent or `false`, `true` | the Installation's `status.storage.layout` is `org` (infrared-docs-internal ADR 0087 D2, D3): the operator sets it only once a migration between the stores' layouts has copied, verified and deleted every repository's files into the layout, never from the chart's `stores.orgLayout.enabled`, so Zot moves root only after its files. With `.Stores` and `.Registry`, Zot's repositories sit at the bucket's root (`zot-base`'s S3 driver has no `rootdirectory`, and Zot's pods carry an annotation naming the root, so a change of root rolls them), and the platform's own are `platform/images/kpack-builder` and `platform/images/substrate/<name>` (see "The stores' org layout"). The `infrared` Application does not carry it |
 | `.RegistryPaused` | absent or `false`, `true` | the operator's, while a migration between the stores' layouts is in its phases `Pausing`, `Copying` or `Rooting` (ADR 0087 D7): with `.Stores` and `.Registry`, Zot's Application renders `replicaCount: 0`, so no Zot process reads or writes the bucket while its files are copied, verified and deleted, and nothing else changes |
@@ -214,7 +218,12 @@ each out of its data while it is unset (`make verify` checks it).
 `.MetricsStorage` changes only the `victoria-metrics-k8s-stack` Application,
 nothing in it but VMSingle's claim, or on k3s with the stores its `emptyDir`
 and the comment that names its size; the operator leaves it out of its data
-while it is unset (`make verify` checks it). `.MediaStore` changes SeaweedFS's
+while it is unset (`make verify` checks it). `.MetricsAuth` and
+`.NodeExporterAuth` change the `victoria-metrics-k8s-stack` Application and the
+README alone, and the stack's values beyond the door's as they were;
+`.MetricsAuthIssuer` and `.MetricsAuthAudience` change only the door's users,
+and `hack/render` refuses either without `.MetricsAuth`. The operator leaves
+each out of its data while it is unset (`make verify` checks it). `.MediaStore` changes SeaweedFS's
 Application, its identities, its PreSync hook and its hourly copy, the store
 `infrared-stores` and its Application, the restore's copy, the stores' fence
 and the README, and only with `.Stores`; the `infrared` Application never
@@ -1768,7 +1777,7 @@ for the platform.
 | `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; with `.MediaStore`, Infrared's API on 8333 (the bucket `media`); CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
 | `cnpg-system` | `infrared-fence` (`postgres`) | the platform; the control plane on CloudNativePG's webhook, 9443 |
 | `builds`, `build-credentials`, `kpack` | `infrared-fence` (`builds`) | the platform; the control plane on kpack's webhook, 8443 |
-| `monitoring` | `infrared-fence` (the metrics stack's `extraObjects`, or `telemetry`) | the platform |
+| `monitoring` | `infrared-fence` (the metrics stack's `extraObjects`, or `telemetry`) | the platform; with `.MetricsAuth` every pod but the metrics' door, and at `enforced` but the stack's own components too, which have policies of their own (see "The metrics' door") |
 | `ate-system`, but the API's and the router's pods | `infrared-fence` (`substrate`) | the platform; the API and the router keep their own two policies alone |
 | `ate-workers`, `podcertificate-controller-system` | `infrared-fence` (`substrate-actors`, `substrate-podcert`) | the platform |
 | `argocd` | Argo CD's own seven, six of them patched (the `argocd` Application) | the platform, where each admitted every namespace: the server, and the metrics of the controller (whose `argocd_app_info` names every org's Applications), the repo server, the ApplicationSet controller, Dex and notifications. Redis's admits Argo CD's own pods alone already. Each patch tests the vendored value first, so an Argo CD bump that moves it fails the sync rather than patching the wrong rule |
@@ -1803,6 +1812,88 @@ over HTTPS; a host no GKE FQDNNetworkPolicy names, port 80, the registry,
 infrared-mcp, cloud metadata, and names that resolve to the cluster's own
 addresses are refused. It runs against a GKE cluster after one of the org's
 steps, never from CI.
+
+### The metrics' door
+
+With `.MetricsAuth` (the Infrared chart's `observability.metricsAuth.stage`;
+infrared-docs-internal `docs/home-defense.md`, step 5) every caller of the
+metrics store and Alertmanager from outside the stack's own pipeline signs in
+at one door: vmauth, which the chart's own `vmauth` section makes and the
+VictoriaMetrics operator runs, two replicas behind a disruption budget, at
+`vmauth-victoria-metrics-k8s-stack.monitoring.svc:8427`. Its `/health`,
+`/metrics` and `/-/reload` answer on 8426 alone. The chart's default
+`unauthorizedUserAccessSpec`, which routes anyone's reads and writes through
+the door, is off: a request with no credential is answered 401 at once, and one
+no user takes 401 after vmauth's two or three seconds.
+
+The users are VMUsers in `monitoring`, each labelled
+`infrared.darkshift.io/metrics-user: "true"`, which is the VMAuth's
+`userSelector`; only the platform makes objects there.
+
+| User | Signs in with | May use |
+|---|---|---|
+| `grafana` | a password the VictoriaMetrics operator generates into the Secret `monitoring/vmuser-grafana` (keys `username`, `password`), which Grafana's environment takes (`VMAUTH_GRAFANA_PASSWORD`) | the store's reads (`/api/v1/query`, `query_range`, `query_exemplars`, `series`, `labels`, `label/<name>/values`, `metadata`, `status/...`, `rules`, `alerts`, `format_query`, `parse_query`, and `/vmalert/...` through VMSingle's proxy); Alertmanager's `/api/v2/...`. Nothing that writes, imports, deletes, snapshots or exports |
+| `infrared-api` | its own ServiceAccount token, projected for `.MetricsAuthAudience` | `/api/v1/query`, `/api/v1/query_range`, `/api/v1/write` |
+| `infrared-operator` | the same, the operator's (its upgrade guard runs as it) | `/api/v1/query` |
+
+The two token users render only with `.MetricsAuthIssuer` and
+`.MetricsAuthAudience`. vmauth reads the issuer's discovery document and keys
+at start, retries every 10 seconds until it has them and refreshes them every
+5 minutes, checks a token's signature, expiry and issuer, and matches its `sub`
+(`system:serviceaccount:<InfraredNamespace>:<name>`) and `aud`. A Kubernetes
+token carries no `vm_access` claim, so each user takes an empty
+`defaultVMAccessClaim`. No password is stored for them: from the chart's stage
+`clients` on, the chart mounts each its token and points it at the door, which
+the template cannot tell from `door` and renders the same.
+
+Grafana's datasources move to the door by the names and uids every dashboard
+reads (`VictoriaMetrics`, `Alertmanager`), as `defaultDatasources.extra`. The
+chart's own default stays as a stand-in marked `plugin: true`: its sync-job
+takes the dashboards' uid from it and vmalert its alert source, and a plugin
+that is not installed is never provisioned, so the chart never provisions its
+URL, VMSingle itself.
+
+The stack's own pipeline keeps talking directly: vmagent, vmalert, VMSingle's
+proxy to vmalert, a telemetry copy, and the nightly copies, which carry
+`infrared.darkshift.io/metrics-store-client: "true"` (`metrics-backup` here).
+NetworkPolicies, rendered with or without the network fence, keep everyone
+else to the door:
+
+| Policy | Selects | Admits |
+|---|---|---|
+| `metrics-door` (`door` on) | vmauth | `monitoring` and `.InfraredNamespace` on 8427; vmagent on any port; on GKE the Kubernetes API's proxy on 8427 |
+| `metrics-stores` (`enforced`) | both VMSingles | vmauth, vmagent, vmalert and the labelled copies, on 8428 and 8429; on GKE the API's proxy |
+| `metrics-agents` (`enforced`) | the vmagents | vmagent |
+| `metrics-rules` (`enforced`) | vmalert | vmagent; VMSingle on 8080; on GKE the API's proxy on 8080 |
+| `metrics-alerts` (`enforced`) | Alertmanager | vmagent; vmalert and vmauth on 9093 |
+| `metrics-exporters` (`enforced`) | kube-state-metrics, the VictoriaMetrics operator | vmagent |
+| `metrics-operator-webhook` (`enforced`) | the VictoriaMetrics operator | anyone on 9443, the control plane's webhook calls (off today) |
+
+With the fence, the platform's `infrared-fence` in `monitoring` stops selecting
+vmauth, and at `enforced` the stack's components (`NotIn`), so its rule is not
+added to theirs. On GKE the Kubernetes API's proxy (`kubectl get --raw
+/api/v1/namespaces/monitoring/services/<svc>:<port>/proxy/...`) reaches pods
+through `kube-system`'s `konnectivity-agent` pods, which the policies admit; the
+API server checks the person's own right to `services/proxy` and strips their
+`Authorization`, so the door answers such a read 401 and the stores and
+vmalert answer it. Elsewhere, read the back doors through a port-forward, which
+no NetworkPolicy sees. The alert `InfraredMetricsDoorDown` fires when no vmauth
+target has answered for 3 minutes.
+
+With `.NodeExporterAuth` node-exporter, which runs on each node's network
+where no NetworkPolicy reaches, listens on the node's loopback, 8100, behind
+the node-exporter chart's own kube-rbac-proxy (pinned by digest) on 9100 over
+TLS with a certificate it makes: it passes on a request only when the
+Kubernetes API says the request's token may `get` the subresource
+`services/victoria-metrics-k8s-stack-prometheus-node-exporter`. vmagent scrapes
+it over HTTPS with its own ServiceAccount token, as it scrapes the kubelets,
+and the chart's `vmagent.rbac.rules` gives it that Role in `monitoring`.
+
+Each stage is one values commit in the install's own gitops repo, and so is
+its rollback, to the stage before; Argo CD prunes what the stage made, the
+Secret `vmuser-grafana` with its VMUser. To rotate Grafana's password, delete
+that Secret: the operator makes a new one, and Grafana's pod takes it when it
+restarts.
 
 ### The stores' own security
 

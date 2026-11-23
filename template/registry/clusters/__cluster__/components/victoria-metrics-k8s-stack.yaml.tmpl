@@ -234,6 +234,21 @@ spec:
                 memory: 128Mi
               limits:
                 memory: 512Mi
+[[- if .NodeExporterAuth ]]
+          # vmagent may read node-exporter behind kube-rbac-proxy
+          # (prometheus-node-exporter, below): the proxy asks the Kubernetes API
+          # whether the token vmagent sends may get the subresource of
+          # node-exporter's Service its configuration names, and this Role, in
+          # monitoring, which the chart binds to vmagent's ServiceAccount, says
+          # it may. vmagent's own ClusterRole covers no subresource of a
+          # Service.
+          rbac:
+            rules:
+              - apiGroups: [""]
+                resources: ["services/victoria-metrics-k8s-stack-prometheus-node-exporter"]
+                resourceNames: ["victoria-metrics-k8s-stack-prometheus-node-exporter"]
+                verbs: ["get"]
+[[- end ]]
         vmalert:
           spec:
             resources:
@@ -295,6 +310,84 @@ spec:
                         type: Bearer
                         credentials_file: /etc/vm/secrets/infrared-alert-webhook/token
               - name: none
+[[- if .MetricsAuth ]]
+        # The metrics' door (README "The metrics' door"; infrared-docs-internal
+        # docs/home-defense.md, step 5): vmauth, which the VictoriaMetrics
+        # operator runs from this VMAuth, in front of the metrics store and
+        # Alertmanager for every caller outside the stack's own pipeline. Each
+        # caller is a VMUser below, labelled infrared.darkshift.io/metrics-user,
+        # and may use only the paths it needs. A request with no credential, or
+        # one no user takes, is refused, never passed on: the chart's default
+        # unauthorizedUserAccessSpec, which routes anyone's reads and writes
+        # through, is off. vmauth's /health, /metrics and /-/reload answer on
+        # 8426 alone, off the port callers use. Two replicas, so a restart never
+        # leaves Grafana or Infrared without the door, and a running pod keeps
+        # the issuer's keys while another starts.
+        vmauth:
+          enabled: true
+          spec:
+            port: "8427"
+            internalListenPort: "8426"
+            replicaCount: 2
+            podDisruptionBudget:
+              minAvailable: 1
+            useStrictSecurity: true
+            resources:
+              requests:
+                cpu: 20m
+                memory: 64Mi
+              limits:
+                memory: 256Mi
+            selectAllByDefault: false
+            userSelector:
+              matchLabels:
+                infrared.darkshift.io/metrics-user: "true"
+            unauthorizedUserAccessSpec:
+              disabled: true
+        # Grafana reads through the door as the VMUser grafana, with the
+        # password the VictoriaMetrics operator generates into the Secret
+        # monitoring/vmuser-grafana (Grafana's envValueFrom, below). The chart
+        # points its own default datasource at VMSingle itself, so the real
+        # VictoriaMetrics and Alertmanager datasources are extra ones, by the
+        # names and uids every dashboard reads, and the chart's own entry stays
+        # as a stand-in: its sync-job takes the dashboards' datasource uid from
+        # it, and vmalert its alert source, but a plugin that is not installed
+        # is never provisioned. The password is $VMAUTH_GRAFANA_PASSWORD
+        # without braces, which Grafana's provisioning expands once.
+        defaultDatasources:
+          victoriametrics:
+            datasources:
+              - name: VictoriaMetrics
+                uid: VictoriaMetrics
+                type: prometheus
+                access: proxy
+                isDefault: true
+                plugin: true
+          alertmanager:
+            datasources: []
+          extra:
+            - name: VictoriaMetrics
+              uid: VictoriaMetrics
+              type: prometheus
+              access: proxy
+              isDefault: true
+              url: http://vmauth-victoria-metrics-k8s-stack.monitoring.svc:8427
+              basicAuth: true
+              basicAuthUser: grafana
+              secureJsonData:
+                basicAuthPassword: $VMAUTH_GRAFANA_PASSWORD
+            - name: Alertmanager
+              uid: Alertmanager
+              type: alertmanager
+              access: proxy
+              url: http://vmauth-victoria-metrics-k8s-stack.monitoring.svc:8427
+              basicAuth: true
+              basicAuthUser: grafana
+              jsonData:
+                implementation: prometheus
+              secureJsonData:
+                basicAuthPassword: $VMAUTH_GRAFANA_PASSWORD
+[[- end ]]
         grafana:
           enabled: true
           # Access is by port-forward: svc/victoria-metrics-k8s-stack-grafana 80.
@@ -349,11 +442,68 @@ spec:
           # Grafana waits for the API to write it. It stays out of grafana.ini,
           # which the grafana chart renders into a ConfigMap and refuses
           # secrets in (assertNoLeakedSecrets).
+[[- end ]]
+[[- if or (and .OIDC .GrafanaURL .InfraredHost) .MetricsAuth ]]
           envValueFrom:
+[[- end ]]
+[[- if and .OIDC .GrafanaURL .InfraredHost ]]
             GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
               secretKeyRef:
                 name: infrared-oidc-grafana
                 key: client-secret
+[[- end ]]
+[[- if .MetricsAuth ]]
+            # Grafana's password at the metrics' door, which the
+            # VictoriaMetrics operator generates for the VMUser grafana and
+            # keeps; its datasources name it. Not optional: Grafana waits for
+            # the Secret, and its running pod serves until then.
+            VMAUTH_GRAFANA_PASSWORD:
+              secretKeyRef:
+                name: vmuser-grafana
+                key: password
+[[- end ]]
+[[- if .NodeExporterAuth ]]
+        # node-exporter behind kube-rbac-proxy (README "The metrics' door";
+        # infrared-docs-internal docs/home-defense.md, step 5): node-exporter
+        # listens on each node's loopback, 8100, and the proxy on the node's
+        # 9100 over TLS with a certificate it makes, passing on only a request
+        # whose token the Kubernetes API says may get node-exporter's Service's
+        # subresource (a TokenReview and a SubjectAccessReview). node-exporter
+        # runs on the node's network, where no NetworkPolicy reaches, so this
+        # is its only fence. vmagent scrapes it over HTTPS with its own
+        # ServiceAccount token, as it scrapes the kubelets, and its Role above
+        # allows it. The list of endpoints replaces the chart's, so its drop of
+        # the pods' mount points is said again.
+        prometheus-node-exporter:
+          kubeRBACProxy:
+            enabled: true
+            image:
+              # quay.io/brancz/kube-rbac-proxy:v0.23.0, the chart's own version.
+              sha: a6075902738eaf1780390561ea998a53a056ef1d2b312bcbf0e2e81fec084b3c
+            containerSecurityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                  - ALL
+            resources:
+              requests:
+                cpu: 10m
+                memory: 16Mi
+              limits:
+                memory: 64Mi
+          vmScrape:
+            spec:
+              endpoints:
+                - port: metrics
+                  scheme: https
+                  bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+                  tlsConfig:
+                    insecureSkipVerify: true
+                  metricRelabelConfigs:
+                    - action: drop
+                      source_labels: [mountpoint]
+                      regex: "/var/lib/kubelet/pods.+"
 [[- end ]]
         # Neither flavor exposes these: EKS runs the control plane for you,
         # and k3s runs it inside the k3s process without these endpoints.
@@ -498,7 +648,30 @@ spec:
               name: infrared-fence
               namespace: monitoring
             spec:
+[[- if .MetricsAuth ]]
+              # Every pod but the metrics' door[[ if eq .MetricsAuth "enforced" ]] and the stack's own
+              # components, which have policies of their own below[[ else ]], which has a
+              # policy of its own below[[ end ]].
+              # A pod two policies select takes what either admits, and this
+              # one admits the whole platform. NotIn also takes a pod without
+              # the label, which stays fenced as before.
+              podSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: NotIn
+                    values:
+                      - vmauth
+[[- if eq .MetricsAuth "enforced" ]]
+                      - vmsingle
+                      - vmagent
+                      - vmalert
+                      - vmalertmanager
+                      - kube-state-metrics
+                      - victoria-metrics-operator
+[[- end ]]
+[[- else ]]
               podSelector: {}
+[[- end ]]
               policyTypes:
                 - Ingress
               ingress:
@@ -510,6 +683,340 @@ spec:
                             operator: DoesNotExist
                           - key: infrared.darkshift.io/zone
                             operator: DoesNotExist
+[[- end ]]
+[[- if .MetricsAuth ]]
+          # The metrics' door's users (README "The metrics' door"), each
+          # labelled for the VMAuth above, in monitoring, where only the
+          # platform makes objects. grafana reads the store, its rules through
+          # VMSingle's proxy to vmalert, and Alertmanager's API, and nothing
+          # that writes, imports, deletes or snapshots; its password is the
+          # operator's, in the Secret vmuser-grafana.
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMUser
+            metadata:
+              name: grafana
+              namespace: monitoring
+              labels:
+                infrared.darkshift.io/metrics-user: "true"
+            spec:
+              name: grafana
+              username: grafana
+              generatePassword: true
+              targetRefs:
+                - crd:
+                    kind: VMSingle
+                    name: victoria-metrics-k8s-stack
+                    namespace: monitoring
+                  paths:
+                    - /api/v1/query
+                    - /api/v1/query_range
+                    - /api/v1/query_exemplars
+                    - /api/v1/series
+                    - /api/v1/labels
+                    - /api/v1/label/.+/values
+                    - /api/v1/metadata
+                    - /api/v1/status/.+
+                    - /api/v1/rules
+                    - /api/v1/alerts
+                    - /api/v1/format_query
+                    - /api/v1/parse_query
+                    - /vmalert/.+
+                - crd:
+                    kind: VMAlertmanager
+                    name: victoria-metrics-k8s-stack
+                    namespace: monitoring
+                  paths:
+                    - /api/v2/.+
+[[- if and .MetricsAuthIssuer .MetricsAuthAudience ]]
+          # Infrared's API and operator sign in with their own ServiceAccount
+          # tokens, projected for the audience [[ .MetricsAuthAudience ]]: the door checks
+          # each token's signature against the cluster's issuer, by its
+          # discovery document and keys, and its sub and aud claims here. No
+          # password is stored for them. A Kubernetes token carries no
+          # vm_access claim, so each takes an empty default. The API reads and
+          # writes the store (its pages, MCP's query_metrics and the telemetry
+          # it forwards); the operator and its upgrade guard, which run as the
+          # operator's ServiceAccount, read it.
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMUser
+            metadata:
+              name: infrared-api
+              namespace: monitoring
+              labels:
+                infrared.darkshift.io/metrics-user: "true"
+            spec:
+              name: infrared-api
+              disable_secret_creation: true
+              jwt:
+                oidc:
+                  issuer: [[ quote .MetricsAuthIssuer ]]
+                matchClaims:
+                  sub: [[ printf "system:serviceaccount:%s:infrared-api" .InfraredNamespace | quote ]]
+                  aud: [[ quote .MetricsAuthAudience ]]
+                defaultVMAccessClaim: {}
+              targetRefs:
+                - crd:
+                    kind: VMSingle
+                    name: victoria-metrics-k8s-stack
+                    namespace: monitoring
+                  paths:
+                    - /api/v1/query
+                    - /api/v1/query_range
+                    - /api/v1/write
+          - apiVersion: operator.victoriametrics.com/v1beta1
+            kind: VMUser
+            metadata:
+              name: infrared-operator
+              namespace: monitoring
+              labels:
+                infrared.darkshift.io/metrics-user: "true"
+            spec:
+              name: infrared-operator
+              disable_secret_creation: true
+              jwt:
+                oidc:
+                  issuer: [[ quote .MetricsAuthIssuer ]]
+                matchClaims:
+                  sub: [[ printf "system:serviceaccount:%s:infrared-operator" .InfraredNamespace | quote ]]
+                  aud: [[ quote .MetricsAuthAudience ]]
+                defaultVMAccessClaim: {}
+              targetRefs:
+                - crd:
+                    kind: VMSingle
+                    name: victoria-metrics-k8s-stack
+                    namespace: monitoring
+                  paths:
+                    - /api/v1/query
+[[- end ]]
+          # Who reaches the door: Grafana and the rest of monitoring, and
+          # Infrared's namespace (the API, the operator and its upgrade guard),
+          # on its port; vmagent on any, for vmauth's own figures on 8426 and
+          # its config reloader's.[[ if eq .Cloud "gcp" ]] And the Kubernetes API's proxy
+          # (kubectl get --raw .../services/vmauth-...:8427/proxy/...), which
+          # GKE's konnectivity agents carry: it arrives with no credential, and
+          # the door answers 401.[[ end ]] Rendered with or without the network fence.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-door
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: vmauth
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector: {}
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: [[ .InfraredNamespace ]]
+                  ports:
+                    - protocol: TCP
+                      port: 8427
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vmagent
+[[- if eq .Cloud "gcp" ]]
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                      podSelector:
+                        matchLabels:
+                          k8s-app: konnectivity-agent
+                  ports:
+                    - protocol: TCP
+                      port: 8427
+[[- end ]]
+[[- end ]]
+[[- if eq .MetricsAuth "enforced" ]]
+          # The back doors closed (README "The metrics' door", enforced): each
+          # of the stack's components answers the stack's own pods alone, and
+          # the door; every reader outside the stack comes through the door.
+          # vmagent reaches every one on any port, as it scrapes them all.
+          # Rendered with or without the network fence. The kubelet's probes
+          # come from the node, which a policy never blocks.[[ if eq .Cloud "gcp" ]] The stores and
+          # vmalert also answer the Kubernetes API's proxy, which GKE's
+          # konnectivity agents carry, so kubectl get --raw reads keep working
+          # with the person's own right to services/proxy.[[ else ]] Elsewhere the
+          # Kubernetes API's proxy cannot reach them: read through a
+          # port-forward.[[ end ]]
+          #
+          # The stores, both VMSingles: the door, vmagent (its scrapes and
+          # writes, and the telemetry copy's federation), vmalert (its rules'
+          # reads and writes), and the pods labelled
+          # infrared.darkshift.io/metrics-store-client (the nightly copies'
+          # snapshots), on the stores' two ports.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-stores
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: vmsingle
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector:
+                        matchExpressions:
+                          - key: app.kubernetes.io/name
+                            operator: In
+                            values:
+                              - vmauth
+                              - vmagent
+                              - vmalert
+                    - podSelector:
+                        matchLabels:
+                          infrared.darkshift.io/metrics-store-client: "true"
+                  ports:
+                    - protocol: TCP
+                      port: 8428
+                    - protocol: TCP
+                      port: 8429
+[[- if eq .Cloud "gcp" ]]
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                      podSelector:
+                        matchLabels:
+                          k8s-app: konnectivity-agent
+                  ports:
+                    - protocol: TCP
+                      port: 8428
+                    - protocol: TCP
+                      port: 8429
+[[- end ]]
+          # The vmagents: each other, for their scrapes.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-agents
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: vmagent
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vmagent
+          # vmalert: vmagent, and VMSingle's proxy (Grafana's rules, through
+          # the door) on its port.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-rules
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: vmalert
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vmagent
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vmsingle
+                  ports:
+                    - protocol: TCP
+                      port: 8080
+[[- if eq .Cloud "gcp" ]]
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                      podSelector:
+                        matchLabels:
+                          k8s-app: konnectivity-agent
+                  ports:
+                    - protocol: TCP
+                      port: 8080
+[[- end ]]
+          # Alertmanager: vmagent, and on its API vmalert (the alerts it
+          # sends) and the door (Grafana's Alertmanager datasource). Its
+          # cluster port listens to no one: it runs one replica with an empty
+          # cluster address.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-alerts
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: vmalertmanager
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vmagent
+                - from:
+                    - podSelector:
+                        matchExpressions:
+                          - key: app.kubernetes.io/name
+                            operator: In
+                            values:
+                              - vmalert
+                              - vmauth
+                  ports:
+                    - protocol: TCP
+                      port: 9093
+          # kube-state-metrics and the VictoriaMetrics operator: vmagent alone.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-exporters
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values:
+                      - kube-state-metrics
+                      - victoria-metrics-operator
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: vmagent
+          # The VictoriaMetrics operator's webhook, off today
+          # (admissionWebhooks.enabled false, so nothing listens): from the
+          # control plane, whatever path it takes.
+          - apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: metrics-operator-webhook
+              namespace: monitoring
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: victoria-metrics-operator
+              policyTypes:
+                - Ingress
+              ingress:
+                - ports:
+                    - protocol: TCP
+                      port: 9443
 [[- end ]]
           # Infrared's own metrics (ADR 0044): the operator's step counters and
           # the API's request counters, on every Service port named metrics in
@@ -585,6 +1092,16 @@ spec:
                         infrared_platform: "true"
                       annotations:
                         summary: VMSingle, the install's metrics store, has not answered its scrape for 3 minutes.
+[[- if .MetricsAuth ]]
+                    - alert: InfraredMetricsDoorDown
+                      expr: max(up{job="vmauth-victoria-metrics-k8s-stack", platform="[[ $platform ]]"}) == 0 or absent(up{job="vmauth-victoria-metrics-k8s-stack", platform="[[ $platform ]]"})
+                      for: 3m
+                      labels:
+                        severity: critical
+                        infrared_platform: "true"
+                      annotations:
+                        summary: "vmauth, the metrics' door, has not answered its scrape for 3 minutes: Grafana, and from the stage clients on Infrared's API and operator, cannot read or write the metrics."
+[[- end ]]
 [[- if .Telemetry.URL ]]
                     - alert: InfraredTelemetryWritesFailing
                       expr: sum by (url) (rate(vmagent_remotewrite_requests_total{job=~"vmagent-.*", platform="[[ $platform ]]", status_code!~"2.*"}[5m])) > 0
@@ -4231,6 +4748,11 @@ spec:
                     metadata:
                       labels:
                         app.kubernetes.io/name: metrics-backup
+[[- if .MetricsAuth ]]
+                        # The store takes the copy's snapshot calls by this
+                        # label once the back doors close (metrics-stores).
+                        infrared.darkshift.io/metrics-store-client: "true"
+[[- end ]]
                     spec:
                       serviceAccountName: metrics-backup
                       restartPolicy: Never

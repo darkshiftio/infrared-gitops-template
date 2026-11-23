@@ -4218,6 +4218,141 @@ for size in 0Gi 1.5Gi 40G 40 040Gi 40gi; do
   rm -rf "$work/metrics-size-refused"
 done
 
+# --- The metrics' door ------------------------------------------------------------
+# MetricsAuth (infrared-docs-internal docs/home-defense.md, step 5; README "The
+# metrics' door"): door on Google Cloud with the metrics' nightly copy and the
+# fence (gcs-gke), the same at enforced, enforced on k3s, the door without an
+# issuer, and the door beside Grafana's sign-in through Infrared (oidc). Each
+# changes the victoria-metrics-k8s-stack Application and the README alone.
+# The door: vmauth with no anonymous route; three users, each labelled for it,
+# the JWT ones matching the issuer, their ServiceAccount and the audience, and
+# Grafana's writing nothing; Grafana's datasources at the door, by the uids the
+# dashboards read, with the password from vmuser-grafana; the policy
+# metrics-door, with the Kubernetes API's proxy on GKE alone; the fence leaving
+# vmauth to it; the nightly copy labelled; the door's alert; and the rest of
+# the values as they were. enforced: the six policies beside it and the fence
+# leaving the stack's components to them, the API's proxy admitted to the
+# door, the stores and vmalert on GKE alone. NodeExporterAuth: node-exporter's
+# proxy by digest, its HTTPS scrape with vmagent's token, and vmagent's Role.
+# hack/render refuses what the operator never hands over.
+door_iss="https://container.googleapis.com/v1/projects/demo/locations/us-central1-a/clusters/demo-gk"
+door_flags=(-metrics-auth door -metrics-auth-issuer "$door_iss" -metrics-auth-audience infrared-metrics)
+enforced_flags=(-metrics-auth enforced -metrics-auth-issuer "$door_iss" -metrics-auth-audience infrared-metrics)
+# door_changed <base dir> <dir>: the files that differ, sorted, on one line.
+door_changed() { { diff -rq "$1" "$2" || true; } | sed -E "s#^Files $1/(.*) and .* differ\$#\\1#" | sort | tr '\n' ' ' | sed 's/ $//'; }
+# door_q <dir> <cluster> <yq expression over the Application's values>: one line of JSON.
+door_q() { yq -o json -I0 ".spec.source.helm.valuesObject | $3" "$1/registry/clusters/$2/components/victoria-metrics-k8s-stack.yaml"; }
+# gcs-gke with the fence: hack/render takes -network-policies beside -data only
+# from the file, as the operator hands it over.
+yq -p json -o json '. + {"NetworkPolicies": true}' "$work/gcs-gke.json" >"$work/gcs-gke-fence.json"
+door_gke() { "$work/render" -out "$1" -cluster demo-gk -flavor k3s -build-registry "$zot_registry" -data "$work/gcs-gke-fence.json" "${@:2}" >/dev/null; }
+door_gke "$work/door-gke-base"
+door_gke "$work/door-gke" "${door_flags[@]}"
+door_gke "$work/enforced-gke" "${enforced_flags[@]}"
+render_again k3s "$work/enforced-k3s" "${enforced_flags[@]}" >/dev/null
+render_again k3s "$work/door-noissuer" -metrics-auth door >/dev/null
+render_again oidc "$work/door-oidc" "${door_flags[@]}" >/dev/null
+render_again k3s "$work/node-exporter-auth" -node-exporter-auth >/dev/null
+for pair in "door-gke-base door-gke demo-gk" "door-gke-base enforced-gke demo-gk" "k3s enforced-k3s demo" "k3s door-noissuer demo" \
+    "oidc door-oidc demo-oi" "k3s node-exporter-auth demo"; do
+  read -r base variant cluster <<<"$pair"
+  changed="$(door_changed "$work/$base" "$work/$variant")"
+  want="README.md registry/clusters/$cluster/components/victoria-metrics-k8s-stack.yaml"
+  [ "$changed" = "$want" ] && ok "metrics' door ($variant): only the stack's Application and the README change" \
+    || bad "metrics' door ($variant): changed '$changed', want '$want'"
+done
+want_vmauth='{"enabled":true,"port":"8427","internal":"8426","replicas":2,"selectAll":false,"selector":{"infrared.darkshift.io/metrics-user":"true"},"anonymousOff":true}'
+got_vmauth="$(door_q "$work/door-gke" demo-gk '.vmauth | {"enabled": .enabled, "port": .spec.port, "internal": .spec.internalListenPort, "replicas": .spec.replicaCount, "selectAll": .spec.selectAllByDefault, "selector": .spec.userSelector.matchLabels, "anonymousOff": .spec.unauthorizedUserAccessSpec.disabled}')"
+[ "$got_vmauth" = "$want_vmauth" ] && ok "metrics' door: vmauth with two replicas, its users by label, and no anonymous route" \
+  || bad "metrics' door: vmauth is $got_vmauth, want $want_vmauth"
+door_url=http://vmauth-victoria-metrics-k8s-stack.monitoring.svc:8427
+want_ds="VictoriaMetrics plugin=true|alertmanager=0|VictoriaMetrics $door_url grafana \$VMAUTH_GRAFANA_PASSWORD default=true|Alertmanager $door_url grafana \$VMAUTH_GRAFANA_PASSWORD default=false"
+got_ds="$(door_q "$work/door-gke" demo-gk '.defaultDatasources | [(.victoriametrics.datasources[] | .uid + " plugin=" + (.plugin | tostring)), ("alertmanager=" + (.alertmanager.datasources | length | tostring)), (.extra[] | .uid + " " + .url + " " + .basicAuthUser + " " + .secureJsonData.basicAuthPassword + " default=" + ((.isDefault // false) | tostring))] | join("|")' | jq -r .)"
+[ "$got_ds" = "$want_ds" ] && ok "metrics' door: Grafana's datasources at the door by the dashboards' uids, the chart's own a stand-in" \
+  || bad "metrics' door: Grafana's datasources are '$got_ds', want '$want_ds'"
+[ "$(door_q "$work/door-gke" demo-gk '.grafana.envValueFrom')" = '{"VMAUTH_GRAFANA_PASSWORD":{"secretKeyRef":{"name":"vmuser-grafana","key":"password"}}}' ] \
+  && [ "$(door_q "$work/door-oidc" demo-oi '.grafana.envValueFrom | keys | join(",")' | jq -r .)" = GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET,VMAUTH_GRAFANA_PASSWORD ] \
+  && ok "metrics' door: Grafana's password from vmuser-grafana, beside Grafana's sign-in secret with OIDC" \
+  || bad "metrics' door: Grafana's envValueFrom is $(door_q "$work/door-gke" demo-gk '.grafana.envValueFrom'), with OIDC $(door_q "$work/door-oidc" demo-oi '.grafana.envValueFrom | keys')"
+want_users="$(jq -cnS --arg iss "$door_iss" '[
+  {name: "grafana", label: "true", issuer: null, sub: null, aud: null, vmAccess: null,
+   paths: "/api/v1/query,/api/v1/query_range,/api/v1/query_exemplars,/api/v1/series,/api/v1/labels,/api/v1/label/.+/values,/api/v1/metadata,/api/v1/status/.+,/api/v1/rules,/api/v1/alerts,/api/v1/format_query,/api/v1/parse_query,/vmalert/.+"},
+  {name: "infrared-api", label: "true", issuer: $iss, sub: "system:serviceaccount:infrared:infrared-api", aud: "infrared-metrics", vmAccess: {},
+   paths: "/api/v1/query,/api/v1/query_range,/api/v1/write"},
+  {name: "infrared-operator", label: "true", issuer: $iss, sub: "system:serviceaccount:infrared:infrared-operator", aud: "infrared-metrics", vmAccess: {},
+   paths: "/api/v1/query"}]')"
+got_users="$(door_q "$work/door-gke" demo-gk '[.extraObjects[] | select(.kind == "VMUser") | {"name": .metadata.name, "label": .metadata.labels["infrared.darkshift.io/metrics-user"], "issuer": .spec.jwt.oidc.issuer, "sub": .spec.jwt.matchClaims.sub, "aud": .spec.jwt.matchClaims.aud, "vmAccess": .spec.jwt.defaultVMAccessClaim, "paths": (.spec.targetRefs[0].paths | join(","))}]' | jq -cS .)"
+[ "$got_users" = "$want_users" ] && ok "metrics' door: grafana, infrared-api and infrared-operator, each labelled; the API's and the operator's by token, matching their ServiceAccounts and the audience" \
+  || bad "metrics' door: the users are '$got_users', want '$want_users'"
+[ "$(door_q "$work/door-gke" demo-gk '[.extraObjects[] | select(.kind == "VMUser" and .metadata.name == "grafana") | .spec.generatePassword, (.spec.targetRefs[].paths[] | select(test("write|import|admin|snapshot|export|delete|federate|^/metrics")))] | join(",")' | jq -r .)" = true ] \
+  && ok "metrics' door: grafana's password is generated, and it writes, imports, deletes, snapshots and exports nothing" \
+  || bad "metrics' door: grafana's user takes a path that writes, or its password is not generated"
+[ "$(door_q "$work/door-noissuer" demo '[.extraObjects[] | select(.kind == "VMUser") | .metadata.name] | join(",")' | jq -r .)" = grafana ] \
+  && ok "metrics' door without an issuer: grafana's user alone" || bad "metrics' door without an issuer renders a user for the API or the operator"
+# door_rules <dir> <cluster> <policy>: each rule as its peers@ports, a peer as
+# <namespace>/<pods>: the pods by app.kubernetes.io/name or k8s-app, any other
+# label as key=value, an In list joined with +, and * for every pod.
+door_rules() {
+  door_q "$1" "$2" ".extraObjects[] | select(.kind == \"NetworkPolicy\" and .metadata.name == \"$3\") | .spec" | jq -r '
+    [.ingress[] | ([.from[]? | (.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] // "monitoring") + "/" +
+      (if (.podSelector // {}) == {} then "*"
+       elif .podSelector.matchLabels then (.podSelector.matchLabels | to_entries
+         | map(if .key == "app.kubernetes.io/name" or .key == "k8s-app" then .value else .key + "=" + .value end) | join("&"))
+       else (.podSelector.matchExpressions[0].values | join("+")) end)] | join(",")) + "@" + ([.ports[]?.port | tostring] | join(","))]
+    | join(" ")'
+}
+want_door_gke="monitoring/*,infrared/*@8427 monitoring/vmagent@ kube-system/konnectivity-agent@8427"
+want_door_k3s="monitoring/*,infrared/*@8427 monitoring/vmagent@"
+[ "$(door_rules "$work/door-gke" demo-gk metrics-door)" = "$want_door_gke" ] && [ "$(door_rules "$work/enforced-k3s" demo metrics-door)" = "$want_door_k3s" ] \
+  && [ "$(door_q "$work/door-gke" demo-gk '.extraObjects[] | select(.metadata.name == "metrics-door") | .spec.podSelector.matchLabels["app.kubernetes.io/name"]' | jq -r .)" = vmauth ] \
+  && ok "metrics' door: metrics-door admits monitoring and Infrared's namespace on 8427, vmagent on any port, and the Kubernetes API's proxy on GKE alone" \
+  || bad "metrics' door: metrics-door admits '$(door_rules "$work/door-gke" demo-gk metrics-door)' on GKE and '$(door_rules "$work/enforced-k3s" demo metrics-door)' on k3s"
+fence_sel() { door_q "$1" demo-gk '.extraObjects[] | select(.kind == "NetworkPolicy" and .metadata.name == "infrared-fence") | .spec.podSelector'; }
+[ "$(fence_sel "$work/door-gke-base")" = '{}' ] \
+  && [ "$(fence_sel "$work/door-gke")" = '{"matchExpressions":[{"key":"app.kubernetes.io/name","operator":"NotIn","values":["vmauth"]}]}' ] \
+  && [ "$(fence_sel "$work/enforced-gke")" = '{"matchExpressions":[{"key":"app.kubernetes.io/name","operator":"NotIn","values":["vmauth","vmsingle","vmagent","vmalert","vmalertmanager","kube-state-metrics","victoria-metrics-operator"]}]}' ] \
+  && ok "metrics' door: the fence in monitoring leaves the door, and at enforced the stack's components, to their own policies" \
+  || bad "metrics' door: the fence selects $(fence_sel "$work/door-gke") at door and $(fence_sel "$work/enforced-gke") at enforced"
+policies() { door_q "$1" "$2" '[.extraObjects[] | select(.kind == "NetworkPolicy") | .metadata.name] | join(" ")' | jq -r .; }
+[ "$(policies "$work/door-gke" demo-gk)" = "infrared-fence metrics-door" ] \
+  && [ "$(policies "$work/enforced-gke" demo-gk)" = "infrared-fence metrics-door metrics-stores metrics-agents metrics-rules metrics-alerts metrics-exporters metrics-operator-webhook" ] \
+  && [ "$(policies "$work/enforced-k3s" demo)" = "metrics-door metrics-stores metrics-agents metrics-rules metrics-alerts metrics-exporters metrics-operator-webhook" ] \
+  && ok "metrics' door: enforced adds the six policies, with the fence or without" \
+  || bad "metrics' door: the policies are '$(policies "$work/door-gke" demo-gk)' at door and '$(policies "$work/enforced-gke" demo-gk)' at enforced"
+want_enf="metrics-stores=monitoring/vmauth+vmagent+vmalert,monitoring/infrared.darkshift.io/metrics-store-client=true@8428,8429 kube-system/konnectivity-agent@8428,8429;metrics-agents=monitoring/vmagent@;metrics-rules=monitoring/vmagent@ monitoring/vmsingle@8080 kube-system/konnectivity-agent@8080;metrics-alerts=monitoring/vmagent@ monitoring/vmalert+vmauth@9093;metrics-exporters=monitoring/vmagent@;metrics-operator-webhook=@9443"
+got_enf=""
+for pol in metrics-stores metrics-agents metrics-rules metrics-alerts metrics-exporters metrics-operator-webhook; do
+  got_enf="$got_enf${got_enf:+;}$pol=$(door_rules "$work/enforced-gke" demo-gk "$pol")"
+done
+[ "$got_enf" = "$want_enf" ] && ok "metrics' door: at enforced each component answers the stack's own pods, the door and, on GKE, the Kubernetes API's proxy" \
+  || bad "metrics' door: enforced admits '$got_enf', want '$want_enf'"
+[ "$(door_q "$work/enforced-k3s" demo '[.extraObjects[] | select(.kind == "NetworkPolicy") | .spec.ingress[].from[]? | select(.podSelector.matchLabels["k8s-app"] == "konnectivity-agent")] | length')" = 0 ] \
+  && ok "metrics' door: off GKE no policy admits the Kubernetes API's proxy" || bad "metrics' door: a policy admits konnectivity off GKE"
+[ "$(door_q "$work/door-gke" demo-gk '.extraObjects[] | select(.kind == "CronJob" and .metadata.name == "metrics-backup") | .spec.jobTemplate.spec.template.metadata.labels["infrared.darkshift.io/metrics-store-client"]' | jq -r .)" = true ] \
+  && [ "$(door_q "$work/door-gke" demo-gk '.extraObjects[] | select(.kind == "VMRule" and .metadata.name == "infrared-platform") | .spec.groups[0].rules[] | select(.alert == "InfraredMetricsDoorDown") | .expr' | jq -r .)" \
+    = 'max(up{job="vmauth-victoria-metrics-k8s-stack", platform="demo-gk"}) == 0 or absent(up{job="vmauth-victoria-metrics-k8s-stack", platform="demo-gk"})' ] \
+  && ok "metrics' door: the nightly copy carries the stores' client label, and the door has its alert" \
+  || bad "metrics' door: the nightly copy lacks its label, or the alert InfraredMetricsDoorDown is wrong"
+door_rest='del(.vmauth, .defaultDatasources, .grafana.envValueFrom) | .extraObjects |= [.[] | select(.kind != "VMUser" and .kind != "NetworkPolicy" and .kind != "VMRule" and .kind != "CronJob")]'
+[ "$(door_q "$work/door-gke" demo-gk "$door_rest")" = "$(door_q "$work/door-gke-base" demo-gk "$door_rest")" ] \
+  && ok "metrics' door: the rest of the stack's values as they were" || bad "metrics' door: values beyond the door's change"
+want_ne='{"proxy":true,"sha":true,"scheme":"https","token":"/var/run/secrets/kubernetes.io/serviceaccount/token","skipVerify":true,"drops":1,"rule":{"apiGroups":[""],"resources":["services/victoria-metrics-k8s-stack-prometheus-node-exporter"],"resourceNames":["victoria-metrics-k8s-stack-prometheus-node-exporter"],"verbs":["get"]}}'
+got_ne="$(door_q "$work/node-exporter-auth" demo '{"proxy": .["prometheus-node-exporter"].kubeRBACProxy.enabled, "sha": (.["prometheus-node-exporter"].kubeRBACProxy.image.sha | test("^[0-9a-f]{64}$")), "scheme": .["prometheus-node-exporter"].vmScrape.spec.endpoints[0].scheme, "token": .["prometheus-node-exporter"].vmScrape.spec.endpoints[0].bearerTokenFile, "skipVerify": .["prometheus-node-exporter"].vmScrape.spec.endpoints[0].tlsConfig.insecureSkipVerify, "drops": (.["prometheus-node-exporter"].vmScrape.spec.endpoints[0].metricRelabelConfigs | length), "rule": .vmagent.rbac.rules[0]}')"
+[ "$got_ne" = "$want_ne" ] && ok "node-exporter behind kube-rbac-proxy by digest, scraped over HTTPS with vmagent's token, which its Role allows" \
+  || bad "node-exporter behind its proxy: $got_ne, want $want_ne"
+for args in "-metrics-auth clients" "-metrics-auth off" "-metrics-auth-issuer $door_iss" "-metrics-auth door -metrics-auth-audience infrared.metrics" \
+    "-metrics-auth door -metrics-auth-issuer http://container.googleapis.com/v1/x"; do
+  # shellcheck disable=SC2086
+  if "$work/render" -out "$work/door-refused" $args >/dev/null 2>"$work/door-refused.log"; then
+    bad "metrics' door: hack/render took $args"
+  elif grep -q 'MetricsAuth' "$work/door-refused.log"; then
+    ok "metrics' door: hack/render refuses $args"
+  else
+    bad "metrics' door: hack/render refused $args for another reason: $(cat "$work/door-refused.log")"
+  fi
+  rm -rf "$work/door-refused"
+done
+
 # --- The telemetry plane: what a Mac's vmagent keeps, and how often it scrapes ---
 # (localred findings O7 and T3). The vmagent of the telemetry variant keeps, of
 # the operator's and the API's registries and of its own, the series the Fleet
@@ -4532,6 +4667,64 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     fi
   else
     bad "telemetry-metrics: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-plane.err")"
+  fi
+  # The metrics' door through the chart (variants door-gke, door-oidc, and
+  # enforced on GKE with node-exporter behind its proxy): one VMAuth without
+  # the chart's anonymous route; Grafana's datasources at the door alone; the
+  # sync-job's config and vmalert's spec (the dashboards' uid, the alert
+  # source) as without the door; the users and the policies through tpl;
+  # Grafana's password beside its sign-in secret; vmagent's Role and binding;
+  # node-exporter on the loopback behind the proxy by digest, scraped over HTTPS.
+  door_gke "$work/enforced-ne-gke" "${enforced_flags[@]}" -node-exporter-auth
+  door_chart_ok=true
+  for v in door-gke-base:demo-gk door-gke:demo-gk door-oidc:demo-oi enforced-ne-gke:demo-gk; do
+    yq '.spec.source.helm.valuesObject' "$work/${v%%:*}/registry/clusters/${v#*:}/components/victoria-metrics-k8s-stack.yaml" >"$work/vmks-${v%%:*}-values.yaml"
+    if ! helm template victoria-metrics-k8s-stack "$work/vmks-chart/victoria-metrics-k8s-stack" -n monitoring \
+        -f "$work/vmks-${v%%:*}-values.yaml" >"$work/vmks-${v%%:*}.yaml" 2>"$work/vmks-${v%%:*}.err"; then
+      bad "metrics' door (${v%%:*}): helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-${v%%:*}.err")"
+      door_chart_ok=false
+    fi
+  done
+  if [ "$door_chart_ok" = true ]; then
+    dc="$work/vmks-door-gke.yaml" db="$work/vmks-door-gke-base.yaml"
+    [ "$(one_doc "$dc" VMAuth victoria-metrics-k8s-stack | yq -o json -I0 '[(.spec | has("unauthorizedUserAccessSpec")), .spec.userSelector.matchLabels, .spec.internalListenPort]')" \
+        = '[false,{"infrared.darkshift.io/metrics-user":"true"},"8426"]' ] \
+      && [ "$(yq -N -r 'select(.kind == "VMAuth") | .metadata.name' "$dc")" = victoria-metrics-k8s-stack ] \
+      && ok "metrics' door: the chart makes one VMAuth with no anonymous route, selecting its users by label" \
+      || bad "metrics' door: the chart's VMAuth is $(one_doc "$dc" VMAuth victoria-metrics-k8s-stack | yq -o json -I0 '.spec')"
+    door_ds="$(yq -N -r 'select(.kind == "ConfigMap" and .metadata.name == "victoria-metrics-k8s-stack-grafana-ds") | .data["datasource.yaml"]' "$dc" \
+      | yq -o json -I0 '[.datasources[] | .uid + " " + .url + " " + .basicAuthUser + " " + .secureJsonData.basicAuthPassword]')"
+    [ "$door_ds" = "[\"VictoriaMetrics $door_url grafana \$VMAUTH_GRAFANA_PASSWORD\",\"Alertmanager $door_url grafana \$VMAUTH_GRAFANA_PASSWORD\"]" ] \
+      && ok "metrics' door: the chart provisions Grafana's two datasources at the door, and no other" \
+      || bad "metrics' door: the chart provisions Grafana's datasources $door_ds"
+    same_obj() { [ "$(yq -N -o json -I0 "$1" "$db")" = "$(yq -N -o json -I0 "$1" "$dc")" ] && [ -n "$(yq -N -o json -I0 "$1" "$dc")" ]; }
+    same_obj 'select(.kind == "ConfigMap" and .metadata.name == "victoria-metrics-k8s-stack-sync-job-config")' && same_obj 'select(.kind == "VMAlert") | .spec' \
+      && ok "metrics' door: the dashboards' datasource uid and vmalert's alert source are as without the door" \
+      || bad "metrics' door: the sync-job's config or vmalert's spec changed with the door"
+    [ "$(yq -N -r 'select(.kind == "VMUser") | .metadata.name' "$dc" | sort | tr '\n' ' ')" = "grafana infrared-api infrared-operator " ] \
+      && [ "$(yq -N -r 'select(.kind == "NetworkPolicy") | .metadata.name' "$dc" | sort | tr '\n' ' ')" = "infrared-fence metrics-door " ] \
+      && [ "$(yq -N -r 'select(.kind == "NetworkPolicy") | .metadata.name' "$work/vmks-enforced-ne-gke.yaml" | wc -l | tr -d ' ')" = 8 ] \
+      && ok "metrics' door: the users and the policies come through the chart's tpl" \
+      || bad "metrics' door: the users or the policies are lost in the chart's tpl"
+    [ "$(one_doc "$work/vmks-door-oidc.yaml" Deployment victoria-metrics-k8s-stack-grafana | yq -o json -I0 '[.spec.template.spec.containers[] | select(.name == "grafana") | .env[] | select(.name == "GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET" or .name == "VMAUTH_GRAFANA_PASSWORD") | .name + "=" + .valueFrom.secretKeyRef.name + "/" + .valueFrom.secretKeyRef.key]')" \
+        = '["GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=infrared-oidc-grafana/client-secret","VMAUTH_GRAFANA_PASSWORD=vmuser-grafana/password"]' ] \
+      && ok "metrics' door: the chart gives Grafana its door password beside its sign-in secret" \
+      || bad "metrics' door: Grafana's container lacks VMAUTH_GRAFANA_PASSWORD from vmuser-grafana beside its sign-in secret"
+    de="$work/vmks-enforced-ne-gke.yaml"
+    [ "$(yq -N -o json -I0 'select(.kind == "Role" and .metadata.name == "vmagent-victoria-metrics-k8s-stack") | .rules' "$de")" \
+        = '[{"apiGroups":[""],"resourceNames":["victoria-metrics-k8s-stack-prometheus-node-exporter"],"resources":["services/victoria-metrics-k8s-stack-prometheus-node-exporter"],"verbs":["get"]}]' ] \
+      && [ "$(one_doc "$de" RoleBinding vmagent-victoria-metrics-k8s-stack | yq -o json -I0 '[.roleRef.name, .subjects[0].name]')" \
+        = '["vmagent-victoria-metrics-k8s-stack","vmagent-victoria-metrics-k8s-stack"]' ] \
+      && ok "node-exporter behind its proxy: the chart binds vmagent's ServiceAccount to the Role that gets the Service's subresource" \
+      || bad "node-exporter behind its proxy: vmagent's Role or binding from the chart is wrong"
+    ne_pod='select(.kind == "DaemonSet" and .metadata.name == "victoria-metrics-k8s-stack-prometheus-node-exporter") | .spec.template.spec'
+    [ "$(yq -N -r "$ne_pod | .containers[] | select(.name == \"kube-rbac-proxy\") | .image" "$de" | grep -cE '^quay\.io/brancz/kube-rbac-proxy:v[0-9.]+@sha256:[0-9a-f]{64}$')" = 1 ] \
+      && [ "$(yq -N -r "$ne_pod | .containers[] | select(.name == \"kube-rbac-proxy\") | .args[0]" "$de")" = "--secure-listen-address=:9100" ] \
+      && [ "$(yq -N -r "$ne_pod | .containers[] | select(.name == \"node-exporter\") | (.env[] | select(.name == \"HOST_IP\") | .value)" "$de")" = 127.0.0.1 ] \
+      && [ "$(one_doc "$de" VMServiceScrape victoria-metrics-k8s-stack-prometheus-node-exporter | yq -o json -I0 '.spec.endpoints[0] | [.scheme, .bearerTokenFile, .tlsConfig.insecureSkipVerify]')" \
+        = '["https","/var/run/secrets/kubernetes.io/serviceaccount/token",true]' ] \
+      && ok "node-exporter behind its proxy: node-exporter on the loopback, the proxy by digest on 9100, scraped over HTTPS with a token" \
+      || bad "node-exporter behind its proxy: the chart's DaemonSet or scrape is wrong"
   fi
 else
   echo "skip: victoria-metrics-k8s-stack $vmks_version could not be fetched; its render is not checked"

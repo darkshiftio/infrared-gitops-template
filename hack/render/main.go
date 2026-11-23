@@ -359,6 +359,34 @@ type Data struct {
 	// (see "The metrics store's size"). Empty is 10Gi, which renders as before
 	// the field existed, and an operator leaves it out of the data.
 	MetricsStorage string `json:"MetricsStorage,omitempty"`
+	// MetricsAuth is the operator's INFRARED_METRICS_AUTH, the Infrared
+	// chart's observability.metricsAuth.stage, as the operator hands it over
+	// (infrared-docs-internal docs/home-defense.md, step 5; see "The metrics'
+	// door"): door, vmauth in front of the metrics store and Alertmanager,
+	// with a user for Grafana, which reads through it, and with
+	// MetricsAuthIssuer and MetricsAuthAudience one each for Infrared's API
+	// and operator, which sign in with their ServiceAccount tokens; enforced,
+	// the door and the stack's back doors closed by NetworkPolicy. The chart's
+	// clients is door here. Empty renders as before the field existed, and an
+	// operator leaves it out of the data.
+	MetricsAuth string `json:"MetricsAuth,omitempty"`
+	// MetricsAuthIssuer is the cluster's service account token issuer, with
+	// MetricsAuth: the issuer the door's users for the API and the operator
+	// check a token against, by its discovery document and keys, so it must
+	// publish them (GKE's and EKS's do, k3s's does not). Empty renders no
+	// such user, and an operator leaves it out of the data.
+	MetricsAuthIssuer string `json:"MetricsAuthIssuer,omitempty"`
+	// MetricsAuthAudience is the operator's INFRARED_METRICS_TOKEN_AUDIENCE,
+	// the chart's observability.metricsAuth.audience, with MetricsAuth: the
+	// aud claim those users match, a DNS label such as infrared-metrics.
+	MetricsAuthAudience string `json:"MetricsAuthAudience,omitempty"`
+	// NodeExporterAuth is the operator's INFRARED_NODE_EXPORTER_AUTH, the
+	// chart's observability.nodeExporterAuth.enabled: node-exporter answers
+	// only behind kube-rbac-proxy, over TLS on each node's port 9100 and to a
+	// token allowed to get its Service's subresource, which vmagent's own is
+	// (see "The metrics' door"). False renders as before the field existed,
+	// and an operator leaves it out of the data.
+	NodeExporterAuth bool `json:"NodeExporterAuth,omitempty"`
 	// MediaStore is the operator's INFRARED_MEDIA_STORE, the Infrared chart's
 	// summaryvideo.store, where the API keeps its videos and pictures
 	// (infrared-docs-internal ADR 0087, D4 and D7): both or objectStore puts
@@ -840,6 +868,14 @@ func main() {
 	flag.StringVar(&d.TenantStorage, "tenant-storage", "", `TenantStorage: the chart's tenancy.tenantStorage as one line of JSON, {"enabled":true,"capGi":400,"minDiskGi":10} (INFRARED_TENANT_STORAGE; empty for none)`)
 	flag.StringVar(&d.MetricsStorage, "metrics-storage", "",
 		"MetricsStorage: the size of the install's metrics store, VMSingle's claim or on k3s with the stores its emptyDir, e.g. 40Gi (INFRARED_METRICS_STORAGE; empty: 10Gi)")
+	flag.StringVar(&d.MetricsAuth, "metrics-auth", "",
+		`MetricsAuth: "" (as before), "door" or "enforced": vmauth in front of the metrics store and Alertmanager, and at enforced the stack's back doors closed (INFRARED_METRICS_AUTH; the chart's clients is door)`)
+	flag.StringVar(&d.MetricsAuthIssuer, "metrics-auth-issuer", "",
+		"MetricsAuthIssuer: with -metrics-auth, the cluster's service account issuer, https, which the door checks the API's and the operator's tokens against (empty: no user for them)")
+	flag.StringVar(&d.MetricsAuthAudience, "metrics-auth-audience", "",
+		"MetricsAuthAudience: with -metrics-auth, the audience of the API's and the operator's tokens, a DNS label such as infrared-metrics (INFRARED_METRICS_TOKEN_AUDIENCE)")
+	flag.BoolVar(&d.NodeExporterAuth, "node-exporter-auth", false,
+		"NodeExporterAuth: node-exporter behind kube-rbac-proxy, which vmagent scrapes with its own token (INFRARED_NODE_EXPORTER_AUTH)")
 	flag.StringVar(&d.MediaStore, "media-store", "",
 		`MediaStore: "" (the chart's volume, as before), "both" or "objectStore": the API's videos and pictures in SeaweedFS's bucket media (INFRARED_MEDIA_STORE)`)
 	flag.BoolVar(&d.StoresOrgLayout, "stores-org-layout", false,
@@ -956,6 +992,18 @@ func mergeDataFile(d *Data, path string) error {
 		"registry-paused":   func() { d.RegistryPaused = explicit.RegistryPaused },
 		"store-paths":       func() { d.StorePaths = explicit.StorePaths },
 		"stores-migration":  func() { d.StoresMigration = explicit.StoresMigration },
+		"metrics-auth": func() {
+			d.MetricsAuth = explicit.MetricsAuth
+		},
+		"metrics-auth-issuer": func() {
+			d.MetricsAuthIssuer = explicit.MetricsAuthIssuer
+		},
+		"metrics-auth-audience": func() {
+			d.MetricsAuthAudience = explicit.MetricsAuthAudience
+		},
+		"node-exporter-auth": func() {
+			d.NodeExporterAuth = explicit.NodeExporterAuth
+		},
 	}
 	for name, apply := range overrides {
 		if set[name] {
@@ -1045,7 +1093,42 @@ func validate(d Data) error {
 	if !slices.Contains(MediaStores, d.MediaStore) {
 		errs = append(errs, fmt.Errorf("MediaStore must be one of %q (the chart's summaryvideo.store; its volume is empty here), got %q", MediaStores, d.MediaStore))
 	}
+	errs = append(errs, validateMetricsAuth(d)...)
 	return errors.Join(errs...)
+}
+
+// MetricsAuths are the values of MetricsAuth the operator hands over: none,
+// the door, and the door with the stack's back doors closed. The chart's
+// clients is door here.
+var MetricsAuths = []string{"", "door", "enforced"}
+
+// audience is a ServiceAccount token's audience as the operator takes it, a
+// DNS label: the door's match on the aud claim is a regular expression in
+// vmauth, so nothing else may be read as one.
+var audience = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+// validateMetricsAuth refuses what the operator never hands over: a stage
+// other than door or enforced, an issuer that is no https URL of a host
+// without a query or fragment, an audience that is no DNS label, and either
+// of them without the door.
+func validateMetricsAuth(d Data) []error {
+	var errs []error
+	if !slices.Contains(MetricsAuths, d.MetricsAuth) {
+		errs = append(errs, fmt.Errorf("MetricsAuth must be one of %q (the operator hands the chart's clients over as door), got %q", MetricsAuths, d.MetricsAuth))
+	}
+	if d.MetricsAuth == "" && (d.MetricsAuthIssuer != "" || d.MetricsAuthAudience != "") {
+		errs = append(errs, errors.New("MetricsAuthIssuer and MetricsAuthAudience need MetricsAuth: without the door nothing reads them"))
+	}
+	if i := d.MetricsAuthIssuer; i != "" {
+		if u, err := url.Parse(i); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+			strings.ContainsAny(i, " \t\"'") {
+			errs = append(errs, fmt.Errorf("MetricsAuthIssuer must be the cluster's service account issuer, an https URL with no query or fragment, got %q", i))
+		}
+	}
+	if a := d.MetricsAuthAudience; a != "" && !audience.MatchString(a) {
+		errs = append(errs, fmt.Errorf("MetricsAuthAudience must be a token audience of lower-case letters, digits and hyphens, such as infrared-metrics, got %q", a))
+	}
+	return errs
 }
 
 // quantity is a Kubernetes resource quantity as the operator writes one: a
