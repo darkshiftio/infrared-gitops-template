@@ -1808,8 +1808,10 @@ for v in "${variants[@]}"; do
       && [ -z "$(yq -p json -r '.identities[].actions[] | select(test(":") | not)' <<<"$ids")" ] \
       && [ "$(yq -p json -r '.identities[].credentials[] | .accessKey + " " + .secretKey' <<<"$ids" | grep -cvE '^\$\{[A-Z0-9_]+\} \$\{[A-Z0-9_]+\}$' || true)" = 0 ] \
       && [ "$(yq -p json -r '.identities[].credentials[] | .accessKey + " " + .secretKey' <<<"$ids" | tr -d '${}' | tr ' ' '\n' | sort | tr '\n' ' ')" \
-          = "$(sel "$f" "$v | .s3.extraEnvironmentVars | keys | .[]" | sort | tr '\n' ' ')" ] \
-      && [ "$(sel "$f" "$v | .s3.extraEnvironmentVars[].secretKeyRef.name" | sort -u | tr '\n' ' ')" = "$want_secrets" ] \
+          = "$(sel "$f" "$v | .s3.extraEnvironmentVars | del(.GOMEMLIMIT) | keys | .[]" | sort | tr '\n' ' ')" ] \
+      && [ "$(sel "$f" "$v | .s3.extraEnvironmentVars | del(.GOMEMLIMIT) | .[].secretKeyRef.name" | sort -u | tr '\n' ' ')" = "$want_secrets" ] \
+      && [ "$(sel "$f" "$v | [.s3.extraEnvironmentVars.GOMEMLIMIT, .volume.extraEnvironmentVars.GOMEMLIMIT] + .s3.extraArgs + .volume.extraArgs | .[]" | tr '\n' ' ')" \
+          = "1600MiB 2560MiB -concurrentUploadLimitMB=256 -concurrentUploadLimitMB=256 -concurrentDownloadLimitMB=256 " ] \
       && [ "$(sel "$sw" 'select(.kind == "Role" and .metadata.name == "seaweedfs-prepare") | .rules[0].resourceNames[]' | sort | tr '\n' ' ')" = "$want_secrets" ] \
       && ok "$variant: buckets ${want_buckets% }, each with an identity that reaches it alone, no key in the repo" \
       || bad "$variant: SeaweedFS's buckets or S3 identities are wrong"
