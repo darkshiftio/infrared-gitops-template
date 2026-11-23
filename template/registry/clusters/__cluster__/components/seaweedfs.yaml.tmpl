@@ -226,6 +226,11 @@ spec:
                   name: seaweedfs-jwt
                   key: volume-write
 [[- end ]]
+            # Uploads past 512 MB in flight wait (up to the server's 60s) for
+            # room rather than grow the server: weed's default is no limit, so
+            # a large push grew it to any memory limit and was OOMKilled.
+            extraArgs:
+              - -concurrentUploadLimitMB=512
             # At 1Gi all three volume servers were OOMKilled while a build
             # pushed an 838 MB layer (infrared-cp-google, 2026-11-11), failing
             # the registry's writes with 500s.
@@ -409,15 +414,22 @@ spec:
               - name: media
 [[- end ]]
 [[- end ]]
-            # The gateway holds each upload's parts in memory: at 512Mi it was
-            # OOMKilled while eight image builds pushed their layers at once
-            # (2026-10-16).
+            # The gateway holds each upload's parts in memory, and weed's
+            # default is no limit on them: at 512Mi it was OOMKilled while
+            # eight image builds pushed their layers at once (2026-10-16), and
+            # at 1536Mi while one large image pushed its cache (both gateways,
+            # infrared-cp-google, 2026-11-21 and 2026-11-23; the registry
+            # answered 500, then lost the image it had just taken). Past
+            # 256 MB in flight an upload now waits for room, and the limit
+            # leaves room for the parts and the gateway's own caches.
+            extraArgs:
+              - -concurrentUploadLimitMB=256
             resources:
               requests:
                 cpu: 20m
-                memory: 128Mi
+                memory: 256Mi
               limits:
-                memory: 1536Mi
+                memory: 2Gi
   destination:
     server: https://kubernetes.default.svc
     namespace: stores
