@@ -1360,6 +1360,62 @@ func TestMetricsStorage(t *testing.T) {
 	}
 }
 
+// The metrics' door (infrared-docs-internal docs/home-defense.md, step 5): the
+// four fields load from the operator's Data by their Go names, absent is off,
+// as an operator from before them leaves them out, and validate refuses what
+// the operator never hands over.
+func TestMetricsAuthFields(t *testing.T) {
+	issuer := "https://container.googleapis.com/v1/projects/darkshift-preprod/locations/us-central1-a/clusters/infrared-cp-google"
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "MetricsAuth": "door", "MetricsAuthIssuer": "` + issuer +
+		`", "MetricsAuthAudience": "infrared-metrics", "NodeExporterAuth": true}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil || d.MetricsAuth != "door" || d.MetricsAuthIssuer != issuer ||
+		d.MetricsAuthAudience != "infrared-metrics" || !d.NodeExporterAuth {
+		t.Fatalf("loaded %+v, %v", d, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.MetricsAuth != "" || d.MetricsAuthIssuer != "" || d.MetricsAuthAudience != "" || d.NodeExporterAuth {
+		t.Fatalf("absent: %+v, %v", d, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0"}
+	for _, c := range []struct {
+		auth, issuer, audience string
+		ok                     bool
+	}{
+		{"", "", "", true},
+		{"door", "", "", true},
+		{"door", issuer, "infrared-metrics", true},
+		{"enforced", issuer, "infrared-metrics", true},
+		{"enforced", "https://oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE", "metrics", true},
+		{"clients", issuer, "infrared-metrics", false},
+		{"off", "", "", false},
+		{"Door", "", "", false},
+		{"", issuer, "", false},
+		{"", "", "infrared-metrics", false},
+		{"door", "http://container.googleapis.com/v1/projects/p", "infrared-metrics", false},
+		{"door", "container.googleapis.com", "infrared-metrics", false},
+		{"door", issuer + "?x=1", "infrared-metrics", false},
+		{"door", issuer, "infrared.metrics", false},
+		{"door", issuer, "Infrared", false},
+		{"door", issuer, "metrics|other", false},
+	} {
+		d := base
+		d.MetricsAuth, d.MetricsAuthIssuer, d.MetricsAuthAudience = c.auth, c.issuer, c.audience
+		if err := validate(d); (err == nil) != c.ok {
+			t.Errorf("MetricsAuth %q, issuer %q, audience %q: validate = %v, want validated %t", c.auth, c.issuer, c.audience, err, c.ok)
+		}
+	}
+}
+
 // The bucket media (infrared-docs-internal ADR 0087, D4): MediaStore loads from
 // the operator's Data by its Go name, absent is the chart's volume, as an
 // operator from before it leaves it out, and only both and objectStore are
