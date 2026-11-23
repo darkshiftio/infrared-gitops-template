@@ -129,7 +129,8 @@ type Data struct {
 	// leaves them out of the data.
 	TunnelHostnames []string `json:"TunnelHostnames,omitempty"`
 	// TunnelPublish is spec.tunnel.publish with TunnelMode beside: the
-	// Gateway edge carries external-dns's target annotation,
+	// Gateway edge carries external-dns's target annotation under both
+	// prefixes (external-dns.alpha.kubernetes.io/ and external-dns.kubernetes.io/),
 	// <TunnelID>.cfargotunnel.com, so the names external-dns publishes from
 	// the edge become proxied CNAMEs to the tunnel instead of the nodes'
 	// addresses. false renders as before, and an operator leaves it out of
