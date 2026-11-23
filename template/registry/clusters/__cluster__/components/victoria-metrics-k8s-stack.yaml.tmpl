@@ -196,6 +196,38 @@ spec:
             remoteWriteSettings:
               showURL: true
 [[- end ]]
+            # Scrape objects from the platform's namespaces alone (workspace TODO
+            # 787). A scrape object can name a file in vmagent's filesystem (a
+            # bearer token file, basicAuth's password file), and vmagent sends
+            # what it reads to the target. A tenant's VMServiceScrape over a pod
+            # of its own zone, which the network fence lets vmagent reach, would
+            # receive vmagent's own ServiceAccount token, which lists every
+            # tenant's pods. An org's namespaces and its zones carry
+            # infrared.darkshift.io/org; the platform's do not.
+            serviceScrapeNamespaceSelector:
+              matchExpressions:
+                - key: infrared.darkshift.io/org
+                  operator: DoesNotExist
+            podScrapeNamespaceSelector:
+              matchExpressions:
+                - key: infrared.darkshift.io/org
+                  operator: DoesNotExist
+            scrapeConfigNamespaceSelector:
+              matchExpressions:
+                - key: infrared.darkshift.io/org
+                  operator: DoesNotExist
+            nodeScrapeNamespaceSelector:
+              matchExpressions:
+                - key: infrared.darkshift.io/org
+                  operator: DoesNotExist
+            staticScrapeNamespaceSelector:
+              matchExpressions:
+                - key: infrared.darkshift.io/org
+                  operator: DoesNotExist
+            probeNamespaceSelector:
+              matchExpressions:
+                - key: infrared.darkshift.io/org
+                  operator: DoesNotExist
             resources:
               requests:
                 cpu: 50m
