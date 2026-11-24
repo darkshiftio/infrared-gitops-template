@@ -4319,7 +4319,7 @@ policies() { door_q "$1" "$2" '[.extraObjects[] | select(.kind == "NetworkPolicy
   && [ "$(policies "$work/enforced-k3s" demo)" = "metrics-door metrics-stores metrics-agents metrics-rules metrics-alerts metrics-exporters metrics-operator-webhook" ] \
   && ok "metrics' door: enforced adds the six policies, with the fence or without" \
   || bad "metrics' door: the policies are '$(policies "$work/door-gke" demo-gk)' at door and '$(policies "$work/enforced-gke" demo-gk)' at enforced"
-want_enf="metrics-stores=monitoring/vmauth+vmagent+vmalert,monitoring/infrared.darkshift.io/metrics-store-client=true@8428,8429 kube-system/konnectivity-agent@8428,8429;metrics-agents=monitoring/vmagent@;metrics-rules=monitoring/vmagent@ monitoring/vmsingle@8080 kube-system/konnectivity-agent@8080;metrics-alerts=monitoring/vmagent@ monitoring/vmalert+vmauth@9093;metrics-exporters=monitoring/vmagent@;metrics-operator-webhook=@9443"
+want_enf="metrics-stores=monitoring/vmauth+vmagent+vmalert,monitoring/infrared.darkshift.io/metrics-store-client=true@8428,8429 kube-system/konnectivity-agent@8428,8429;metrics-agents=monitoring/vmagent@;metrics-rules=monitoring/vmagent@ monitoring/vmsingle@8080 kube-system/konnectivity-agent@8080;metrics-alerts=monitoring/vmagent@ monitoring/vmalert+vmauth@9093 kube-system/konnectivity-agent@9093;metrics-exporters=monitoring/vmagent@;metrics-operator-webhook=@9443"
 got_enf=""
 for pol in metrics-stores metrics-agents metrics-rules metrics-alerts metrics-exporters metrics-operator-webhook; do
   got_enf="$got_enf${got_enf:+;}$pol=$(door_rules "$work/enforced-gke" demo-gk "$pol")"

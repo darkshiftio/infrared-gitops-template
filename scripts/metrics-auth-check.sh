@@ -31,12 +31,11 @@
 #          HTTPS 401 with its proxy, and plain HTTP 200 without;
 #   3. on GKE, through the Kubernetes API's proxy, with the rights of whoever
 #      runs this (the API server strips their credential before the service
-#      sees the request): the door 401 from door on; the store and vmalert
-#      200 at every stage, through the konnectivity agents the policies
-#      admit; Alertmanager 200 until enforced and no answer after, when a
-#      person reads it through a port-forward. Elsewhere the proxy reaches
-#      pods by paths the policies do not name, so this part prints what it
-#      gets and judges nothing;
+#      sees the request): the door 401 from door on; the store, vmalert and
+#      Alertmanager 200 at every stage, through the konnectivity agents the
+#      policies admit (scripts/observability-check.sh reads all three so).
+#      Elsewhere the proxy reaches pods by paths the policies do not name, so
+#      this part prints what it gets and judges nothing;
 #   4. from the store's own figures, read through that proxy and kept to this
 #      install's series by its vmagent's external label platform (the home's
 #      store holds other installs' telemetry too): node-exporter up on every
@@ -402,17 +401,7 @@ else
   fi
   if [ "$store_c" = 200 ]; then pass "the store answers the API's proxy (200)"; else fail "the store answered $store_c through the API's proxy, not 200"; fi
   if [ "$rules_c" = 200 ]; then pass "vmalert answers the API's proxy (200)"; else fail "vmalert answered $rules_c through the API's proxy, not 200"; fi
-  if at enforced; then
-    if [ "$am_c" != 200 ]; then
-      pass "Alertmanager answers the API's proxy no more ($am_c): a person reads it through a port-forward"
-    else
-      fail "Alertmanager still answers the API's proxy at the stage enforced"
-    fi
-  elif [ "$am_c" = 200 ]; then
-    pass "Alertmanager answers the API's proxy (200), until the stage enforced"
-  else
-    fail "Alertmanager answered $am_c through the API's proxy, not 200"
-  fi
+  if [ "$am_c" = 200 ]; then pass "Alertmanager answers the API's proxy (200)"; else fail "Alertmanager answered $am_c through the API's proxy, not 200"; fi
 fi
 
 log "4. the figures, from the store"

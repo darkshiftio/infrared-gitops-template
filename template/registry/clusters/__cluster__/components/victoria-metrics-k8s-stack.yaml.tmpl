@@ -844,10 +844,10 @@ spec:
           # the door; every reader outside the stack comes through the door.
           # vmagent reaches every one on any port, as it scrapes them all.
           # Rendered with or without the network fence. The kubelet's probes
-          # come from the node, which a policy never blocks.[[ if eq .Cloud "gcp" ]] The stores and
-          # vmalert also answer the Kubernetes API's proxy, which GKE's
-          # konnectivity agents carry, so kubectl get --raw reads keep working
-          # with the person's own right to services/proxy.[[ else ]] Elsewhere the
+          # come from the node, which a policy never blocks.[[ if eq .Cloud "gcp" ]] The stores,
+          # vmalert and Alertmanager also answer the Kubernetes API's proxy,
+          # which GKE's konnectivity agents carry, so kubectl get --raw reads
+          # keep working with the person's own right to services/proxy.[[ else ]] Elsewhere the
           # Kubernetes API's proxy cannot reach them: read through a
           # port-forward.[[ end ]]
           #
@@ -954,9 +954,11 @@ spec:
                       port: 8080
 [[- end ]]
           # Alertmanager: vmagent, and on its API vmalert (the alerts it
-          # sends) and the door (Grafana's Alertmanager datasource). Its
-          # cluster port listens to no one: it runs one replica with an empty
-          # cluster address.
+          # sends) and the door (Grafana's Alertmanager datasource).[[ if eq .Cloud "gcp" ]] On GKE
+          # also the Kubernetes API's proxy on its API, as for the stores and
+          # vmalert: scripts/observability-check.sh reads its status that way.[[ end ]]
+          # Its cluster port listens to no one: it runs one replica with an
+          # empty cluster address.
           - apiVersion: networking.k8s.io/v1
             kind: NetworkPolicy
             metadata:
@@ -984,6 +986,18 @@ spec:
                   ports:
                     - protocol: TCP
                       port: 9093
+[[- if eq .Cloud "gcp" ]]
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                      podSelector:
+                        matchLabels:
+                          k8s-app: konnectivity-agent
+                  ports:
+                    - protocol: TCP
+                      port: 9093
+[[- end ]]
           # kube-state-metrics and the VictoriaMetrics operator: vmagent alone.
           - apiVersion: networking.k8s.io/v1
             kind: NetworkPolicy
