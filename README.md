@@ -899,7 +899,7 @@ Infrared's API keeps its videos and pictures in SeaweedFS's bucket `media`, at
 | The identity `media` | Read, Write, List and Tagging on `media` alone. Its Secret `seaweedfs-s3-media` is made once by the PreSync hook, and the store `infrared-stores` copies its keys into `.InfraredNamespace` as `infrared-media-s3` (wave 2), the only namespace that gets them. Only the API reads them: it serves every file itself, never at a presigned or public URL, since a presenter is a person's likeness; no bucket policy is anonymous |
 | The identity `storage-reader` | List on each bucket, nothing else, for the storage views' figures by org; copied the same way as `infrared-storage-reader-s3` |
 | The copies | `media` joins the hourly copy to the outside bucket (the identity `backup` reads and lists it) and a restore's copy back (the identity `restore` writes it). A copy outside made before the bucket existed holds none, and a restore skips it |
-| The fence | with `.NetworkPolicies`, the stores' fence admits the API's pods (`app.kubernetes.io/part-of: infrared`, `app.kubernetes.io/component: api`) in `.InfraredNamespace` to the S3 gateway, 8333 |
+| The fence | with `.NetworkPolicies`, the stores' fence admits the API's pods (`app.kubernetes.io/part-of: infrared`, `app.kubernetes.io/component: api`) in `.InfraredNamespace` to the S3 gateway, 8333, beside the Storage tab's 8080 and 8888 (below) |
 
 `both` and `objectStore` render the same files: the chart mounts the API's
 volume read-write or read-only, and the API copies, verifies and then reads
@@ -1789,7 +1789,7 @@ for the platform.
 | `origin-ca-issuer` | `infrared-fence` (`edge`) | the platform. None behind a Cloudflare Tunnel, which leaves the issuer and its namespace out |
 | `external-dns` | `infrared-fence` (`external-dns`) | the platform. None behind a Cloudflare Tunnel, which leaves external-dns out |
 | `cert-manager`, `external-secrets` | `infrared-fence` (their charts' `extraObjects`) | the platform; the control plane on each webhook's port, 10250 |
-| `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; with `.MediaStore`, Infrared's API on 8333 (the bucket `media`); CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
+| `stores` | `infrared-fence` (`postgres`) | the stores themselves; Zot on SeaweedFS's S3 gateway, 8333; Agent Substrate (`ate-system`) on 8333 and Postgres, 5432; the operator's backup CronJob (`infrared-backup`) and the chart's restore Job on 5432; Infrared's API on the volume servers' 8080 and the filer's 8888, which the Storage tab on Usage reads (each volume server's `/status`, the filer's listings), and with `.MediaStore` on 8333 too (the bucket `media`); CloudNativePG's operator; vmagent. Nothing else: SeaweedFS's filer and master take any caller (ADR 0066 D3) |
 | `cnpg-system` | `infrared-fence` (`postgres`) | the platform; the control plane on CloudNativePG's webhook, 9443 |
 | `builds`, `build-credentials`, `kpack` | `infrared-fence` (`builds`) | the platform; the control plane on kpack's webhook, 8443 |
 | `monitoring` | `infrared-fence` (the metrics stack's `extraObjects`, or `telemetry`) | the platform; with `.MetricsAuth` every pod but the metrics' door, and at `enforced` but the stack's own components too, which have policies of their own (see "The metrics' door") |
