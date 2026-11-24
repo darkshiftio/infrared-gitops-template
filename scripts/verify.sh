@@ -222,7 +222,8 @@
 #     the same but for that, byte for byte. On every install: VMSingle's caps
 #     on labels a series and new series an hour and a day; the Alertmanager's
 #     root route to the API's platform receiver with the operator's token
-#     mounted, which the org routes merge into; the VMRule infrared-platform
+#     mounted, which the org routes merge into, and a builds namespace's
+#     waiting or unready pods routed to none; the VMRule infrared-platform
 #     (the API, the operator, the store, and with a URL the writes), every
 #     rule with severity and infrared_platform and none with
 #     infrared_product, the metrics' copy's alerts labelled the same; the
@@ -820,10 +821,10 @@ for v in "${variants[@]}"; do
       || bad "$variant: VMSingle's caps are missing or wrong: $(sel "$vm_app" "$vo.vmsingle.spec.extraArgs | tojson")"
     if [ "$(sel "$vm_app" "$vo.alertmanager | .config.route.receiver + \" \" + .config.receivers[0].name + \" \" + .config.receivers[0].webhook_configs[0].url + \" \" + (.config.receivers[0].webhook_configs[0].send_resolved | tostring) + \" \" + .config.receivers[0].webhook_configs[0].http_config.authorization.type + \" \" + .config.receivers[0].webhook_configs[0].http_config.authorization.credentials_file + \" \" + (.spec.secrets | join(\",\"))")" \
         = "infrared-platform infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform true Bearer /etc/vm/secrets/infrared-alert-webhook/token infrared-alert-webhook" ] \
-      && [ "$(sel "$vm_app" "$vo.alertmanager.config | (.route.group_by | join(\",\")) + \" \" + .route.group_wait + \" \" + .route.group_interval + \" \" + .route.repeat_interval + \" \" + (.receivers | length | tostring) + \" \" + ((.route.routes // []) | length | tostring)")" = "alertname,severity 30s 5m 4h 2 2" ] \
+      && [ "$(sel "$vm_app" "$vo.alertmanager.config | (.route.group_by | join(\",\")) + \" \" + .route.group_wait + \" \" + .route.group_interval + \" \" + .route.repeat_interval + \" \" + (.receivers | length | tostring) + \" \" + ((.route.routes // []) | length | tostring)")" = "alertname,severity 30s 5m 4h 2 3" ] \
       && [ "$(sel "$vm_app" "$vo.alertmanager.config | [.route.routes[] | .receiver + \" \" + (.matchers | join(\",\"))] + [.receivers[1].name + \" \" + (.receivers[1] | length | tostring)] | join(\";\")")" \
-        = 'none alertname=~"Watchdog|InfoInhibitor";none severity=~"info|none";none 1' ]; then
-      ok "$variant: the Alertmanager's root route takes the install's own alerts to the API's platform receiver, the operator's token mounted, and Watchdog, InfoInhibitor and info alerts to none"
+        = 'none alertname=~"Watchdog|InfoInhibitor";none severity=~"info|none";none alertname=~"KubeContainerWaiting|KubePodNotReady",namespace=~"builds-.*";none 1' ]; then
+      ok "$variant: the Alertmanager's root route takes the install's own alerts to the API's platform receiver, the operator's token mounted, and Watchdog, InfoInhibitor, info alerts and a builds namespace's waiting or unready pods to none"
     else
       bad "$variant: the Alertmanager's root route or its receiver is wrong: $(sel "$vm_app" "$vo.alertmanager | tojson")"
     fi
@@ -833,7 +834,8 @@ for v in "${variants[@]}"; do
     if [ "$(jq -r '[.spec.groups[0].rules[] | .alert + ":" + .labels.severity] | join(" ")' <<<"$vmrule_json")" = "$want_rules" ] \
       && jq -e '[.spec.groups[0].rules[] | select(.labels.infrared_platform != "true" or has("labels") and (.labels | has("infrared_product")))] | length == 0' <<<"$vmrule_json" >/dev/null \
       && jq -e --arg p "$want_platform" '[.spec.groups[0].rules[].expr | select(contains("platform=\"" + $p + "\"") | not)] | length == 0' <<<"$vmrule_json" >/dev/null \
-      && jq -e '[.spec.groups[0].rules[] | select(.alert | test("Down$")) | .for] | unique == ["3m"]' <<<"$vmrule_json" >/dev/null \
+      && jq -e '[.spec.groups[0].rules[] | select(.alert | test("^Infrared(API|Operator)Down$")) | .for] | . == ["10m", "10m"]' <<<"$vmrule_json" >/dev/null \
+      && jq -e '[.spec.groups[0].rules[] | select(.alert | test("^InfraredMetrics.*Down$")) | .for] | unique == ["3m"]' <<<"$vmrule_json" >/dev/null \
       && jq -e '[.spec.groups[0].rules[] | select(.alert | test("ReconcileErrors|WritesFailing")) | .for] | unique == ["15m"]' <<<"$vmrule_json" >/dev/null \
       && jq -e '[.spec.groups[0].rules[] | select(.alert == "InfraredMetricsStoreDown") | .expr | select(contains("job=\"vmsingle-victoria-metrics-k8s-stack\"") and (contains("=~") | not))] | length == 1' <<<"$vmrule_json" >/dev/null \
       && [ "$(jq -r '.metadata.namespace' <<<"$vmrule_json")" = monitoring ]; then
@@ -4595,6 +4597,13 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     [ "$(churn_off "$work/vmks-gke.yaml")" = false ] && [ "$(churn_off "$work/vmks.yaml")" = false ] \
       && ok "gcs-gke: TooHighChurnRate24h is off, on GKE and elsewhere" \
       || bad "gcs-gke: TooHighChurnRate24h is still on: $(churn_off "$work/vmks-gke.yaml") / $(churn_off "$work/vmks.yaml")"
+    # Four of the chart's rules wait longer than upstream before firing; the
+    # sync job puts spec.for over upstream's for.
+    rule_for() { yq -N -r 'select(.kind == "ConfigMap" and (.metadata.name | test("sync-job-config$"))) | .data["config.yaml"]' "$1" \
+      | yq -r '[.rules.rules["NodeSystemSaturation", "TooManyRemoteWriteErrors", "TooManyLogs", "ServiceDown"].spec.for] | join(" ")'; }
+    [ "$(rule_for "$work/vmks-gke.yaml")" = "30m 30m 45m 15m" ] && [ "$(rule_for "$work/vmks.yaml")" = "30m 30m 45m 15m" ] \
+      && ok "gcs-gke: NodeSystemSaturation, TooManyRemoteWriteErrors, TooManyLogs and ServiceDown wait 30m, 30m, 45m and 15m, on GKE and elsewhere" \
+      || bad "gcs-gke: the chart rules' for is wrong: $(rule_for "$work/vmks-gke.yaml") / $(rule_for "$work/vmks.yaml")"
   else
     bad "gcs-gke: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks-gke.err")"
   fi
@@ -4641,7 +4650,7 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     [ "$(yq -r '.route.receiver + " " + .receivers[0].webhook_configs[0].url + " " + .receivers[0].webhook_configs[0].http_config.authorization.credentials_file + " " + (.receivers | length | tostring)' <<<"$am_cfg")" \
         = "infrared-platform http://infrared-api.infrared.svc:8080/v1/webhooks/alertmanager/_platform /etc/vm/secrets/infrared-alert-webhook/token 2" ] \
       && [ "$(yq -o json -I0 '[.route.routes[] | .receiver + " " + (.matchers | join(","))]' <<<"$am_cfg")" \
-        = '["none alertname=~\"Watchdog|InfoInhibitor\"","none severity=~\"info|none\""]' ] \
+        = '["none alertname=~\"Watchdog|InfoInhibitor\"","none severity=~\"info|none\"","none alertname=~\"KubeContainerWaiting|KubePodNotReady\",namespace=~\"builds-.*\""]' ] \
       && [ "$(yq -o json -I0 '.receivers[1]' <<<"$am_cfg")" = '{"name":"none"}' ] \
       && [ "$(yq -N -r 'select(.kind == "VMAlertmanager") | (.spec.secrets | join(",")) + " " + .spec.configSecret' "$work/vmks-plane.yaml")" = "infrared-alert-webhook vmalertmanager-victoria-metrics-k8s-stack" ] \
       && ok "telemetry-metrics: the monitoring chart writes the root route into Alertmanager's config Secret, and mounts the operator's token" \
