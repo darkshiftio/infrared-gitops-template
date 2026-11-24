@@ -2764,8 +2764,8 @@ left="$(fences "$work/fence-tunnel" | tr ' ' '\n' | grep -E '^(origin-ca-issuer|
 # The stores (ADR 0066 D3): Zot, Substrate, the backup and the restore,
 # CloudNativePG and vmagent, by port; nothing else outside the namespace.
 [ "$(fence_policy "$work/fence" stores infrared-fence | yq -p json -o json -I0 '[.ingress[] | ([.from[] | (.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] // "self") + ":" + ((.podSelector.matchLabels // {}) | to_entries | map(.value) | join("+"))] | join(",")) + "@" + ([.ports[]?.port | tostring] | join(","))]')" \
-    = '["self:@","registry:zot@8333","ate-system:@8333,5432","infrared:infrared-backup,infrared:restore+infrared@5432","cnpg-system:@","monitoring:vmagent@"]' ] \
-  && ok "fence: the stores admit Zot, Substrate, the backup and restore, CloudNativePG and vmagent alone" \
+    = '["self:@","registry:zot@8333","ate-system:@8333,5432","infrared:infrared-backup,infrared:restore+infrared@5432","infrared:api+infrared@8080,8888","cnpg-system:@","monitoring:vmagent@"]' ] \
+  && ok "fence: the stores admit Zot, Substrate, the backup and restore, the API's Storage tab, CloudNativePG and vmagent alone" \
   || bad "fence: the stores' policy is $(fence_policy "$work/fence" stores infrared-fence)"
 # Substrate's API and router keep their own two policies alone.
 [ "$(fence_policy "$work/fence" ate-system infrared-fence | yq -p json -o json -I0 '.podSelector')" \
@@ -3054,10 +3054,11 @@ api_in() { yq -N -o json -I0 'select(.kind == "NetworkPolicy" and .metadata.name
 yq -p json -o json '. + {"MediaStore": "objectStore"}' "$work/fence.json" >"$work/media-fence.json"
 "$work/render" -out "$work/media-fence" -cluster demo-fn -flavor k3s -build-registry "$zot_registry" -data "$work/media-fence.json" >/dev/null
 [ "$(api_in "$work/media-fence/components/postgres/fence.yaml")" \
-    = '{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"infrared"}},"podSelector":{"matchLabels":{"app.kubernetes.io/component":"api","app.kubernetes.io/part-of":"infrared"}}}],"ports":[{"port":8333,"protocol":"TCP"}]}' ] \
-  && [ -z "$(api_in "$work/fence/components/postgres/fence.yaml")" ] \
+    = '{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"infrared"}},"podSelector":{"matchLabels":{"app.kubernetes.io/component":"api","app.kubernetes.io/part-of":"infrared"}}}],"ports":[{"port":8080,"protocol":"TCP"},{"port":8888,"protocol":"TCP"},{"port":8333,"protocol":"TCP"}]}' ] \
+  && [ "$(api_in "$work/fence/components/postgres/fence.yaml")" \
+    = '{"from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"infrared"}},"podSelector":{"matchLabels":{"app.kubernetes.io/component":"api","app.kubernetes.io/part-of":"infrared"}}}],"ports":[{"port":8080,"protocol":"TCP"},{"port":8888,"protocol":"TCP"}]}' ] \
   && [ "$(d3_diff "$work/fence" "$work/media-fence")" = "$(words "${want_media//demo-pl/demo-fn} components/postgres/fence.yaml")" ] \
-  && ok "media-fence: the stores' fence admits Infrared's API's pods to the S3 gateway's 8333, and only with the bucket media" \
+  && ok "media-fence: the stores' fence admits Infrared's API's pods to the volume servers' 8080 and the filer's 8888, and to the S3 gateway's 8333 only with the bucket media" \
   || bad "media-fence: the API's door in the stores' fence is wrong: $(api_in "$work/media-fence/components/postgres/fence.yaml")"
 # Under mutual TLS the Job seaweedfs-buckets makes it, as it makes the others.
 yq -p json -o json '. + {"MediaStore": "both"}' "$work/stores-sec.json" >"$work/media-sec.json"

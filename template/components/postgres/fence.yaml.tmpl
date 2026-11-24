@@ -66,10 +66,12 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-[[- if .MediaStore ]]
-    # Infrared's API, to SeaweedFS's S3 gateway: its videos and pictures in the
-    # bucket media, and the storage views' listing (the Infrared chart's
-    # summaryvideo.store, infrared-docs-internal ADR 0087 D4).
+    # Infrared's API: the Storage tab on Usage (rollout flag storageUsage,
+    # workspace TODO 681) reads each volume server's /status on 8080 and the
+    # filer on 8888, the ports their pods listen on.[[ if .MediaStore ]] And SeaweedFS's S3
+    # gateway: its videos and pictures in the bucket media, and the storage
+    # views' listing (the Infrared chart's summaryvideo.store,
+    # infrared-docs-internal ADR 0087 D4).[[ end ]]
     - from:
         - namespaceSelector:
             matchLabels:
@@ -79,6 +81,11 @@ spec:
               app.kubernetes.io/part-of: infrared
               app.kubernetes.io/component: api
       ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8888
+[[- if .MediaStore ]]
         - protocol: TCP
           port: 8333
 [[- end ]]
