@@ -306,6 +306,22 @@ spec:
                 - receiver: none
                   matchers:
                     - severity=~"info|none"
+                # A build's pods in an org's builds namespace, builds-<org>:
+                # kpack's pod for a build that failed stays in Init:Error, and
+                # the chart's KubeContainerWaiting and KubePodNotReady fire on
+                # it until the pod is cleaned up (on saas, 12 KubeContainerWaiting
+                # Incidents in the two weeks to 2026-11-24, the open one seven
+                # failed build pods in builds-emislo91-default). The Build
+                # already reports its failure to the org, and nothing about the
+                # pod asks anything of the platform's people. Routed here, not by
+                # the rule's expression: the chart's sync job fetches that from
+                # kube-prometheus's main branch at every sync, and an expression
+                # set here would stop following it. Every other namespace's
+                # pods still alert.
+                - receiver: none
+                  matchers:
+                    - alertname=~"KubeContainerWaiting|KubePodNotReady"
+                    - namespace=~"builds-.*"
             receivers:
               - name: infrared-platform
                 webhook_configs:
@@ -634,6 +650,31 @@ spec:
             # above bound it; TooHighChurnRate, over 5 minutes, stays.
             TooHighChurnRate24h:
               enabled: false
+            # Rules that fired and resolved within minutes, many times over:
+            # on saas, in the two weeks to 2026-11-24, NodeSystemSaturation
+            # opened 18 Incidents (median 5 minutes open), TooManyRemoteWriteErrors
+            # 12 (median 10), TooManyLogs 14 (median 29) and ServiceDown 3
+            # (median 4), none needing anyone by the time it was read. The
+            # chart's sync job takes a rule's for from spec.for here (its
+            # mergeRule, chart 0.95.0, sync-job v0.0.17) over upstream's: 15m
+            # for the first three and 2m for ServiceDown. A condition must
+            # now hold twice as long (ServiceDown a quarter of an hour, past a
+            # rolling restart) before it is an Incident. Real saturation, a
+            # store refusing writes or a component down still alerts, later;
+            # InfraredMetricsStoreDown (3m, below) still catches the store
+            # down, and the store's own disk and memory alerts are untouched.
+            NodeSystemSaturation:
+              spec:
+                for: 30m
+            TooManyRemoteWriteErrors:
+              spec:
+                for: 30m
+            TooManyLogs:
+              spec:
+                for: 45m
+            ServiceDown:
+              spec:
+                for: 15m
 [[- if eq .Cloud "gcp" ]]
           # The chart turns off the API server's other rule groups with its
           # scrape (off on GKE, above), but not this one.
@@ -1061,7 +1102,10 @@ spec:
                   # target's (job, instance, namespace, service, pod).
                   honorLabels: true
           # The install's own alerts (infrared-docs-internal ADR 0069 T9): the
-          # API's and the operator's metrics targets down for 3 minutes, the
+          # API's and the operator's metrics targets down for 10 minutes (3
+          # until 2026-11-24: on saas they opened 8 Incidents in two weeks, a
+          # median of 5 minutes each, the pods restarting in a release; a
+          # rollout takes a few minutes, a component really down stays down), the
           # operator failing reconciles for 15 minutes, the store's own target
           # down[[ if .Telemetry.URL ]], and a remote write of this vmagent (the plane's, or
           # VMSingle's own) refused for 15 minutes[[ end ]]. Each carries severity and
@@ -1082,20 +1126,20 @@ spec:
                   rules:
                     - alert: InfraredAPIDown
                       expr: max(up{job="infrared-api", platform="[[ $platform ]]"}) == 0 or absent(up{job="infrared-api", platform="[[ $platform ]]"})
-                      for: 3m
+                      for: 10m
                       labels:
                         severity: critical
                         infrared_platform: "true"
                       annotations:
-                        summary: Infrared's API has not answered its metrics scrape for 3 minutes.
+                        summary: Infrared's API has not answered its metrics scrape for 10 minutes.
                     - alert: InfraredOperatorDown
                       expr: max(up{job="infrared-operator", platform="[[ $platform ]]"}) == 0 or absent(up{job="infrared-operator", platform="[[ $platform ]]"})
-                      for: 3m
+                      for: 10m
                       labels:
                         severity: critical
                         infrared_platform: "true"
                       annotations:
-                        summary: Infrared's operator has not answered its metrics scrape for 3 minutes.
+                        summary: Infrared's operator has not answered its metrics scrape for 10 minutes.
                     - alert: InfraredOperatorReconcileErrors
                       expr: sum by (controller) (rate(controller_runtime_reconcile_total{job="infrared-operator", platform="[[ $platform ]]", result="error"}[5m])) > 0
                       for: 15m

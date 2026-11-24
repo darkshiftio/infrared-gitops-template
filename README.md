@@ -1692,7 +1692,7 @@ metrics' copy's `MetricsBackupStale` and `MetricsBackupNeverRan` carry
 
 | Alert | When | Severity |
 |---|---|---|
-| `InfraredAPIDown` | `up` of the job `infrared-api` (the scrape `infrared-metrics`) is 0 or absent for 3 minutes | critical |
+| `InfraredAPIDown` | `up` of the job `infrared-api` (the scrape `infrared-metrics`) is 0 or absent for 10 minutes, past a release's rolling restart | critical |
 | `InfraredOperatorDown` | the same for the job `infrared-operator` | critical |
 | `InfraredOperatorReconcileErrors` | the operator's `controller_runtime_reconcile_total{result="error"}` rate is above 0 for 15 minutes, by controller | warning |
 | `InfraredMetricsStoreDown` | `up` of this install's VMSingle's own scrape (the job `vmsingle-victoria-metrics-k8s-stack`, alone: another VMSingle beside it, such as the home's telemetry store, alerts on its own) is 0 or absent for 3 minutes | critical |
@@ -1700,6 +1700,14 @@ metrics' copy's `MetricsBackupStale` and `MetricsBackupNeverRan` carry
 
 The chart's own `ServiceDown` and `TargetDown` fire beside these for the
 stack's components, and take the same route.
+
+Of the chart's own rules, `TooHighChurnRate24h` is off, and four wait longer
+than upstream before firing (`defaultRules.rules.<alert>.spec.for`, which the
+chart's sync job puts over upstream's): `NodeSystemSaturation` and
+`TooManyRemoteWriteErrors` 30 minutes, `TooManyLogs` 45 and `ServiceDown` 15.
+`KubeContainerWaiting` and `KubePodNotReady` on a pod in an org's builds
+namespace (`builds-<org>`) go to the receiver `none`: a failed build's pod
+stays in `Init:Error`, and the Build reports the failure to the org.
 
 ### VMSingle's limits
 
