@@ -1907,6 +1907,23 @@ Secret `vmuser-grafana` with its VMUser. To rotate Grafana's password, delete
 that Secret: the operator makes a new one, and Grafana's pod takes it when it
 restarts.
 
+One check runs against a cluster, never from CI, once a stage has settled. It
+reads the stage from the operator (`INFRARED_METRICS_AUTH`, and node-exporter's
+proxy from `INFRARED_NODE_EXPORTER_AUTH`) and holds the install to what that
+stage makes:
+
+```bash
+scripts/metrics-auth-check.sh <context>    # step 5, ADR 0066 D11: from a probe pod in a namespace of its own, no answer from the door, none from the stores, vmagents, vmalert, Alertmanager or kube-state-metrics at enforced, and node-exporter plain HTTP 400 and HTTPS 401; through the API server's proxy, the door 401 and the store 200
+```
+
+It also reads the stage's objects (the VMAuth and its users, `metrics-door`,
+Grafana's datasources, the API's and the operator's URL and token file from
+`clients` on, the six policies at `enforced`, kube-rbac-proxy on every node)
+and the store's own figures: node-exporter up on every node and every vmauth
+replica up. Before `enforced` it expects the back doors to answer, since the
+stage leaves them open. Its probe pod runs under Pod Security `restricted`
+with no token, and goes with its namespace at the end unless `KEEP=1`.
+
 ### The stores' own security
 
 With `.StoresSecurity` (the Infrared chart's `tenancy.storesSecurity.enabled`;
