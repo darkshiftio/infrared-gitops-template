@@ -8,11 +8,13 @@
 # tenancy.registryPulls.enabled), this passes when:
 #
 #   1. Zot's config (registry/zot-config, which the operator writes) reads for
-#      no one under "**", lets every signed-in user read platform/**, and gives
-#      each org's path to its own users alone: its user, and its pull user,
-#      <org>_pull, which reads there and does nothing else; no rule lets a
-#      user that only reads (<org>_pull, platform_reader) do more (workspace
-#      TODO 789);
+#      no one under "**" but storage_reader, lets every signed-in user read
+#      platform/**, and gives each org's path to its own users alone: its
+#      user, and its pull user, <org>_pull, which reads there and does nothing
+#      else; storage_reader, infrared-api's, reads in every rule and does
+#      nothing else; no rule lets a user that only reads (<org>_pull,
+#      platform_reader, storage_reader) do more, and the adminPolicy names
+#      none of them (workspace TODO 789, 790);
 #   2. through a port-forward, an anonymous read of <org>'s image is refused
 #      (401), <another org>'s user reading it is refused (403), and <org>'s
 #      own user reads it;
@@ -31,13 +33,22 @@
 #      kpack/registry-pull's (platform_reader), under the builder's, is refused
 #      (403), and each reads its image (200). The push is the operator's probe:
 #      a manifest PUT of a media type Zot refuses with 415 once it has let the
-#      push through, so nothing is stored either way.
+#      push through, so nothing is stored either way;
+#   7. infrared-api's reader (workspace TODO 790): the Secret
+#      registry-storage-reader in Infrared's namespace signs in as
+#      storage_reader, whose catalog is the admin's, infrared's, every page of
+#      it; a push as it under <org>'s image's repository, the builder's and a
+#      path no rule names is refused (403), and it reads both images (200).
+#      Its deletes are not tried on a live registry: step 1 shows no rule lets
+#      it delete.
 #
 # <org>'s image is the one a running pod of its zones runs, and the builder the
 # ClusterBuilder infrared-builder's latest. The orgs' passwords go from
-# builds/registry-push-<org>, and the logins that only read from zot-pull and
-# kpack/registry-pull, to curl on stdin, through the port-forward, and are
-# never printed. Its pods are removed unless KEEP=1.
+# builds/registry-push-<org>, the logins that only read from zot-pull,
+# kpack/registry-pull and registry-storage-reader, and infrared's from
+# registry-identities, to curl on stdin, through the port-forward, and are
+# never printed. Its pods are removed unless KEEP=1. INFRARED_NS is Infrared's
+# namespace, infrared unless set.
 # Runs against a cluster, never from CI: the hosted plane after the install,
 # before a tenant, with the owner's go-ahead.
 # Needs: kubectl, jq, curl. Reads the ClusterBuilder infrared-builder. Applies
@@ -106,21 +117,29 @@ cfg="$(k -n registry get secret zot-config -o jsonpath='{.data.config\.json}' | 
 rules() { jq -c -S ".http.accessControl.repositories[\"$1\"] | {anonymousPolicy, defaultPolicy, users: [.policies[]?.users[]]}" <<<"$cfg"; }
 # may <pattern> <user>: what <pattern>'s rule lets <user> do, sorted and comma-joined.
 may() { jq -r --arg p "$1" --arg u "$2" '[.http.accessControl.repositories[$p].policies[]? | select(.users | index($u)) | .actions[]] | unique | join(",")' <<<"$cfg"; }
-[ "$(rules '**')" = '{"anonymousPolicy":[],"defaultPolicy":[],"users":[]}' ] &&
-  pass '"**" reads for no one' || fail "\"**\" is $(rules '**'): the registry still reads for others (tenancy.registryPulls off?)"
-[ "$(rules 'platform/**')" = '{"anonymousPolicy":[],"defaultPolicy":["read"],"users":["platform"]}' ] &&
+[ "$(rules '**')" = '{"anonymousPolicy":[],"defaultPolicy":[],"users":["storage_reader"]}' ] &&
+  pass '"**" reads for no one but storage_reader' ||
+  fail "\"**\" is $(rules '**'): the registry still reads for others (tenancy.registryPulls off?), or not for storage_reader"
+[ "$(rules 'platform/**')" = '{"anonymousPolicy":[],"defaultPolicy":["read"],"users":["platform","storage_reader"]}' ] &&
   pass "platform/** reads for every signed-in user, and platform alone writes" || fail "platform/** is $(rules 'platform/**')"
 for o in "$ORG" "$OTHER"; do
-  [ "$(rules "$o/**")" = "{\"anonymousPolicy\":[],\"defaultPolicy\":[],\"users\":[\"$o\",\"${o}_pull\"]}" ] &&
-    pass "$o/** is $o's and ${o}_pull's alone" || fail "$o/** is $(rules "$o/**")"
+  [ "$(rules "$o/**")" = "{\"anonymousPolicy\":[],\"defaultPolicy\":[],\"users\":[\"$o\",\"${o}_pull\",\"storage_reader\"]}" ] &&
+    pass "$o/** is $o's and ${o}_pull's alone, and storage_reader's" || fail "$o/** is $(rules "$o/**")"
   [ "$(may "$o/**" "${o}_pull")" = read ] &&
     pass "${o}_pull reads $o/** and does nothing else there" || fail "${o}_pull may '$(may "$o/**" "${o}_pull")' under $o/**"
 done
+# storage_reader reads in every rule, and does nothing else in any (workspace TODO 790): its catalog is the admin's.
+alone="$(jq -r '[.http.accessControl.repositories | to_entries[]
+  | select([.value.policies[]? | select(.users | index("storage_reader")) | .actions[]] | unique != ["read"]) | .key] | join(" ")' <<<"$cfg")"
+[ -z "$alone" ] && pass "storage_reader reads in every rule, and does nothing else there" ||
+  fail "storage_reader does not read alone in: $alone"
 # No rule lets a user that only reads do more than read, and the adminPolicy names none.
 over="$(jq -r '[.http.accessControl.repositories | to_entries[] | .key as $k | .value.policies[]?
-  | select(any(.users[]; endswith("_pull") or . == "platform_reader")) | select(any(.actions[]; . != "read")) | $k] | unique | join(" ")' <<<"$cfg")"
-admin="$(jq -r '[.http.accessControl.adminPolicy.users[]? | select(endswith("_pull") or . == "platform_reader")] | join(" ")' <<<"$cfg")"
-[ -z "$over$admin" ] && pass "no rule lets a user that only reads do more than read" ||
+  | select(any(.users[]; endswith("_pull") or . == "platform_reader" or . == "storage_reader")) | select(any(.actions[]; . != "read")) | $k]
+  | unique | join(" ")' <<<"$cfg")"
+admin="$(jq -r '[.http.accessControl.adminPolicy.users[]? | select(endswith("_pull") or . == "platform_reader" or . == "storage_reader")]
+  | join(" ")' <<<"$cfg")"
+[ -z "$over$admin" ] && pass "no rule lets a user that only reads do more than read, and the adminPolicy names none" ||
   fail "a user that only reads may do more under: ${over:-none}; adminPolicy: ${admin:-none}"
 
 log "2. reads, through a port-forward"
@@ -291,6 +310,76 @@ case "$builder" in
     ;;
   *) fail "the ClusterBuilder infrared-builder's latest image is '$builder', not one under $REG/platform/ by digest" ;;
 esac
+
+log "7. infrared-api's reader"
+api_ns="${INFRARED_NS:-infrared}"
+# secret_field <namespace> <secret> <key>: a key of a Secret, decoded; the script prints a username alone.
+secret_field() { k -n "$1" get secret "$2" -o "jsonpath={.data.$3}" 2>/dev/null | base64 -d 2>/dev/null || true; }
+reader_type="$(k -n "$api_ns" get secret registry-storage-reader -o jsonpath='{.type}' 2>/dev/null || true)"
+reader_user="$(secret_field "$api_ns" registry-storage-reader username)"
+[ "$reader_type" = kubernetes.io/basic-auth ] && [ "$reader_user" = storage_reader ] &&
+  pass "$api_ns/registry-storage-reader signs in as storage_reader" ||
+  fail "$api_ns/registry-storage-reader is '${reader_type:-not there}', signing in as '$reader_user', not storage_reader (the operator writes it once Zot knows storage_reader)"
+# curl_cfg <user> <password>: curl's config line for a login, which goes to curl on stdin.
+curl_cfg() { printf 'user = "%s:%s"\n' "$1" "$2"; }
+reader_cfg="$(curl_cfg "$reader_user" "$(secret_field "$api_ns" registry-storage-reader password)")"
+admin_cfg="$(curl_cfg infrared "$(secret_field "$api_ns" registry-identities infrared)")"
+# catalog <curl config line>: every repository the login reads, every page of the catalog, one a line and sorted;
+# on any answer but 200, that answer's status, and it fails.
+catalog() {
+  local next="/v2/_catalog?n=1000" body headers code repos=""
+  body="$(mktemp)"
+  headers="$(mktemp)"
+  while [ -n "$next" ]; do
+    code="$(printf '%s\n' "$1" | curl -s -o "$body" -D "$headers" -w '%{http_code}' -K - "http://127.0.0.1:$port$next")"
+    if [ "$code" != 200 ]; then
+      rm -f "$body" "$headers"
+      echo "$code"
+      return 1
+    fi
+    repos="$repos$(jq -r '.repositories[]?' "$body")"$'\n'
+    next="$(tr -d '\r' <"$headers" | sed -n 's/^[Ll]ink: *<\([^>]*\)>; *rel="next".*/\1/p')"
+  done
+  rm -f "$body" "$headers"
+  printf '%s' "$repos" | sed '/^$/d' | sort
+}
+if ! admin_repos="$(catalog "$admin_cfg")"; then
+  fail "the admin's catalog answered $admin_repos"
+elif ! reader_repos="$(catalog "$reader_cfg")"; then
+  fail "storage_reader's catalog answered $reader_repos (401: Zot does not take its login; 403: its rules give it no read)"
+else
+  if [ "$admin_repos" != "$reader_repos" ]; then
+    # A push between the two reads changes the admin's: read both again once.
+    admin_repos="$(catalog "$admin_cfg")" || true
+    reader_repos="$(catalog "$reader_cfg")" || true
+  fi
+  if [ -n "$admin_repos" ] && [ "$admin_repos" = "$reader_repos" ]; then
+    pass "storage_reader's catalog is the admin's: $(grep -c . <<<"$admin_repos") repositories"
+  else
+    fail "storage_reader's catalog is not the admin's. The admin's alone: $(comm -23 <(echo "$admin_repos") <(echo "$reader_repos") | tr '\n' ' ')storage_reader's alone: $(comm -13 <(echo "$admin_repos") <(echo "$reader_repos") | tr '\n' ' ')"
+  fi
+fi
+# reader_probe <PUT or HEAD> <repository> <reference>: what Zot answers storage_reader, as probe_as asks.
+reader_probe() {
+  local url="http://127.0.0.1:$port/v2/$2/manifests/$3"
+  if [ "$1" = PUT ]; then
+    printf '%s\n' "$reader_cfg" | curl -s -o /dev/null -w '%{http_code}' -X PUT \
+      -H 'Content-Type: application/vnd.darkshift.infrared.probe' --data-binary '{}' -K - "$url"
+  else
+    printf '%s\n' "$reader_cfg" | curl -s -o /dev/null -w '%{http_code}' -I -H "Accept: $ACCEPT" -K - "$url"
+  fi
+}
+for r in "$repo" ${brepo:+"$brepo"} "registry-pulls-check-$stamp/none"; do
+  got="$(reader_probe PUT "$r" registry-pulls-check)"
+  [ "$got" = 403 ] && pass "a push as storage_reader under $r is refused (403)" ||
+    fail "a push as storage_reader under $r answered $got (415: Zot let it through)"
+done
+got="$(reader_probe HEAD "$repo" "$digest")"
+[ "$got" = 200 ] && pass "storage_reader reads $repo" || fail "storage_reader reading $repo answered $got"
+if [ -n "${brepo:-}" ]; then
+  got="$(reader_probe HEAD "$brepo" "${builder##*@}")"
+  [ "$got" = 200 ] && pass "storage_reader reads $brepo" || fail "storage_reader reading $brepo answered $got"
+fi
 
 if [ "$fails" -ne 0 ]; then
   echo "registry-pulls-check: FAILED ($fails check(s))" >&2

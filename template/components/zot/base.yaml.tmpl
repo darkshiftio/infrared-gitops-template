@@ -14,8 +14,10 @@
 # seconds of a change, without a restart. Neither Secret is in this repo.
 [[- if .RegistryPulls ]]
 # Pulling by identity, the users that only read follow them in htpasswd:
-# platform_reader, and each organization's pull user, <org>_pull, which the
-# operator adds to each rule of the organization's, reading alone.
+# platform_reader; storage_reader, which the operator adds to every rule, this
+# file's and the organizations', reading alone; and each organization's pull
+# user, <org>_pull, which it adds to each rule of the organization's, reading
+# alone.
 [[- end ]]
 #
 [[- if $layout ]]
@@ -60,18 +62,22 @@
 #            tenancy.registryPulls, infrared-docs-internal ADR 0066 D3). Under
 #            each organization's path its own user reads and writes, and its
 #            pull user, <org>_pull, only reads; the operator's rule for it
-#            reads for others as "**" does, which is for no one. Every
-#            signed-in user reads platform/: kpack's builder, which each
-#            organization's builds run as its own user.
+#            reads for others as "**" does, which is for no one but
+#            storage_reader. Every signed-in user reads platform/: kpack's
+#            builder, which each organization's builds run as its own user.
 #            A zone's pods pull as their organization's pull user: the
 #            operator writes the Secret zot-pull into each zone and lists it
 #            on its default ServiceAccount, as the organization's own user
 #            until Zot knows the pull user. platform_reader, whose login is
 #            the Secret kpack/registry-pull, reads platform/ and writes
-#            nowhere: for what only reads the builder. Only user platform
-#            writes under platform/, and user infrared, the operator, may read
-#            and delete anywhere. The longest matching path wins, so every
-#            rule says who reads.
+#            nowhere: for what only reads the builder. storage_reader, whose
+#            login is the Secret [[ .InfraredNamespace ]]/registry-storage-reader,
+#            reads every repository and writes nowhere: infrared-api's Storage
+#            page lists the whole registry as it. The operator names it,
+#            reading alone, in every rule, and never in adminPolicy. Only user
+#            platform writes under platform/, and user infrared, the operator,
+#            may read and delete anywhere. The longest matching path wins, so
+#            every rule says who reads.
 [[- else ]]
 #   rules    anyone in the cluster may pull anything, with or without a login.
 #            Only user platform writes under platform/, and each organization's
