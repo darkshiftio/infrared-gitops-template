@@ -9,30 +9,42 @@
 #
 #   1. Zot's config (registry/zot-config, which the operator writes) reads for
 #      no one under "**", lets every signed-in user read platform/**, and gives
-#      each org's path to its own user alone;
+#      each org's path to its own users alone: its user, and its pull user,
+#      <org>_pull, which reads there and does nothing else; no rule lets a
+#      user that only reads (<org>_pull, platform_reader) do more (workspace
+#      TODO 789);
 #   2. through a port-forward, an anonymous read of <org>'s image is refused
 #      (401), <another org>'s user reading it is refused (403), and <org>'s
 #      own user reads it;
 #   3. every zone of <org> on this cluster holds the Secret zot-pull, of <org>,
-#      listed on its default ServiceAccount, and no zone of <another org> holds
-#      <org>'s;
+#      signing in as <org>_pull and listed on its default ServiceAccount, and no
+#      zone of <another org> holds <org>'s;
 #   4. a pod in <org>'s zone runs <org>'s image with imagePullPolicy Always,
 #      and a pod in <another org>'s zone naming it cannot pull it; nor, on the
 #      node that holds it already, with IfNotPresent (the kubelet asks the
 #      registry with the pod's own credential before it runs an image another
 #      credential pulled: KubeletEnsureSecretPulledImages);
 #   5. no pod in any zone is stuck pulling the registry's image without
-#      zot-pull, as a pod made before its zone's account listed it would be.
+#      zot-pull, as a pod made before its zone's account listed it would be;
+#   6. the logins that only read push nowhere (workspace TODO 789): a push as
+#      zot-pull's user, under <org>'s image's repository, and as
+#      kpack/registry-pull's (platform_reader), under the builder's, is refused
+#      (403), and each reads its image (200). The push is the operator's probe:
+#      a manifest PUT of a media type Zot refuses with 415 once it has let the
+#      push through, so nothing is stored either way.
 #
-# <org>'s image is the one a running pod of its zones runs. The orgs' passwords
-# go from builds/registry-push-<org> to curl on stdin, through the
-# port-forward, and are never printed. Its pods are removed unless KEEP=1.
+# <org>'s image is the one a running pod of its zones runs, and the builder the
+# ClusterBuilder infrared-builder's latest. The orgs' passwords go from
+# builds/registry-push-<org>, and the logins that only read from zot-pull and
+# kpack/registry-pull, to curl on stdin, through the port-forward, and are
+# never printed. Its pods are removed unless KEEP=1.
 # Runs against a cluster, never from CI: the hosted plane after the install,
 # before a tenant, with the owner's go-ahead.
-# Needs: kubectl, jq, curl. Applies pods in the two orgs' zones only, on the
-# tenants' placement (nodeSelector, tolerations, runtimeClassName) where the
-# install's admission policy infrared-tenancy-pods demands it (ADR 0066 D5),
-# read from the operator's INFRARED_TENANT_PODS; none on an install without.
+# Needs: kubectl, jq, curl. Reads the ClusterBuilder infrared-builder. Applies
+# pods in the two orgs' zones only, on the tenants' placement (nodeSelector,
+# tolerations, runtimeClassName) where the install's admission policy
+# infrared-tenancy-pods demands it (ADR 0066 D5), read from the operator's
+# INFRARED_TENANT_PODS; none on an install without.
 # =============================================================================
 set -euo pipefail
 CTX="${1:?usage: scripts/registry-pulls-check.sh <kube context> <org> <another org>}"
@@ -92,14 +104,24 @@ other_zones="$(zones "$OTHER")"
 log "1. Zot's rules"
 cfg="$(k -n registry get secret zot-config -o jsonpath='{.data.config\.json}' | base64 -d)"
 rules() { jq -c -S ".http.accessControl.repositories[\"$1\"] | {anonymousPolicy, defaultPolicy, users: [.policies[]?.users[]]}" <<<"$cfg"; }
+# may <pattern> <user>: what <pattern>'s rule lets <user> do, sorted and comma-joined.
+may() { jq -r --arg p "$1" --arg u "$2" '[.http.accessControl.repositories[$p].policies[]? | select(.users | index($u)) | .actions[]] | unique | join(",")' <<<"$cfg"; }
 [ "$(rules '**')" = '{"anonymousPolicy":[],"defaultPolicy":[],"users":[]}' ] &&
   pass '"**" reads for no one' || fail "\"**\" is $(rules '**'): the registry still reads for others (tenancy.registryPulls off?)"
 [ "$(rules 'platform/**')" = '{"anonymousPolicy":[],"defaultPolicy":["read"],"users":["platform"]}' ] &&
   pass "platform/** reads for every signed-in user, and platform alone writes" || fail "platform/** is $(rules 'platform/**')"
 for o in "$ORG" "$OTHER"; do
-  [ "$(rules "$o/**")" = "{\"anonymousPolicy\":[],\"defaultPolicy\":[],\"users\":[\"$o\"]}" ] &&
-    pass "$o/** is $o's alone" || fail "$o/** is $(rules "$o/**")"
+  [ "$(rules "$o/**")" = "{\"anonymousPolicy\":[],\"defaultPolicy\":[],\"users\":[\"$o\",\"${o}_pull\"]}" ] &&
+    pass "$o/** is $o's and ${o}_pull's alone" || fail "$o/** is $(rules "$o/**")"
+  [ "$(may "$o/**" "${o}_pull")" = read ] &&
+    pass "${o}_pull reads $o/** and does nothing else there" || fail "${o}_pull may '$(may "$o/**" "${o}_pull")' under $o/**"
 done
+# No rule lets a user that only reads do more than read, and the adminPolicy names none.
+over="$(jq -r '[.http.accessControl.repositories | to_entries[] | .key as $k | .value.policies[]?
+  | select(any(.users[]; endswith("_pull") or . == "platform_reader")) | select(any(.actions[]; . != "read")) | $k] | unique | join(" ")' <<<"$cfg")"
+admin="$(jq -r '[.http.accessControl.adminPolicy.users[]? | select(endswith("_pull") or . == "platform_reader")] | join(" ")' <<<"$cfg")"
+[ -z "$over$admin" ] && pass "no rule lets a user that only reads do more than read" ||
+  fail "a user that only reads may do more under: ${over:-none}; adminPolicy: ${admin:-none}"
 
 log "2. reads, through a port-forward"
 # The image a running pod of the org's zones runs, and the node it is on.
@@ -137,9 +159,18 @@ read_as() {
 [ "$(read_as "$ORG")" = 200 ] && pass "$ORG's user reads $repo" || fail "$ORG's user reading $repo answered $(read_as "$ORG")"
 
 log "3. the zones' pull credentials"
+# login <namespace> <secret> <field>: a field, username or password, of the
+# Secret's one registry login; the script prints a username alone.
+login() {
+  k -n "$1" get secret "$2" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d |
+    jq -r --arg f "$3" '[.auths[]][0][$f] // empty' 2>/dev/null || true
+}
 for z in $org_zones; do
   [ "$(k -n "$z" get secret zot-pull -o jsonpath='{.metadata.labels.infrared\.darkshift\.io/org}' 2>/dev/null)" = "$ORG" ] &&
     pass "$z holds $ORG's zot-pull" || fail "$z holds no zot-pull of $ORG"
+  user="$(login "$z" zot-pull username)"
+  [ "$user" = "${ORG}_pull" ] && pass "$z's zot-pull signs in as ${ORG}_pull" ||
+    fail "$z's zot-pull signs in as '$user', not ${ORG}_pull (the operator swaps it once Zot knows ${ORG}_pull)"
   k -n "$z" get serviceaccount default -o json | jq -e '[.imagePullSecrets[]?.name] | index("zot-pull")' >/dev/null &&
     pass "$z's default ServiceAccount lists it" || fail "$z's default ServiceAccount does not list zot-pull"
 done
@@ -218,6 +249,48 @@ for z in $(k get namespaces -l infrared.darkshift.io/zone -o jsonpath='{.items[*
     | " " + .metadata.namespace + "/" + .metadata.name')"
 done
 [ -z "$stuck" ] && pass "none" || fail "stuck without zot-pull, delete each and its controller makes it again with it:$stuck"
+
+log "6. the logins that only read"
+# probe_as <namespace> <secret> <PUT or HEAD> <repository> <reference>: what Zot
+# answers the Secret's login. PUT is the operator's push probe, a manifest of a
+# media type Zot refuses with 415 once it has let the push through, so nothing
+# is stored; HEAD is a manifest read.
+probe_as() {
+  local user pw url="http://127.0.0.1:$port/v2/$4/manifests/$5"
+  user="$(login "$1" "$2" username)"
+  pw="$(login "$1" "$2" password)"
+  if [ "$3" = PUT ]; then
+    printf 'user = "%s:%s"\n' "$user" "$pw" | curl -s -o /dev/null -w '%{http_code}' -X PUT \
+      -H 'Content-Type: application/vnd.darkshift.infrared.probe' --data-binary '{}' -K - "$url"
+  else
+    printf 'user = "%s:%s"\n' "$user" "$pw" | curl -s -o /dev/null -w '%{http_code}' -I -H "Accept: $ACCEPT" -K - "$url"
+  fi
+}
+zone="${org_zones%% *}"
+user="$(login "$zone" zot-pull username)"
+got="$(probe_as "$zone" zot-pull PUT "$repo" registry-pulls-check)"
+[ "$got" = 403 ] && pass "a push as $zone's zot-pull user, $user, under $repo is refused (403)" ||
+  fail "a push as $zone's zot-pull user, $user, under $repo answered $got (415: Zot let it through)"
+got="$(probe_as "$zone" zot-pull HEAD "$repo" "$digest")"
+[ "$got" = 200 ] && pass "$user reads $repo" || fail "$user reading $repo answered $got"
+builder="$(k get clusterbuilder infrared-builder -o jsonpath='{.status.latestImage}' 2>/dev/null || true)"
+case "$builder" in
+  "$REG"/platform/*@sha256:*)
+    # <registry>/platform/...kpack-builder:<tag>@sha256:<digest>: the repository alone.
+    brepo="${builder#"$REG"/}"
+    brepo="${brepo%@*}"
+    brepo="${brepo%:*}"
+    user="$(login kpack registry-pull username)"
+    [ "$user" = platform_reader ] && pass "kpack/registry-pull signs in as platform_reader" ||
+      fail "kpack/registry-pull signs in as '$user', not platform_reader"
+    got="$(probe_as kpack registry-pull PUT "$brepo" registry-pulls-check)"
+    [ "$got" = 403 ] && pass "a push as kpack/registry-pull's user under $brepo is refused (403)" ||
+      fail "a push as kpack/registry-pull's user under $brepo answered $got (415: Zot let it through)"
+    got="$(probe_as kpack registry-pull HEAD "$brepo" "${builder##*@}")"
+    [ "$got" = 200 ] && pass "platform_reader reads $brepo" || fail "platform_reader reading $brepo answered $got"
+    ;;
+  *) fail "the ClusterBuilder infrared-builder's latest image is '$builder', not one under $REG/platform/ by digest" ;;
+esac
 
 if [ "$fails" -ne 0 ]; then
   echo "registry-pulls-check: FAILED ($fails check(s))" >&2
