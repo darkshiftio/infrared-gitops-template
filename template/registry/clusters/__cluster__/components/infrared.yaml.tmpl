@@ -256,7 +256,7 @@ spec:
 [[- if .RegistryPulls ]]
           # The registry by identity (INFRARED_REGISTRY_PULLS, ADR 0066 D3):
           # zot-base reads for no one without a login, and each zone pulls as
-          # its org's own registry user.
+          # its org's pull user, which only reads.
 [[- end ]]
 [[- if .StoresSecurity ]]
           # The stores' own security (INFRARED_STORES_SECURITY, ADR 0066 D3):

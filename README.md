@@ -87,7 +87,7 @@ Every `.tmpl` is executed against this value (JSON names equal Go names):
 | `.OIDC` | absent or `false`, `true` | the operator's `INFRARED_OIDC`, the Infrared chart's `oidc.enabled`: Infrared is the OpenID Connect provider of the install's own tools (infrared-docs-internal ADR 0053). With `.GrafanaURL` and `.InfraredHost`, Grafana signs people in through Infrared (see "Grafana's sign-in through Infrared"); without either, it changes nothing |
 | `.GrafanaURL` | absent or ``, `https://grafana.infrared-cp-google.private.darkshift.io` | the operator's `INFRARED_OIDC_GRAFANA_URL`, the chart's `oidc.grafanaURL`: Grafana's address in a browser, http(s) with no trailing slash. Grafana's `root_url` is it with a slash, and its redirect URI `<GrafanaURL>/login/generic_oauth`, which infrared-api matches exactly |
 | `.NetworkPolicies` | absent or `false`, `true` | the operator's `INFRARED_NETWORK_POLICIES`, the Infrared chart's `tenancy.networkPolicies.enabled`: the network fence (infrared-docs-internal ADR 0066 D1). Every platform namespace a component makes gets its ingress NetworkPolicy, Argo CD's own policies admit no org's namespace, and the `infrared` Application carries the setting (see "The network fence"); the operator fences each org's namespaces itself |
-| `.RegistryPulls` | absent or `false`, `true` | the operator's `INFRARED_REGISTRY_PULLS`, the Infrared chart's `tenancy.registryPulls.enabled`: the registry by identity (ADR 0066 D3). `zot-base` reads for no one without a login, and every signed-in user reads `platform/`; the operator gives each zone its org's own pull credential, and the `infrared` Application carries the setting (see "The registry") |
+| `.RegistryPulls` | absent or `false`, `true` | the operator's `INFRARED_REGISTRY_PULLS`, the Infrared chart's `tenancy.registryPulls.enabled`: the registry by identity (ADR 0066 D3). `zot-base` reads for no one without a login, and every signed-in user reads `platform/`; the operator gives each zone its org's pull credential, a user that only reads, and the `infrared` Application carries the setting (see "The registry") |
 | `.StoresSecurity` | absent or `false`, `true` | the operator's `INFRARED_STORES_SECURITY`, the Infrared chart's `tenancy.storesSecurity.enabled`: SeaweedFS under its own security (ADR 0066 D3), mutual TLS on gRPC from cert-manager and signed tokens on the filer's HTTP and on volume writes, the master's HTTP off; the `infrared` Application carries the setting (see "The stores' own security") |
 | `.TenantPods` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_PODS`, the Infrared chart's `tenancy.tenantPods` as `{"enabled":true,"placement":{...}}`: tenants' pods carry no Kubernetes token, and a zone's pods the install's placement (infrared-docs-internal ADR 0066 D4, D5). The operator does it; the `infrared` Application carries the setting (see "The rest of the tenancy"). `hack/render` refuses anything but one line of JSON with `"enabled":true` and `placement` |
 | `.TenantQuotas` | absent or `""`, one line of JSON | the operator's `INFRARED_TENANT_QUOTAS`, the chart's `tenancy.quotas` as `{"enabled":true,"zones":{...},"builds":{...}}`: a tenant org's quotas (ADR 0066 D4), which the `infrared` Application carries |
@@ -1022,8 +1022,8 @@ Zot's config and its users are split between the template and the operator:
 | Object | Written by | What |
 |---|---|---|
 | ConfigMap `registry/zot-base`, key `config.json` | the template | storage on S3, with no keys (Zot's S3 driver reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from its environment, the Secret `zot-s3`), garbage collection and the retention rules (`.RegistryRetention`; by default every hour, a blob an hour after its last use, untagged images after a day, every v-tag and each repository's ten newest tags kept), `compat: ["docker2s2"]` (Paketo's images are Docker schema 2, which Zot otherwise refuses), htpasswd at `/etc/zot-auth/htpasswd` and API keys, and the rules: anyone reads, the user `platform` writes under `platform/`, the user `infrared` reads and deletes anywhere |
-| Secret `registry/zot-config`, key `config.json` | the operator | `zot-base` with one rule per organization added under `http.accessControl.repositories` (`<org>/**`, user `<org>`), mounted at `/etc/zot` |
-| Secret `registry/zot-auth`, key `htpasswd` | the operator | the bcrypt hashes of `infrared`, `platform` and each organization's user, mounted at `/etc/zot-auth` |
+| Secret `registry/zot-config`, key `config.json` | the operator | `zot-base` with one rule per organization added under `http.accessControl.repositories` (`<org>/**`, user `<org>`; pulling by identity, its pull user `<org>_pull` reads in each rule of the organization's and does nothing else), mounted at `/etc/zot` |
+| Secret `registry/zot-auth`, key `htpasswd` | the operator | the bcrypt hashes of `infrared`, `platform` and each organization's user, and, pulling by identity, of the users that only read, `platform_reader` and each organization's `<org>_pull`, mounted at `/etc/zot-auth` |
 
 Zot rereads both Secrets within seconds of a change, without a restart: its
 watch also compares each file's identity, so a Secret volume's swap reaches it.
@@ -1047,15 +1047,18 @@ TODO 473) no one reads the registry without a login, so no pod pulls another
 org's images. In `zot-base`, `"**"` grants neither anonymous nor default read,
 and `platform/**` gives read to every signed-in user: kpack's builder, which
 each org's builds run as the org's own user. The operator's rule for each org
-reads for others as `"**"` does, so for no one, and only the org's user reads
-`<org>/`. Agent Substrate's atelet reads nothing here without a login (the
-anonymous read of `platform/substrate/` that its test actors had went with
-them at Substrate 1.0): on GKE it pulls an actor's image as the node does.
+reads for others as `"**"` does, so for no one, and only the org's own users
+read `<org>/`: its user, which writes there, and its pull user, `<org>_pull`,
+which only reads (workspace TODO 789). Agent Substrate's atelet reads nothing
+here without a login (the anonymous read of `platform/substrate/` that its test
+actors had went with them at Substrate 1.0): on GKE it pulls an actor's image as
+the node does.
 
 | Who pulls | With what |
 |---|---|
-| A zone's pods | The Secret `zot-pull`, the org's own user, which the operator writes into each of the org's zone namespaces on this cluster and lists on the namespace's `default` ServiceAccount: every pod made there without image pull secrets of its own pulls with it, a scaffolded zone's included. A pod that runs as another ServiceAccount, or names its own image pull secrets, lists `zot-pull` itself. |
+| A zone's pods | The Secret `zot-pull`, the org's pull user `<org>_pull`, which reads under `<org>/` and writes nowhere, so a zone cannot overwrite the org's images, its build cache or its evidence. The operator writes it into each of the org's zone namespaces on this cluster and lists it on the namespace's `default` ServiceAccount: every pod made there without image pull secrets of its own pulls with it, a scaffolded zone's included. A pod that runs as another ServiceAccount, or names its own image pull secrets, lists `zot-pull` itself. Until Zot knows the pull user, `zot-pull` signs in as the org's own user; the operator then rewrites the same Secret in place. |
 | A build's pods (`builds-<org>`, `builds`) | The org's push credential, as before: its builder ServiceAccount lists it among its image pull secrets, and it reads `platform/`. |
+| Anything that only reads kpack's builder | `kpack/registry-pull`, the user `platform_reader`, which reads `platform/` and writes nowhere. |
 | A publishing step | Its API key, the org's user, as before. Its agent holds no credential, so it reads nothing from the registry. |
 | atelet | Nothing here: Substrate 1.0 runs no image from this registry yet. |
 | The operator | `infrared`, which reads and deletes anywhere. |
@@ -1071,7 +1074,7 @@ Three checks run against a cluster, never from CI:
 ```bash
 scripts/registry-check.sh <context> <org>    # D1, D2: <org> pushes only under <org>/, a copy outlives Zot's pod, and the admin's delete of it leaves the source's blobs
 scripts/registry-build-check.sh <context>    # D3: kpack pushes a whole build to the registry's address over plain HTTP, and a node runs it by digest
-scripts/registry-pulls-check.sh <context> <org> <another org>    # ADR 0066 D3: no anonymous read, each org reads only its own, and each zone pulls only its org's images
+scripts/registry-pulls-check.sh <context> <org> <another org>    # ADR 0066 D3: no anonymous read, each org reads only its own, each zone pulls only its org's images, and zot-pull and kpack/registry-pull push nowhere
 ```
 
 Each reads the registry as `infrared` when it refuses anonymous reads.
