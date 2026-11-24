@@ -4838,6 +4838,16 @@ spec:
     automated:
       prune: true
       selfHeal: true
+[[- if eq .Cloud "gcp" ]]
+    # GKE's network policy logging is delegated (the chart's tenancy.denyLogging): a namespace logs the connections
+    # its NetworkPolicies refuse only with this annotation. From the metrics' door's stage enforced
+    # (infrared-docs-internal docs/home-defense.md, step 5) the stores, the agents, vmalert and Alertmanager answer only
+    # their known callers, so a refusal logged here names a caller the policies left out. Inert where deny logging
+    # is off.
+    managedNamespaceMetadata:
+      annotations:
+        policy.network.gke.io/enable-deny-logging: "true"
+[[- end ]]
     syncOptions:
       - CreateNamespace=true
       - SkipDryRunOnMissingResource=true
