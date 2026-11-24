@@ -1877,7 +1877,7 @@ else to the door:
 | `metrics-stores` (`enforced`) | both VMSingles | vmauth, vmagent, vmalert and the labelled copies, on 8428 and 8429; on GKE the API's proxy |
 | `metrics-agents` (`enforced`) | the vmagents | vmagent |
 | `metrics-rules` (`enforced`) | vmalert | vmagent; VMSingle on 8080; on GKE the API's proxy on 8080 |
-| `metrics-alerts` (`enforced`) | Alertmanager | vmagent; vmalert and vmauth on 9093 |
+| `metrics-alerts` (`enforced`) | Alertmanager | vmagent; vmalert and vmauth on 9093; on GKE the API's proxy on 9093 |
 | `metrics-exporters` (`enforced`) | kube-state-metrics, the VictoriaMetrics operator | vmagent |
 | `metrics-operator-webhook` (`enforced`) | the VictoriaMetrics operator | anyone on 9443, the control plane's webhook calls (off today) |
 
@@ -1887,8 +1887,9 @@ added to theirs. On GKE the Kubernetes API's proxy (`kubectl get --raw
 /api/v1/namespaces/monitoring/services/<svc>:<port>/proxy/...`) reaches pods
 through `kube-system`'s `konnectivity-agent` pods, which the policies admit; the
 API server checks the person's own right to `services/proxy` and strips their
-`Authorization`, so the door answers such a read 401 and the stores and
-vmalert answer it. Elsewhere, read the back doors through a port-forward, which
+`Authorization`, so the door answers such a read 401 and the stores, vmalert
+and Alertmanager answer it (`scripts/observability-check.sh` reads all three
+so). Elsewhere, read the back doors through a port-forward, which
 no NetworkPolicy sees. The alert `InfraredMetricsDoorDown` fires when no vmauth
 target has answered for 3 minutes.
 
@@ -1913,7 +1914,7 @@ proxy from `INFRARED_NODE_EXPORTER_AUTH`) and holds the install to what that
 stage makes:
 
 ```bash
-scripts/metrics-auth-check.sh <context>    # step 5, ADR 0066 D11: from a probe pod in a namespace of its own, no answer from the door, none from the stores, vmagents, vmalert, Alertmanager or kube-state-metrics at enforced, and node-exporter plain HTTP 400 and HTTPS 401; through the API server's proxy, the door 401 and the store 200
+scripts/metrics-auth-check.sh <context>    # step 5, ADR 0066 D11: from a probe pod in a namespace of its own, no answer from the door, none from the stores, vmagents, vmalert, Alertmanager or kube-state-metrics at enforced, and node-exporter plain HTTP 400 and HTTPS 401; through the API server's proxy, the door 401 and the store, vmalert and Alertmanager 200
 ```
 
 It also reads the stage's objects (the VMAuth and its users, `metrics-door`,
