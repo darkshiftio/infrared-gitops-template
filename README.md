@@ -1645,7 +1645,7 @@ before. The `victoria-metrics-k8s-stack` Application's `grafana` values gain:
 | Setting | Value |
 |---|---|
 | `grafana.ini` `server.root_url` | `<GrafanaURL>/` |
-| `auth.disable_login_form` | `false`: the local `admin` keeps its password as break glass, at `/login?disableAutoLogin` |
+| `auth.disable_login_form` | `true`: no one signs in with a password, only through Infrared (workspace TODO 794). The local `admin` stays for the sidecars `grafana-sc-dashboard` and `grafana-sc-datasources`, which call Grafana's reload API on localhost as it (`REQ_USERNAME` and `REQ_PASSWORD` from the Secret `victoria-metrics-k8s-stack-grafana`), so `[auth.basic]` stays on. Break glass is that admin's basic auth on the API, or a values change that shows the form again; taking its password away needs those sidecars on a ServiceAccount token first |
 | `auth.login_maximum_lifetime_duration` | `12h`, as long as Infrared's own session |
 | `auth.generic_oauth` | `enabled`, `name: Infrared`, `client_id: grafana`, `auto_login`, `allow_sign_up`, `use_pkce`, `use_refresh_token`, scopes `openid email profile offline_access` |
 | `auth_url` | `https://<InfraredHost>/api/v1/oidc/authorize`, where the browser goes |
@@ -1661,6 +1661,46 @@ a ConfigMap and refuses secrets in (`assertNoLeakedSecrets`). The reference is
 not optional: Grafana waits for the API to write the Secret. Nothing in these
 values holds `{{`, since the grafana chart passes `grafana.ini`'s strings through
 `tpl`.
+
+### Grafana's own metrics
+
+Grafana serves its own operational figures (`grafana_*`, and Go's and the
+process's) at `/metrics` on its Service's port. Wherever the
+`victoria-metrics-k8s-stack` Application runs, at every stage of the metrics'
+door, that path answers only with basic auth, and vmagent scrapes it with the
+credential (workspace TODO 794). Before, it answered anyone who reached Grafana,
+the Kubernetes API's proxy included: at the home, `kubectl get --raw
+/api/v1/namespaces/monitoring/services/victoria-metrics-k8s-stack-grafana:80/proxy/metrics`
+returned about 3,500 `grafana_` lines.
+
+| Part | What it does |
+|---|---|
+| The Secret `monitoring/grafana-metrics` | `kubernetes.io/basic-auth`: `username` `vmagent`, `password` 48 random letters and digits. The Application's PreSync hook `grafana-metrics-prepare` (alpine/k8s by digest, with a Role that may get that Secret and create Secrets in `monitoring`) makes it before every sync if it is absent, and never replaces or prints it |
+| Grafana | `envValueFrom`: `GF_METRICS_BASIC_AUTH_USERNAME` and `GF_METRICS_BASIC_AUTH_PASSWORD` from the Secret's `username` and `password`, Grafana's `[metrics]` `basic_auth_username` and `basic_auth_password`. Not optional: Grafana waits for the Secret. A request for `/metrics` without them is answered 401 |
+| vmagent | the chart's VMServiceScrape `victoria-metrics-k8s-stack-grafana` (`grafana.vmScrape`): the chart's one endpoint, the Service's port, with `basicAuth` from the same Secret, which the VictoriaMetrics operator reads in `monitoring` and writes into vmagent's configuration. The target's job stays `victoria-metrics-k8s-stack-grafana` |
+
+The password is made in the cluster, as the stores' hooks make theirs. A value
+made by the render (Helm's `randAlphaNum` or `lookup`) would change at every
+render under Argo CD. The VictoriaMetrics operator generates a password only
+for a VMUser a VMAuth selects, and the VMAuth comes only with `.MetricsAuth`.
+External Secrets' generators would need External Secrets, which `.Disabled`
+may leave out where this stack runs.
+
+A sync runs the hook first, so the Secret is there before Grafana's pod or
+vmagent's scrape names it. The template version that brings this restarts
+Grafana, whose environment changes; vmagent reloads its configuration without a
+restart. Until both have moved, a scrape or two of Grafana can be refused; the
+chart's `TargetDown` waits 10 minutes. Grafana's figures stay in the metrics
+store, under that job, for anyone who reads the store.
+
+To rotate the password, delete the Secret, sync the Application (its hook makes
+a new one), and restart Grafana
+(`kubectl -n monitoring rollout restart deployment victoria-metrics-k8s-stack-grafana`).
+The VictoriaMetrics operator writes the new password into vmagent's
+configuration when it next reconciles the VMAgent, within about a minute.
+`scripts/metrics-auth-check.sh` (see "The metrics' door") checks it on a
+running install: Grafana's `/metrics` answers 401 without the credential, from
+its probe pod and through the Kubernetes API's proxy, and its target is up.
 
 ### An install's own alerts
 
@@ -1924,14 +1964,15 @@ proxy from `INFRARED_NODE_EXPORTER_AUTH`) and holds the install to what that
 stage makes:
 
 ```bash
-scripts/metrics-auth-check.sh <context>    # step 5, ADR 0066 D11: from a probe pod in a namespace of its own, no answer from the door, none from the stores, vmagents, vmalert, Alertmanager or kube-state-metrics at enforced, and node-exporter plain HTTP 400 and HTTPS 401; through the API server's proxy, the door 401 and the store, vmalert and Alertmanager 200
+scripts/metrics-auth-check.sh <context>    # step 5, ADR 0066 D11: from a probe pod in a namespace of its own, no answer from the door, none from the stores, vmagents, vmalert, Alertmanager or kube-state-metrics at enforced, node-exporter plain HTTP 400 and HTTPS 401, and Grafana's /metrics 401 at every stage; through the API server's proxy, the door 401, the store, vmalert and Alertmanager 200, and Grafana's /metrics 401
 ```
 
 It also reads the stage's objects (the VMAuth and its users, `metrics-door`,
 Grafana's datasources, the API's and the operator's URL and token file from
 `clients` on, the six policies at `enforced`, kube-rbac-proxy on every node)
-and the store's own figures: node-exporter up on every node and every vmauth
-replica up. Before `enforced` it expects the back doors to answer, since the
+and the store's own figures: node-exporter up on every node, every vmauth
+replica up, and Grafana's target up (see "Grafana's own metrics"). Before
+`enforced` it expects the back doors to answer, since the
 stage leaves them open. Its probe pod runs under Pod Security `restricted`
 with no token, and goes with its namespace at the end unless `KEEP=1`.
 
