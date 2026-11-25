@@ -29,20 +29,24 @@
 #          it they answer 200, which the stage leaves open;
 #        - node-exporter on each node's own address answers plain HTTP 400 and
 #          HTTPS 401 with its proxy, and plain HTTP 200 without;
+#        - Grafana's own /metrics answers 401 at every stage: it takes
+#          vmagent's credential alone (README "Grafana's own metrics");
 #   3. on GKE, through the Kubernetes API's proxy, with the rights of whoever
 #      runs this (the API server strips their credential before the service
 #      sees the request): the door 401 from door on; the store, vmalert and
 #      Alertmanager 200 at every stage, through the konnectivity agents the
-#      policies admit (scripts/observability-check.sh reads all three so).
-#      Elsewhere the proxy reaches pods by paths the policies do not name, so
-#      this part prints what it gets and judges nothing;
+#      policies admit (scripts/observability-check.sh reads all three so);
+#      Grafana's /metrics 401 at every stage. Elsewhere the proxy reaches
+#      pods by paths the policies do not name, so this part prints what it
+#      gets and judges nothing;
 #   4. from the store's own figures, read through that proxy and kept to this
 #      install's series by its vmagent's external label platform (the home's
 #      store holds other installs' telemetry too): node-exporter up on every
 #      node node-exporter's DaemonSet runs on (with its proxy, vmagent's
-#      token gets through), and every vmauth replica up from door on. It also
-#      prints the targets down and the door's requests and errors by user
-#      over 15 minutes.
+#      token gets through), every vmauth replica up from door on, and
+#      Grafana's target up on every replica (vmagent's credential gets
+#      through). It also prints the targets down and the door's requests and
+#      errors by user over 15 minutes.
 #
 # Run it once a stage has settled: the stage's values commit Synced, the
 # operator's hydration Synced, and the stack's Application Synced and Healthy.
@@ -54,7 +58,8 @@
 # and counts alone, never what a service answers, and reads no Secret.
 # Needs: kubectl, jq, curl. Reads Infrared's two Deployments, the nodes'
 # addresses, and in monitoring the VMAuth, the VMUsers, the NetworkPolicies,
-# the Services, node-exporter's DaemonSet and Grafana's datasource ConfigMap.
+# the Services, node-exporter's DaemonSet, Grafana's Deployment and Grafana's
+# datasource ConfigMap.
 # =============================================================================
 set -euo pipefail
 CTX="${1:?usage: scripts/metrics-auth-check.sh <kube context>}"
@@ -64,6 +69,7 @@ STACK=victoria-metrics-k8s-stack
 DOOR="vmauth-$STACK"
 DOOR_URL="http://$DOOR.$MON.svc:8427"
 STORE="vmsingle-$STACK"
+GRAFANA="$STACK-grafana"
 IMAGE=docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
 BACK_DOORS="metrics-stores metrics-agents metrics-rules metrics-alerts metrics-exporters metrics-operator-webhook"
 
@@ -243,6 +249,7 @@ sleep 5
 p control -k https://kubernetes.default.svc/readyz
 '
 script="${script}p door '$DOOR_URL/api/v1/query?query=vector(1)'"$'\n'
+script="${script}p grafana 'http://$GRAFANA.$MON.svc:80/metrics'"$'\n'
 while read -r svc port path; do
   [ -n "$svc" ] || continue
   script="${script}p svc:$svc 'http://$svc.$MON.svc:$port$path'"$'\n'
@@ -339,6 +346,14 @@ elif [ "$E" = 6 ]; then
 else
   fail "the door's name resolves at the stage off (it answered $C)"
 fi
+# Grafana's own /metrics, at every stage (README "Grafana's own metrics").
+got grafana
+case "$C/$E" in
+  401/*) pass "Grafana's /metrics refuses a request without a credential (401)" ;;
+  200/*) fail "Grafana's /metrics answered 200 without a credential: its basic auth is off" ;;
+  000/6) fail "Grafana's name does not resolve from the probe: no Service $GRAFANA" ;;
+  *) fail "Grafana's /metrics answered $C (curl exit $E) without a credential, not 401" ;;
+esac
 while read -r svc port path; do
   [ -n "$svc" ] || continue
   got "svc:$svc"
@@ -389,8 +404,9 @@ door_c="$(via "$DOOR:8427" '/api/v1/query?query=vector(1)')"
 store_c="$(via "$STORE:8428" '/api/v1/query?query=vector(1)')"
 rules_c="$(via "vmalert-$STACK:8080" /api/v1/rules)"
 am_c="$(via "vmalertmanager-$STACK:9093" /api/v2/status)"
+graf_c="$(via "$GRAFANA:80" /metrics)"
 if [ "$GKE" != true ]; then
-  note "off GKE the API's proxy reaches pods by paths the policies do not name: the door $door_c, the store $store_c, vmalert $rules_c, Alertmanager $am_c; read them through a port-forward"
+  note "off GKE the API's proxy reaches pods by paths the policies do not name: the door $door_c, the store $store_c, vmalert $rules_c, Alertmanager $am_c, Grafana's /metrics $graf_c; read them through a port-forward"
 else
   if at door; then
     if [ "$door_c" = 401 ]; then pass "the door refuses a request without a credential (401)"; else fail "the door answered $door_c, not 401"; fi
@@ -402,6 +418,7 @@ else
   if [ "$store_c" = 200 ]; then pass "the store answers the API's proxy (200)"; else fail "the store answered $store_c through the API's proxy, not 200"; fi
   if [ "$rules_c" = 200 ]; then pass "vmalert answers the API's proxy (200)"; else fail "vmalert answered $rules_c through the API's proxy, not 200"; fi
   if [ "$am_c" = 200 ]; then pass "Alertmanager answers the API's proxy (200)"; else fail "Alertmanager answered $am_c through the API's proxy, not 200"; fi
+  if [ "$graf_c" = 401 ]; then pass "Grafana's /metrics refuses the API's proxy, which carries no credential (401)"; else fail "Grafana's /metrics answered $graf_c through the API's proxy, not 401"; fi
 fi
 
 log "4. the figures, from the store"
@@ -441,6 +458,14 @@ else
     q "sum by (username) (increase(vmauth_user_requests_total$(sel '')[15m]))" | sed 's/^/  note  the door'\''s requests, 15m: /'
     q "sum by (username) (increase(vmauth_user_request_errors_total$(sel '')[15m]))" | sed 's/^/  note  the door'\''s errors by user, 15m: /'
     q "sum by (reason) (increase(vmauth_http_request_errors_total$(sel '')[15m]))" | sed 's/^/  note  the door'\''s refusals, 15m: /'
+  fi
+  # Grafana's target: vmagent's scrape signs in with grafana-metrics.
+  want="$(k -n "$MON" get deployment "$GRAFANA" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  up="$(one "count(up$(sel "job=\"$GRAFANA\"") == 1)")"
+  if [ -n "$want" ] && [ "${up:-0}" = "$want" ]; then
+    pass "Grafana's target is up ($up of $want): vmagent's credential gets through"
+  else
+    fail "Grafana's target is up on ${up:-0} of ${want:-?} replicas"
   fi
   note "targets down: $(one "count(up$(sel '') == 0)" | grep . || echo 0)"
 fi

@@ -429,13 +429,21 @@ spec:
           # Viewer; anyone else is refused, by Infrared and here
           # (role_attribute_strict). The browser goes to Infrared's own address;
           # Grafana's own calls (the token, the person's claims and the signing
-          # keys) stay in the cluster, on the API's Service. The admin keeps its
-          # password as break glass, at /login?disableAutoLogin.
+          # keys) stay in the cluster, on the API's Service. The login form is
+          # off: no one signs in to Grafana with a password, only through
+          # Infrared (workspace TODO 794). The local admin stays for the
+          # sidecars grafana-sc-dashboard and grafana-sc-datasources, which call
+          # Grafana's reload API on localhost as it, with REQ_USERNAME and
+          # REQ_PASSWORD from the Secret victoria-metrics-k8s-stack-grafana, so
+          # [auth.basic] stays on. Break glass is that admin's basic auth on the
+          # API, or a values change that shows the form again. Taking the
+          # admin's password away needs those sidecars on a ServiceAccount
+          # token first.
           grafana.ini:
             server:
               root_url: [[ printf "%s/" .GrafanaURL | quote ]]
             auth:
-              disable_login_form: false
+              disable_login_form: true
               # As long as Infrared's own session.
               login_maximum_lifetime_duration: 12h
             auth.generic_oauth:
@@ -459,21 +467,36 @@ spec:
               role_attribute_strict: true
               allow_assign_grafana_admin: true
               skip_org_role_sync: false
-          # The client's secret, which infrared-api writes to the Secret
-          # monitoring/infrared-oidc-grafana and never returns. Not optional:
-          # Grafana waits for the API to write it. It stays out of grafana.ini,
-          # which the grafana chart renders into a ConfigMap and refuses
-          # secrets in (assertNoLeakedSecrets).
 [[- end ]]
-[[- if or (and .OIDC .GrafanaURL .InfraredHost) .MetricsAuth ]]
           envValueFrom:
-[[- end ]]
 [[- if and .OIDC .GrafanaURL .InfraredHost ]]
+            # The client's secret, which infrared-api writes to the Secret
+            # monitoring/infrared-oidc-grafana and never returns. Not optional:
+            # Grafana waits for the API to write it. It stays out of grafana.ini,
+            # which the grafana chart renders into a ConfigMap and refuses
+            # secrets in (assertNoLeakedSecrets).
             GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
               secretKeyRef:
                 name: infrared-oidc-grafana
                 key: client-secret
 [[- end ]]
+            # Grafana's own /metrics (README "Grafana's own metrics"; workspace
+            # TODO 794) answers only with basic auth: the username and password
+            # of the Secret grafana-metrics, which the PreSync hook
+            # grafana-metrics-prepare (extraObjects, below) makes once in the
+            # cluster, and which vmagent's scrape of Grafana sends (vmScrape,
+            # below). Grafana's [metrics] basic_auth_username and
+            # basic_auth_password, from the environment: grafana.ini refuses a
+            # password (assertNoLeakedSecrets). Not optional: without the
+            # Secret Grafana waits, and its running pod serves until then.
+            GF_METRICS_BASIC_AUTH_USERNAME:
+              secretKeyRef:
+                name: grafana-metrics
+                key: username
+            GF_METRICS_BASIC_AUTH_PASSWORD:
+              secretKeyRef:
+                name: grafana-metrics
+                key: password
 [[- if .MetricsAuth ]]
             # Grafana's password at the metrics' door, which the
             # VictoriaMetrics operator generates for the VMUser grafana and
@@ -484,6 +507,21 @@ spec:
                 name: vmuser-grafana
                 key: password
 [[- end ]]
+          # vmagent scrapes Grafana with the credential above, from the same
+          # Secret, which the VictoriaMetrics operator reads in monitoring, the
+          # scrape's namespace and Grafana's. The list of endpoints replaces
+          # the chart's, so its one endpoint, the Service's port, is said again.
+          vmScrape:
+            spec:
+              endpoints:
+                - port: '{{ .Values.grafana.service.portName }}'
+                  basicAuth:
+                    username:
+                      name: grafana-metrics
+                      key: username
+                    password:
+                      name: grafana-metrics
+                      key: password
 [[- if .NodeExporterAuth ]]
         # node-exporter behind kube-rbac-proxy (README "The metrics' door";
         # infrared-docs-internal docs/home-defense.md, step 5): node-exporter
@@ -1079,6 +1117,134 @@ spec:
                     - protocol: TCP
                       port: 9443
 [[- end ]]
+          # Grafana's own metrics (README "Grafana's own metrics"; workspace TODO
+          # 794): before every sync of this Application, this PreSync hook makes
+          # the Secret grafana-metrics (kubernetes.io/basic-auth: username
+          # vmagent, a password of 48 random letters and digits) once, if it is
+          # absent, and never replaces or prints it. Grafana's /metrics takes
+          # that credential alone (envValueFrom, above), and vmagent's scrape of
+          # Grafana sends it (vmScrape, above). It is made in the cluster, as
+          # the stores' hooks make theirs: a value made by the render would
+          # change at every render under Argo CD, and External Secrets, whose
+          # generators could make one, may be left out where this stack runs.
+          - apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: grafana-metrics-prepare
+              namespace: monitoring
+              annotations:
+                argocd.argoproj.io/hook: PreSync
+                argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+                argocd.argoproj.io/sync-wave: "-10"
+          # Make the Secret grafana-metrics once; read it to see whether it
+          # exists. Nothing else.
+          - apiVersion: rbac.authorization.k8s.io/v1
+            kind: Role
+            metadata:
+              name: grafana-metrics-prepare
+              namespace: monitoring
+              annotations:
+                argocd.argoproj.io/hook: PreSync
+                argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+                argocd.argoproj.io/sync-wave: "-10"
+            rules:
+              - apiGroups: [""]
+                resources: ["secrets"]
+                resourceNames: ["grafana-metrics"]
+                verbs: ["get"]
+              - apiGroups: [""]
+                resources: ["secrets"]
+                verbs: ["create"]
+          - apiVersion: rbac.authorization.k8s.io/v1
+            kind: RoleBinding
+            metadata:
+              name: grafana-metrics-prepare
+              namespace: monitoring
+              annotations:
+                argocd.argoproj.io/hook: PreSync
+                argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+                argocd.argoproj.io/sync-wave: "-10"
+            roleRef:
+              apiGroup: rbac.authorization.k8s.io
+              kind: Role
+              name: grafana-metrics-prepare
+            subjects:
+              - kind: ServiceAccount
+                name: grafana-metrics-prepare
+                namespace: monitoring
+          - apiVersion: batch/v1
+            kind: Job
+            metadata:
+              name: grafana-metrics-prepare
+              namespace: monitoring
+              annotations:
+                argocd.argoproj.io/hook: PreSync
+                argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+                argocd.argoproj.io/sync-wave: "-9"
+            spec:
+              # Ten minutes, an image pull included; then the sync fails and
+              # Argo CD retries it.
+              activeDeadlineSeconds: 600
+              backoffLimit: 6
+              ttlSecondsAfterFinished: 3600
+              template:
+                spec:
+                  serviceAccountName: grafana-metrics-prepare
+                  restartPolicy: OnFailure
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 65534
+                    runAsGroup: 65534
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                    - name: prepare
+                      # alpine/k8s 1.37.0: kubectl and a busybox shell.
+                      image: docker.io/alpine/k8s:1.37.0@sha256:b421c2e9419edb98db39b6ab641669f4db7bb2acf354f22450c6b7e7176d1ff4
+                      env:
+                        - name: HOME
+                          value: /tmp
+                      command:
+                        - /bin/sh
+                        - -ec
+                        - |
+                          if kubectl get secret grafana-metrics >/dev/null 2>&1; then
+                            echo "grafana-metrics exists; leaving it alone"
+                            exit 0
+                          fi
+                          password="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48)"
+                          if [ "${#password}" -ne 48 ]; then
+                            echo "a generated password has the wrong length; not writing grafana-metrics" >&2
+                            exit 1
+                          fi
+                          kubectl create -f - >/dev/null <<EOF
+                          apiVersion: v1
+                          kind: Secret
+                          type: kubernetes.io/basic-auth
+                          metadata:
+                            name: grafana-metrics
+                          stringData:
+                            username: vmagent
+                            password: $password
+                          EOF
+                          echo "created grafana-metrics"
+                      securityContext:
+                        allowPrivilegeEscalation: false
+                        readOnlyRootFilesystem: true
+                        capabilities:
+                          drop: [ALL]
+                      resources:
+                        requests:
+                          cpu: 10m
+                          memory: 32Mi
+                        limits:
+                          memory: 128Mi
+                      volumeMounts:
+                        - name: tmp
+                          mountPath: /tmp
+                  volumes:
+                    - name: tmp
+                      emptyDir: {}
           # Infrared's own metrics (ADR 0044): the operator's step counters and
           # the API's request counters, on every Service port named metrics in
           # the Infrared namespace, which the chart names so. An empty selector
