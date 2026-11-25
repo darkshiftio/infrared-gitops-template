@@ -1300,7 +1300,14 @@ for v in "${variants[@]}"; do
       # ECR's login job only for ECR; the GitHub App's token job only for
       # GitHub. On Gitea kpack clones with builds/gitea-git, which the operator
       # writes, so nothing of GitHub's is rendered.
-      wants="Namespace/builds ClusterStore/paketo ClusterStack/noble ClusterBuilder/infrared-builder"
+      wants="Namespace/builds ClusterStore/paketo ClusterStack/noble ClusterLifecycle/buildpacks-lifecycle ClusterBuilder/infrared-builder"
+      # The builder runs upstream's lifecycle, pinned, never kpack's
+      # default-lifecycle (0.21.14, built with Go 1.26.5), whose launcher every
+      # image would carry.
+      [ "$(sel "$b" 'select(.kind == "ClusterBuilder") | .spec.lifecycle.kind + "/" + .spec.lifecycle.name')" = ClusterLifecycle/buildpacks-lifecycle ] \
+        && [[ "$(sel "$b" 'select(.kind == "ClusterLifecycle") | .spec.image')" =~ ^docker\.io/buildpacksio/lifecycle:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] \
+        && ok "$variant: the builder names the pinned lifecycle buildpacks-lifecycle" \
+        || bad "$variant: the builder does not name ClusterLifecycle buildpacks-lifecycle pinned by tag and digest"
       if [ -n "$zot_addr" ]; then
         # The registry inside the cluster: the builder is pushed as platform,
         # with kpack/infrared-builder, once Zot and the credential are there.

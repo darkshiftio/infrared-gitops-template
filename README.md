@@ -383,7 +383,7 @@ pull secret, existing Secrets, build registry, and the install's settings in
 | 22 | `substrate` (the same) | `components/substrate` | the same, upstream's images by digest |
 | 23 | `substrate-actors` (the same) | `components/substrate-actors` | the same |
 | 25 | `kpack` | `components/kpack` (vendored `release-0.18.0.yaml`) | v0.18.0 |
-| 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack by digest |
+| 26 | `builds` (only with `.BuildRegistry`) | `components/builds` | Paketo buildpacks and stack, and the buildpacks lifecycle 0.21.30, by digest |
 | 30 | `victoria-metrics-k8s-stack` | https://victoriametrics.github.io/helm-charts/; VMSingle keeps its data on a 10Gi claim of the default class, but on k3s with the stores on an `emptyDir` of up to 10Gi, each `.MetricsStorage` instead when it is set (see "Metrics with the stores" and "The metrics store's size"; on Google Cloud with a gcs backup bucket, copied there every night, see "The metrics' nightly copy") | 0.95.0 (operator v0.75.0) |
 | 30 | `telemetry` (with `.Telemetry.URL`, and the metrics stack left out) | `components/telemetry`: one vmagent that remote-writes to that URL (see "The telemetry plane") | vmagent v1.154.0, by digest |
 | 40 | `infrared` | `.InfraredChartRepo` `infrared`, values from this repo's `registry/clusters/<cluster>/values/infrared.yaml` | `.InfraredChartVersion` |
@@ -467,7 +467,9 @@ With `.BuildRegistry` set, the wave-26 `builds` Application syncs
 `components/builds`: namespaces `builds` (Pod Security restricted, where
 products' kpack Images live) and, for ECR, `build-credentials` (privileged,
 for the ECR login job's hostNetwork), ClusterStore `paketo`, ClusterStack
-`noble`, ClusterBuilder `infrared-builder` (tag `<BuildRegistry>/kpack-builder`),
+`noble`, ClusterLifecycle `buildpacks-lifecycle` (upstream's lifecycle, which the
+builder names instead of kpack's `default-lifecycle`, whose launcher was built
+with an older Go), ClusterBuilder `infrared-builder` (tag `<BuildRegistry>/kpack-builder`),
 ServiceAccount `builds/builder`, and two credential jobs: `ecr-login` (ECR
 only, node IAM role, every 6h) writes `builds/registry-push`, and
 `github-token` (Infrared's GitHub App for the org, every 45m) writes
