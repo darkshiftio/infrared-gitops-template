@@ -134,6 +134,32 @@ spec:
     image: docker.io/paketobuildpacks/ubuntu-noble-run:0.0.162@sha256:00209cf68f2a1ed1cdb2f5a9502384433f0194fa11e1a9ac674bd0a2b54601b5
 ---
 # =============================================================================
+# The buildpacks lifecycle: what runs every build, and the launcher every image
+# starts through (/cnb/lifecycle/launcher), pinned by tag AND digest.
+# =============================================================================
+# kpack's own ClusterLifecycle, `default-lifecycle` (components/kpack, vendored
+# with kpack 0.18.0), is the lifecycle 0.21.14, built with Go 1.26.5. kpack puts
+# its launcher in every image it builds, so every image carried the Go standard
+# library's advisories fixed in Go 1.26.9 and 1.27.2, two critical among them
+# (GO-2026-6604 and GO-2026-6612), and every customer release's security
+# evidence read not safe. This is upstream's image of 0.21.30 (2026-11-24), built
+# with Go 1.27.4. kpack's image is a copy of upstream's, layer for layer, and
+# kpack reads only its labels (io.buildpacks.lifecycle.apis and
+# io.buildpacks.builder.metadata) and its last layer. A lifecycle change is one
+# of kpack's build reasons, so every Image builds again on this one. Digest from
+# `crane digest docker.io/buildpacksio/lifecycle:<v>`. To bump: change tag and
+# digest together, in one pull request.
+# =============================================================================
+apiVersion: kpack.io/v1alpha2
+kind: ClusterLifecycle
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  name: buildpacks-lifecycle
+spec:
+  image: docker.io/buildpacksio/lifecycle:0.21.30@sha256:8b7f55e61b36ef7df4355273c96ee6edf0fee8b105c33f5e75ed543f44c84033
+---
+# =============================================================================
 # `infrared-builder`: Go services, Go services with a UI built by Node, and web
 # UIs (a Node build served by nginx).
 # =============================================================================
@@ -190,6 +216,9 @@ spec:
   stack:
     kind: ClusterStack
     name: noble
+  lifecycle:
+    kind: ClusterLifecycle
+    name: buildpacks-lifecycle
   store:
     kind: ClusterStore
     name: paketo
