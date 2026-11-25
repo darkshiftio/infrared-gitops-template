@@ -39,8 +39,23 @@ spec:
             requests:
               cpu: 20m
               memory: 64Mi
+          # Pod Security restricted (infrared-docs-internal
+          # docs/home-defense.md, step 8): the chart already runs the operator
+          # as user 1000, with no escalation and every capability dropped; the
+          # runtime's default seccomp profile was the one check it failed. Helm
+          # merges this with the chart's own podSecurityContext.
+          podSecurityContext:
+            seccompProfile:
+              type: RuntimeDefault
         vmsingle:
           spec:
+            # Not under useStrictSecurity, unlike vmagent, vmalert, Alertmanager
+            # and vmauth: VMSingle runs as root, since its image names no user,
+            # and its data on the claim is root's. Running it as 65534 means
+            # re-owning that data (under an fsGroup the kubelet re-groups every
+            # file on the claim at its first start), a decision of its own
+            # (infrared-docs-internal docs/home-defense.md, step 8).
+            #
             # 30 days covers 28-day SLO windows; about 6-7 GB for one management cluster.
             retentionPeriod: "30d"
             # Read on infrared-cp-google on 2026-10-13 (localred plan, spike S4): 89,000
@@ -234,6 +249,15 @@ spec:
               matchExpressions:
                 - key: infrared.darkshift.io/org
                   operator: DoesNotExist
+            # Pod Security restricted (infrared-docs-internal
+            # docs/home-defense.md, step 8), as vmauth runs (below): the
+            # VictoriaMetrics operator runs vmagent and its config reloader as
+            # 65534 with fsGroup 65534, a read-only root filesystem, the
+            # runtime's default seccomp profile, every capability dropped and
+            # no escalation. vmagent writes only its write buffer, on an
+            # emptyDir the operator mounts at /tmp/vmagent-remotewrite-data:
+            # it holds no claim, so nothing on a disk changes owner.
+            useStrictSecurity: true
             resources:
               requests:
                 cpu: 50m
@@ -257,12 +281,19 @@ spec:
 [[- end ]]
         vmalert:
           spec:
+            # Pod Security restricted, as vmagent's (above): vmalert keeps its
+            # state in memory and holds no claim.
+            useStrictSecurity: true
             resources:
               requests:
                 cpu: 10m
                 memory: 32Mi
         alertmanager:
           spec:
+            # Pod Security restricted, as vmagent's (above). Alertmanager's
+            # image already runs as nobody, 65534, and its silences and
+            # notification log are on an emptyDir: its storage stays off.
+            useStrictSecurity: true
             resources:
               requests:
                 cpu: 10m
@@ -4986,6 +5017,17 @@ spec:
                     spec:
                       serviceAccountName: metrics-backup
                       restartPolicy: Never
+                      # Pod Security restricted but for runAsNonRoot
+                      # (infrared-docs-internal docs/home-defense.md, step 8):
+                      # the runtime's default seccomp profile here, and on
+                      # vmbackup (below) no escalation and every capability
+                      # dropped. vmbackup stays root, as its image names no
+                      # user: VMSingle wrote every file on the claim as root,
+                      # so vmbackup reads them as their owner and needs no
+                      # capability.
+                      securityContext:
+                        seccompProfile:
+                          type: RuntimeDefault
                       affinity:
                         podAffinity:
                           requiredDuringSchedulingIgnoredDuringExecution:
@@ -5011,6 +5053,11 @@ spec:
                               echo "snapshot $snap to $base/latest, then $base/$day"
                               /vmbackup-prod -storageDataPath=/victoria-metrics-data -snapshotName="$snap" -dst="$base/latest"
                               /vmbackup-prod -storageDataPath=/victoria-metrics-data -snapshotName="$snap" -origin="$base/latest" -dst="$base/$day"
+                          securityContext:
+                            allowPrivilegeEscalation: false
+                            capabilities:
+                              drop:
+                                - ALL
                           resources:
                             requests:
                               cpu: 50m
