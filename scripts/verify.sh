@@ -271,11 +271,18 @@
 #     with OIDC, GrafanaURL and InfraredHost, the metrics stack's Grafana takes
 #     generic OAuth from Infrared (the browser at Infrared's address, Grafana's
 #     own calls on the API's Service in InfraredNamespace, the role from
-#     infrared_platform_role, the login form kept for the admin's break glass)
+#     infrared_platform_role, the login form off, basic auth left on for the
+#     admin the dashboards' and datasources' sidecars reload Grafana as)
 #     and the client's secret from the Secret infrared-oidc-grafana, never in
 #     grafana.ini; the grafana chart takes the values; with any of the three
 #     unset nothing changes, and a GrafanaURL with a trailing slash, a query or
 #     no scheme is refused
+#   - Grafana's own metrics (workspace TODO 794): wherever the metrics stack
+#     renders, at every stage of the metrics' door, Grafana's /metrics takes
+#     basic auth from the Secret grafana-metrics through its environment, never
+#     grafana.ini; vmagent's scrape of Grafana sends the same; a PreSync hook
+#     makes that Secret once in monitoring, never replacing it, its image by
+#     digest; and the chart takes all of it through its tpl
 #   - the network fence (infrared-docs-internal ADR 0066 D1): with
 #     NetworkPolicies, every platform namespace a component makes has its
 #     ingress policy, whose first rule admits the platform alone (no org's
@@ -1142,6 +1149,39 @@ for v in "${variants[@]}"; do
     else
       [ "$mb" = '[]' ] && ok "$variant: no nightly copy of the metrics, which needs Google Cloud and a gcs bucket" \
         || bad "$variant: the metrics' nightly copy rendered without Google Cloud and a gcs bucket: $mb"
+    fi
+    # Grafana's own metrics (README "Grafana's own metrics"; workspace TODO
+    # 794), at every stage of the door: Grafana's /metrics takes basic auth
+    # from the Secret grafana-metrics through its environment, never
+    # grafana.ini; vmagent's scrape of Grafana, the chart's one endpoint,
+    # sends the same; and the PreSync hook grafana-metrics-prepare makes the
+    # Secret in monitoring: its image by digest, a Role that gets that Secret
+    # alone and creates, and a script that reads the Secret before it creates
+    # one and never deletes, patches or replaces it. No Secret of that name
+    # renders.
+    gm_values="$(yq -o json -I0 '.spec.source.helm.valuesObject | {
+        "env": [.grafana.envValueFrom | to_entries[] | select(.key | test("^GF_METRICS_")) | .key + "=" + .value.secretKeyRef.name + "/" + .value.secretKeyRef.key],
+        "ini": (.grafana["grafana.ini"].metrics // null),
+        "scrape": [.grafana.vmScrape.spec.endpoints[] | .port + " " + .basicAuth.username.name + "/" + .basicAuth.username.key + " " + .basicAuth.password.name + "/" + .basicAuth.password.key],
+        "hook": [.extraObjects[] | select(.metadata.name == "grafana-metrics-prepare") | .kind + " " + .metadata.namespace + " " + .metadata.annotations["argocd.argoproj.io/hook"] + " " + .metadata.annotations["argocd.argoproj.io/sync-wave"]],
+        "rules": [.extraObjects[] | select(.kind == "Role" and .metadata.name == "grafana-metrics-prepare") | .rules[]],
+        "secret": [.extraObjects[] | select(.kind == "Secret" and .metadata.name == "grafana-metrics")]}' "$vm")"
+    gm_want='{"env":["GF_METRICS_BASIC_AUTH_USERNAME=grafana-metrics/username","GF_METRICS_BASIC_AUTH_PASSWORD=grafana-metrics/password"],"ini":null,'
+    gm_want="$gm_want"'"scrape":["{{ .Values.grafana.service.portName }} grafana-metrics/username grafana-metrics/password"],'
+    gm_want="$gm_want"'"hook":["ServiceAccount monitoring PreSync -10","Role monitoring PreSync -10","RoleBinding monitoring PreSync -10","Job monitoring PreSync -9"],'
+    gm_want="$gm_want"'"rules":[{"apiGroups":[""],"resources":["secrets"],"resourceNames":["grafana-metrics"],"verbs":["get"]},{"apiGroups":[""],"resources":["secrets"],"verbs":["create"]}],"secret":[]}'
+    gm_job='.spec.source.helm.valuesObject.extraObjects[] | select(.kind == "Job" and .metadata.name == "grafana-metrics-prepare") | .spec.template.spec'
+    gm_sh="$(yq -r "$gm_job | .containers[0].command[2]" "$vm")"
+    if [ "$gm_values" = "$gm_want" ] \
+      && [ "$(yq -r "$gm_job | .serviceAccountName + \" \" + (.securityContext.runAsNonRoot | tostring)" "$vm")" = "grafana-metrics-prepare true" ] \
+      && yq -r "$gm_job | .containers[0].image" "$vm" | grep -qE '^docker\.io/alpine/k8s:[0-9.]+@sha256:[0-9a-f]{64}$' \
+      && [ "$(grep -oE 'kubectl [a-z]+' <<<"$gm_sh" | tr '\n' ' ')" = "kubectl get kubectl create " ] \
+      && grep -qx 'if kubectl get secret grafana-metrics >/dev/null 2>&1; then' <<<"$gm_sh" \
+      && grep -qx 'type: kubernetes.io/basic-auth' <<<"$gm_sh" && grep -qx '  username: vmagent' <<<"$gm_sh" \
+      && grep -qx "  password: \$password" <<<"$gm_sh" && grep -qF "head -c 48)" <<<"$gm_sh"; then
+      ok "$variant: Grafana's /metrics takes the Secret grafana-metrics from its environment, vmagent's scrape sends it, and a PreSync hook makes it once"
+    else
+      bad "$variant: Grafana's metrics credential is $gm_values, want $gm_want, or the hook grafana-metrics-prepare is wrong"
     fi
   fi
   if [ -n "$token_host" ]; then
@@ -3410,8 +3450,9 @@ else bad "caps: the infrared Application fails kubeconform"; fi
 # With OIDC, GrafanaURL and InfraredHost (variant oidc, from a -data file as the
 # operator passes them), Grafana signs people in through Infrared: the browser
 # goes to Infrared's own address, Grafana's own calls go to the API's Service,
-# the role comes from infrared_platform_role, the login form stays for the
-# admin's break glass, and the client's secret comes from the Secret
+# the role comes from infrared_platform_role, the login form is off (basic
+# auth stays on for the admin the sidecars reload Grafana as), and the
+# client's secret comes from the Secret
 # infrared-oidc-grafana, never from grafana.ini. The comparisons above show
 # that any of the three alone, or any two, change nothing, and all three only
 # the metrics stack's Application.
@@ -3423,7 +3464,7 @@ got="$(yq -o json -I0 '.spec.source.helm.valuesObject.grafana["grafana.ini"]' "$
 want="$(jq -S -c -n --arg root "https://grafana.$gw_domain/" --arg auth "https://$gw_host/api/v1/oidc/authorize" \
   --arg api "$oidc_api" --arg role "$oidc_role" '{
     server: {root_url: $root},
-    auth: {disable_login_form: false, login_maximum_lifetime_duration: "12h"},
+    auth: {disable_login_form: true, login_maximum_lifetime_duration: "12h"},
     "auth.generic_oauth": {enabled: true, name: "Infrared", client_id: "grafana", scopes: "openid email profile offline_access",
       auth_url: $auth, token_url: ($api + "/token"), api_url: ($api + "/userinfo"), jwk_set_url: ($api + "/jwks"),
       validate_id_token: true, use_pkce: true, use_refresh_token: true, auto_login: true, allow_sign_up: true,
@@ -3432,7 +3473,9 @@ want="$(jq -S -c -n --arg root "https://grafana.$gw_domain/" --arg auth "https:/
 [ "$got" = "$want" ] \
   && ok "oidc: Grafana's grafana.ini signs people in through Infrared, the role from the platform org's" \
   || bad "oidc: Grafana's grafana.ini is $got, want $want"
-[ "$(yq -o json -I0 '.spec.source.helm.valuesObject.grafana.envValueFrom' "$oidc_vm")" \
+# Grafana's metrics credential (GF_METRICS_*) is every variant's; the checks
+# on the metrics stack below hold it.
+[ "$(yq -o json -I0 '.spec.source.helm.valuesObject.grafana.envValueFrom | with_entries(select(.key | test("^GF_METRICS_") | not))' "$oidc_vm")" \
     = '{"GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET":{"secretKeyRef":{"name":"infrared-oidc-grafana","key":"client-secret"}}}' ] \
   && ok "oidc: the client's secret comes from infrared-oidc-grafana, key client-secret, and is not optional" \
   || bad "oidc: Grafana's envValueFrom is not GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET from infrared-oidc-grafana"
@@ -4286,9 +4329,10 @@ want_ds="VictoriaMetrics plugin=true|alertmanager=0|VictoriaMetrics $door_url gr
 got_ds="$(door_q "$work/door-gke" demo-gk '.defaultDatasources | [(.victoriametrics.datasources[] | .uid + " plugin=" + (.plugin | tostring)), ("alertmanager=" + (.alertmanager.datasources | length | tostring)), (.extra[] | .uid + " " + .url + " " + .basicAuthUser + " " + .secureJsonData.basicAuthPassword + " default=" + ((.isDefault // false) | tostring))] | join("|")' | jq -r .)"
 [ "$got_ds" = "$want_ds" ] && ok "metrics' door: Grafana's datasources at the door by the dashboards' uids, the chart's own a stand-in" \
   || bad "metrics' door: Grafana's datasources are '$got_ds', want '$want_ds'"
-[ "$(door_q "$work/door-gke" demo-gk '.grafana.envValueFrom')" = '{"VMAUTH_GRAFANA_PASSWORD":{"secretKeyRef":{"name":"vmuser-grafana","key":"password"}}}' ] \
-  && [ "$(door_q "$work/door-oidc" demo-oi '.grafana.envValueFrom | keys | join(",")' | jq -r .)" = GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET,VMAUTH_GRAFANA_PASSWORD ] \
-  && ok "metrics' door: Grafana's password from vmuser-grafana, beside Grafana's sign-in secret with OIDC" \
+[ "$(door_q "$work/door-gke" demo-gk '.grafana.envValueFrom | with_entries(select(.key | test("^GF_METRICS_") | not))')" = '{"VMAUTH_GRAFANA_PASSWORD":{"secretKeyRef":{"name":"vmuser-grafana","key":"password"}}}' ] \
+  && [ "$(door_q "$work/door-oidc" demo-oi '.grafana.envValueFrom | keys | join(",")' | jq -r .)" \
+    = GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET,GF_METRICS_BASIC_AUTH_USERNAME,GF_METRICS_BASIC_AUTH_PASSWORD,VMAUTH_GRAFANA_PASSWORD ] \
+  && ok "metrics' door: Grafana's password from vmuser-grafana, beside Grafana's sign-in secret with OIDC and its metrics credential" \
   || bad "metrics' door: Grafana's envValueFrom is $(door_q "$work/door-gke" demo-gk '.grafana.envValueFrom'), with OIDC $(door_q "$work/door-oidc" demo-oi '.grafana.envValueFrom | keys')"
 want_users="$(jq -cnS --arg iss "$door_iss" '[
   {name: "grafana", label: "true", issuer: null, sub: null, aud: null, vmAccess: null,
@@ -4569,6 +4613,26 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     [ "$(yq -N -r 'select(.kind == "VMNodeScrape") | .spec.relabelConfigs[] | select(.action == "labelmap") | .regex' "$work/vmks.yaml" | wc -l | tr -d ' ')" = 0 ] \
       && [ "$(yq -N -r 'select(.kind == "VMNodeScrape") | .metadata.name' "$work/vmks.yaml" | wc -l | tr -d ' ')" -ge 2 ] \
       && ok "gateway: the kubelet and cAdvisor scrapes copy no node labels" || bad "gateway: a VMNodeScrape copies node labels onto its series"
+    # Grafana's own metrics through the chart (README "Grafana's own
+    # metrics"): vmagent's scrape of Grafana on the grafana Service's own port
+    # with the Secret grafana-metrics; Grafana's container taking the same from
+    # its environment, with no password in grafana.ini (the chart's
+    # assertNoLeakedSecrets passed); the hook's script through tpl unchanged.
+    g_port="$(yq -N -r 'select(.kind == "Service" and .metadata.name == "victoria-metrics-k8s-stack-grafana") | .spec.ports[0].name' "$work/vmks.yaml")"
+    g_ini="$(yq -N -r 'select(.kind == "ConfigMap" and .metadata.name == "victoria-metrics-k8s-stack-grafana") | .data["grafana.ini"]' "$work/vmks.yaml")"
+    gm_hook='select(.kind == "Job" and .metadata.name == "grafana-metrics-prepare") | .spec.template.spec.containers[0].command[2]'
+    if [ -n "$g_port" ] \
+      && [ "$(one_doc "$work/vmks.yaml" VMServiceScrape victoria-metrics-k8s-stack-grafana | yq -o json -I0 '[.metadata.namespace] + [.spec.endpoints[] | .port + " " + .basicAuth.username.name + "/" + .basicAuth.username.key + " " + .basicAuth.password.name + "/" + .basicAuth.password.key]')" \
+        = "[\"monitoring\",\"$g_port grafana-metrics/username grafana-metrics/password\"]" ] \
+      && [ "$(one_doc "$work/vmks.yaml" Deployment victoria-metrics-k8s-stack-grafana | yq -o json -I0 '[.spec.template.spec.containers[] | select(.name == "grafana") | .env[] | select(.name | test("^GF_METRICS_")) | .name + "=" + .valueFrom.secretKeyRef.name + "/" + .valueFrom.secretKeyRef.key]')" \
+        = '["GF_METRICS_BASIC_AUTH_PASSWORD=grafana-metrics/password","GF_METRICS_BASIC_AUTH_USERNAME=grafana-metrics/username"]' ] \
+      && [ -n "$g_ini" ] && ! grep -q 'basic_auth' <<<"$g_ini" \
+      && [ -n "$(yq -N -r "$gm_hook" "$work/vmks.yaml")" ] \
+      && [ "$(yq -N -r "$gm_hook" "$work/vmks.yaml")" = "$(yq -r ".spec.source.helm.valuesObject.extraObjects[] | $gm_hook" "$vmks_app")" ]; then
+      ok "gateway: the chart scrapes Grafana on its Service's port ($g_port) with grafana-metrics, gives Grafana the same from its environment, and keeps the hook's script"
+    else
+      bad "gateway: Grafana's metrics credential through the chart: its scrape, its environment, grafana.ini or the hook's script is wrong"
+    fi
   else
     bad "gateway: helm template victoria-metrics-k8s-stack $vmks_version: $(head -c 300 "$work/vmks.err")"
   fi
@@ -4631,10 +4695,11 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
     ini="$(yq -N -r 'select(.kind == "ConfigMap" and .metadata.name == "victoria-metrics-k8s-stack-grafana") | .data["grafana.ini"]' "$work/vmks-oidc.yaml")"
     if grep -qx '\[auth.generic_oauth\]' <<<"$ini" && grep -qx "root_url = https://grafana.$gw_domain/" <<<"$ini" \
       && grep -qx "auth_url = https://$gw_host/api/v1/oidc/authorize" <<<"$ini" \
-      && grep -qx 'login_maximum_lifetime_duration = 12h' <<<"$ini" && ! grep -qi 'client_secret' <<<"$ini"; then
-      ok "oidc: the grafana chart writes the generic OAuth section into Grafana's ConfigMap, and no secret"
+      && grep -qx 'login_maximum_lifetime_duration = 12h' <<<"$ini" && grep -qx 'disable_login_form = true' <<<"$ini" \
+      && ! grep -qi 'client_secret' <<<"$ini" && ! grep -q '^\[auth.basic\]' <<<"$ini"; then
+      ok "oidc: the grafana chart writes the generic OAuth section into Grafana's ConfigMap, the login form off and basic auth as it was, and no secret"
     else
-      bad "oidc: Grafana's grafana.ini from the chart lacks the generic OAuth section, or holds a secret"
+      bad "oidc: Grafana's grafana.ini from the chart lacks the generic OAuth section or the login form's switch, changes basic auth, or holds a secret"
     fi
     [ "$(yq -N -o json -I0 'select(.kind == "Deployment" and .metadata.name == "victoria-metrics-k8s-stack-grafana")
         | .spec.template.spec.containers[] | select(.name == "grafana") | .env[] | select(.name == "GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET") | .valueFrom' \
