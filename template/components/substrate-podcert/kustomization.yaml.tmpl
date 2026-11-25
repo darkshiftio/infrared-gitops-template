@@ -32,6 +32,22 @@ patches:
       kind: Namespace
       metadata:
         name: podcertificate-controller-system
+  # Pod Security restricted (infrared-docs-internal docs/home-defense.md,
+  # step 8): upstream's controller already runs as non-root, drops every
+  # capability but NET_BIND_SERVICE and refuses privilege escalation; it also
+  # runs under the runtime's default seccomp profile.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: podcertificate-controller
+        namespace: podcertificate-controller-system
+      spec:
+        template:
+          spec:
+            securityContext:
+              seccompProfile:
+                type: RuntimeDefault
 [[- if .ImagePullSecret ]]
   # The install names a pull secret, [[ .ImagePullSecret ]] (copied from [[ .InfraredNamespace ]],
   # pull-secret.yaml): the controller pulls with it, as Infrared's own pods do.

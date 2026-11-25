@@ -330,6 +330,36 @@ patches:
               - name: actor-id-ca-certs
                 secret:
                   secretName: actor-id-ca-certs-v1
+  # Pod Security restricted (infrared-docs-internal docs/home-defense.md,
+  # step 8). Upstream's API, identity provider, controller, router and egress
+  # gateway already run as non-root, drop every capability (the API adds back
+  # NET_BIND_SERVICE, which restricted allows) and refuse privilege escalation,
+  # container by container. What they lacked is the runtime's default seccomp
+  # profile, set here for each pod. Each is named, so a Deployment upstream
+  # adds is decided here, never changed by this patch unseen.
+  #
+  # atelet stays as upstream runs it, outside restricted on purpose: it is the
+  # node's supervisor, as root with CHOWN, DAC_OVERRIDE, FOWNER and FSETID, on
+  # the node's /var/lib/ate (the actors' images and snapshots), the kubelet's
+  # plugin and device-plugin directories and /dev[[ if eq .Cloud "gcp" ]], and GKE's image
+  # credential provider[[ end ]].
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      namespace: ate-system
+      name: ate-api-server|ate-idp-server|ate-controller|atenet-router|atenet-egress
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: any
+      spec:
+        template:
+          spec:
+            securityContext:
+              seccompProfile:
+                type: RuntimeDefault
 [[- if .ImagePullSecret ]]
   # The install names a pull secret, [[ .ImagePullSecret ]] (copied from [[ .InfraredNamespace ]],
   # credentials.yaml): every workload here pulls with it, as Infrared's own pods do.

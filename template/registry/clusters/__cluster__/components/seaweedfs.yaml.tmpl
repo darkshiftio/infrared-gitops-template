@@ -140,6 +140,26 @@ spec:
             tag: "4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d"
           master:
             replicas: [[ if $single ]]1[[ else ]]3[[ end ]]
+            # Pod Security restricted, but for runAsNonRoot, on every server
+            # here and on the chart's bucket hook, which takes the filer's: the
+            # runtime's default seccomp profile, every capability dropped and
+            # no privilege escalation, as upstream's openshift-values.yaml runs
+            # them. weed listens above port 1024 and writes only files it
+            # owns, so it needs no capability. The image names no user, so
+            # weed runs as root, and each server's data on disk is root's: a
+            # user of its own changes who owns that data, which is a decision
+            # of its own, not this file's (infrared-docs-internal
+            # docs/home-defense.md, step 8).
+            podSecurityContext:
+              enabled: true
+              seccompProfile:
+                type: RuntimeDefault
+            containerSecurityContext:
+              enabled: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
 [[- if eq .Cloud "gcp" ]]
             # On Google Cloud every server's data is a persistent disk of the
             # cluster's default class, which follows its pod to whichever node
@@ -194,6 +214,17 @@ spec:
                 memory: 512Mi
           volume:
             replicas: [[ if $single ]]1[[ else ]]3[[ end ]]
+            # As the master's (above).
+            podSecurityContext:
+              enabled: true
+              seccompProfile:
+                type: RuntimeDefault
+            containerSecurityContext:
+              enabled: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
             dataDirs:
               - name: data
 [[- if eq .Cloud "gcp" ]]
@@ -250,6 +281,17 @@ spec:
                 memory: 3Gi
           filer:
             replicas: [[ if $single ]]1[[ else ]]2[[ end ]]
+            # As the master's (above); the chart's bucket hook takes these too.
+            podSecurityContext:
+              enabled: true
+              seccompProfile:
+                type: RuntimeDefault
+            containerSecurityContext:
+              enabled: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
             data:
               type: emptyDir
             logs:
@@ -308,6 +350,17 @@ spec:
           s3:
             enabled: true
             replicas: [[ if $single ]]1[[ else ]]2[[ end ]]
+            # As the master's (above).
+            podSecurityContext:
+              enabled: true
+              seccompProfile:
+                type: RuntimeDefault
+            containerSecurityContext:
+              enabled: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
             enableAuth: true
             existingConfigSecret: seaweedfs-s3-identities
             # Lance's namespace server is not used.

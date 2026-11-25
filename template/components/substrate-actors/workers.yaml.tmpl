@@ -16,6 +16,13 @@
 # a quarter of its limits, as a runner Job's pod asks for a part of its limit.
 # The workers run on the runner placement's nodes (the chart's
 # runner.placement), whose taints atelet tolerates too.
+#
+# The workers stay outside Pod Security restricted on purpose
+# (infrared-docs-internal docs/home-defense.md, step 8). Substrate's controller
+# writes each worker's pod from this pool and the gVisor SandboxConfig, and a
+# WorkerPool takes no securityContext: the worker runs gVisor's runsc, as root
+# with SYS_ADMIN, NET_ADMIN and the rest, seccomp and AppArmor unconfined, on
+# the node's /var/lib/ate. A step's code runs in gVisor's sandbox inside it.
 [[- if .AgentPool.MaxWorkers ]]
 #
 # Elastic (the chart's runner.actors.maxWorkers): Infrared's operator sets

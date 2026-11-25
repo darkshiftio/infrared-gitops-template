@@ -55,6 +55,18 @@ spec:
               limits:
                 cpu: 500m
                 memory: 256Mi
+            # Pod Security restricted (infrared-docs-internal
+            # docs/home-defense.md, step 8): the chart sets none. The image
+            # runs as its own user, 65532, which runAsNonRoot checks at start.
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            containerSecurityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
           # Lets cert-manager's approver approve this issuer's CertificateRequests.
           certmanager:
             namespace: cert-manager
