@@ -1354,6 +1354,12 @@ for v in "${variants[@]}"; do
       [ "$(yq -N -r 'select(.kind == "Namespace" and .metadata.name == "builds") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$b")" = restricted ] \
         || bad "$variant: namespace builds is not restricted"
       if grep -nE '\| *kubectl apply' "$b" | grep -v -- '--server-side' | grep -q .; then bad "$variant: a client-side kubectl apply in builds"; fi
+      # The last group builds files and a start command with no language
+      # (procfile alone), after every language's group.
+      [ "$(sel "$b" 'select(.kind == "ClusterBuilder") | .spec.order | map(.group | map(.id) | join("+")) | join(" ")')" \
+          = "paketo-buildpacks/ca-certificates+paketo-buildpacks/node-engine+paketo-buildpacks/npm-install+paketo-buildpacks/node-run-script+paketo-buildpacks/go-dist+paketo-buildpacks/git+paketo-buildpacks/go-mod-vendor+paketo-buildpacks/go-build+paketo-buildpacks/procfile+paketo-buildpacks/environment-variables+paketo-buildpacks/image-labels paketo-buildpacks/go paketo-buildpacks/web-servers paketo-buildpacks/nodejs paketo-buildpacks/procfile" ] \
+        && ok "$variant: the builder's groups end with procfile alone" \
+        || bad "$variant: the builder's groups are not Go with a UI, go, web-servers, nodejs, then procfile alone"
       ok "$variant: builds component complete, kpack clones with $source_secret"
     else
       bad "$variant: components/builds built nothing"

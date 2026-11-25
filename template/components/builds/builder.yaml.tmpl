@@ -180,6 +180,16 @@ spec:
 #                   npm-install and node-run-script, so the Node build
 #                   (BP_NODE_RUN_SCRIPTS=build) happens inside this group.
 #   4. nodejs       a plain Node server.
+#   5. procfile     files and a start command, with no language: a repo none
+#                   of the groups above detects, with a Procfile or
+#                   BP_PROCFILE_DEFAULT_PROCESS. The image is the run image
+#                   and the repo's files under /workspace, nothing else: no
+#                   runtime, no package manager, nothing a scan would find
+#                   but the run image's own packages. Infrared's summary
+#                   video is one: its Job copies its files out and runs them
+#                   in other images, so a Node runtime in its own image was
+#                   unused and carried the npm bundled with Node into every
+#                   scan (infrared-docs-internal ADR 0093).
 # A Go repo with no package.json or no BP_NODE_RUN_SCRIPTS, and a Node repo
 # with no go.mod, fail group 1 and build as they did before it.
 # web-servers and nodejs are separate groups rather than one: both composites
@@ -246,6 +256,8 @@ spec:
         - id: paketo-buildpacks/web-servers
     - group:
         - id: paketo-buildpacks/nodejs
+    - group:
+        - id: paketo-buildpacks/procfile
 [[- else -]]
 # builds is off (no build registry): no builder.
 [[- end ]]
