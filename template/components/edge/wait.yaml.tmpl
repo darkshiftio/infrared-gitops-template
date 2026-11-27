@@ -1,9 +1,23 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
+[[- /* The private edge (spec.privateEdge, ADR 0100) waits as the tunnel's edge does, and wins over a tunnel. */ -]]
+[[- $private := and (eq .Edge "gateway") .PrivateEdge -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") (not .PrivateEdge) -]]
+[[- $inside := or $tunnel $private -]]
 # =============================================================================
 # Before the edge: the store, cert-manager's webhook and every CRD it uses.
 # =============================================================================
-[[- if $tunnel ]]
+[[- if $private ]]
+# On a fresh cluster every Application starts at once. With the edge private
+# (spec.privateEdge, infrared-docs-internal ADR 0100) the edge copies no token,
+# and asks cert-manager for its own certificate authority and a certificate, so
+# it needs cert-manager to answer first: on a first install an object was once
+# refused by a webhook not yet up, and the sync waited for ever. This PreSync
+# hook waits, up to half an hour, until the CRDs below are established,
+# cert-manager's webhook has a ready endpoint and the store is Ready, as the
+# edge's wait does behind a Cloudflare Tunnel. Only then does the sync apply
+# anything, in waves that keep each object a webhook admits apart from what
+# depends on it (certificate.yaml).
+[[- else if $tunnel ]]
 # On a fresh cluster every Application starts at once. Behind the Cloudflare
 # Tunnel the edge copies cloudflared's credentials through the
 # ClusterSecretStore infrared-platform and asks cert-manager for its own
@@ -105,7 +119,7 @@ spec:
             - name: HOME
               value: /tmp
             - name: WAIT_CRDS
-              value: "externalsecrets.external-secrets.io [[ if $tunnel ]]issuers.cert-manager.io[[ else ]]originissuers.cert-manager.k8s.cloudflare.com[[ end ]] certificates.cert-manager.io envoyproxies.gateway.envoyproxy.io backendtrafficpolicies.gateway.envoyproxy.io[[ if and (not .SignInPrivate) .InfraredHost .EdgeProofSecret ]] clienttrafficpolicies.gateway.envoyproxy.io httproutefilters.gateway.envoyproxy.io[[ end ]] gatewayclasses.gateway.networking.k8s.io gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io listenersets.gateway.networking.k8s.io"
+              value: "externalsecrets.external-secrets.io [[ if $inside ]]issuers.cert-manager.io[[ else ]]originissuers.cert-manager.k8s.cloudflare.com[[ end ]] certificates.cert-manager.io envoyproxies.gateway.envoyproxy.io backendtrafficpolicies.gateway.envoyproxy.io[[ if and (not .SignInPrivate) .InfraredHost .EdgeProofSecret ]] clienttrafficpolicies.gateway.envoyproxy.io httproutefilters.gateway.envoyproxy.io[[ end ]] gatewayclasses.gateway.networking.k8s.io gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io listenersets.gateway.networking.k8s.io"
             - name: WAIT_SERVICES
               value: "cert-manager/cert-manager-webhook"
             - name: WAIT_STORES

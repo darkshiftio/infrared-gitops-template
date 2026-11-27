@@ -28,7 +28,8 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-[[- if and (eq .Edge "gateway") .CustomHostnames ]]
+[[- /* A private edge (spec.privateEdge, ADR 0100) serves no custom hostname. */ -]]
+[[- if and (eq .Edge "gateway") .CustomHostnames (not .PrivateEdge) ]]
         # The HTTP-01 challenges of custom hostnames' origin certificates are
         # routes on the edge Gateway (components/edge, Issuer letsencrypt-http).
         config:

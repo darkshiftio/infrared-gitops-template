@@ -52,6 +52,21 @@
 #     those it leaves out, the store, the README and the infrared Application,
 #     which carries it; and hack/render refuses a tunnel without a gateway
 #     edge, an id that is no lower-case UUID, and a key no Secret takes
+#   - the private edge (PrivateEdge, infrared-docs-internal ADR 0100): the
+#     tunnel's edge without cloudflared: Envoy on no host port behind the
+#     ClusterIP Service edge, the certificate edge from the authority inside
+#     the cluster, no OriginIssuer, no copy of any token and no cloudflared;
+#     no external-dns, external-dns-domain or origin issuer, nor their
+#     components; the store admits the edge's namespace and not external-dns;
+#     with the fence, Envoy admits no one from outside the cluster; on the
+#     gateway's Data it changes exactly the files the tunnel changes but the
+#     edge's kustomization and tunnel.yaml, the edge's built objects are the
+#     tunnel's but cloudflared's four, and the platform domain's own token
+#     stays unread; PrivateEdge false renders every file as none does; the
+#     infrared Application carries installation.privateEdge: true; and
+#     hack/render refuses it without a gateway edge, with a tunnel and with
+#     custom hostnames (and its tests prove that, were either there, every
+#     file renders as the private edge alone)
 #   - the edge's proof (EdgeProofSecret, workspace TODO 473, F4;
 #     infrared-docs-internal ADR 0066 D2), on the nodes' ports and behind a
 #     tunnel: the infrared route's first rule takes the API's paths alone
@@ -468,6 +483,14 @@ tn_hosts='["hive.football","hooks.example.org","support.example.org"]'
 yq -p json -o json '. + {"TunnelHostnames": '"$tn_hosts"'}' "$work/beside.json" >"$work/beside-hosts.json"
 yq -p json -o json '. + {"TunnelHostnames": '"$tn_hosts"'}' "$work/beside-private.json" >"$work/beside-hosts-private.json"
 yq -p json -o json '. + {"TunnelHostnames": ["shop.example.net"]}' "$work/tunnel-custom.json" >"$work/tunnel-hosts.json"
+# The private edge (ADR 0100), as the operator hands it: on the gateway's
+# Data; on the platform domain's own token, which it leaves unread; with
+# Infrared's name kept off it; and with the edge's proof. Below, on an install
+# conformance cluster's shape.
+yq -p json -o json '. + {"PrivateEdge": true}' "$work/gateway.json" >"$work/edge-private.json"
+yq -p json -o json '. + {"PrivateEdge": true}' "$work/gateway-split.json" >"$work/edge-private-split.json"
+yq -p json -o json '. + {"PrivateEdge": true}' "$work/private.json" >"$work/edge-private-signin.json"
+yq -p json -o json '. + {"PrivateEdge": true}' "$work/gateway-proof.json" >"$work/edge-private-proof.json"
 
 # The stores variant: the gateway's Data plus the platform's own stores, on
 # Linode, with Infisical left out, the stores backed up outside, and Gitea as
@@ -563,6 +586,9 @@ yq -p json -o json '. + {"Restore": {"Point": "'"$restore_point"'", "Artifact": 
 # The same on GKE's own nodes (Cloud gcp, from their gce:// providerIDs): SeaweedFS's
 # data on persistent disks of the default class instead of the nodes' disks.
 yq -p json -o json '.Cloud = "gcp"' "$work/gcs.json" >"$work/gcs-gke.json"
+# The private edge on an install conformance cluster's shape (ADR 0100): GKE's
+# nodes, the stores, the registry, Agent Substrate and a gcs bucket.
+yq -p json -o json '. + {"PrivateEdge": true}' "$work/gcs-gke.json" >"$work/edge-private-gke.json"
 # The registry token: Substrate's Data on GKE (Cloud ""), the chart and
 # Substrate's images on a private Artifact Registry, and the pull secret an
 # access token of a Google service account the chart rewrites every 30 minutes
@@ -611,6 +637,10 @@ variants=(
   "beside-hosts demo-bh k3s - -data $work/beside-hosts.json"
   "beside-hosts-private demo-bq k3s - -data $work/beside-hosts-private.json"
   "tunnel-hosts demo-th k3s - -data $work/tunnel-hosts.json"
+  "edge-private demo-ep k3s - -data $work/edge-private.json"
+  "edge-private-split demo-es k3s - -data $work/edge-private-split.json"
+  "edge-private-signin demo-ei k3s - -data $work/edge-private-signin.json"
+  "edge-private-proof demo-eo k3s - -data $work/edge-private-proof.json"
   "stores demo-st k3s - -data $work/stores.json"
   "stores-plain demo-sp k3s - -stores"
   "stores-backup demo-sb k3s - -stores -backup {\"bucket\":\"$backup_bucket\"}"
@@ -634,6 +664,7 @@ variants=(
   "gcs demo-gc k3s $zot_registry -data $work/gcs.json"
   "gcs-restore demo-gr k3s $zot_registry -data $work/gcs-restore.json"
   "gcs-gke demo-gk k3s $zot_registry -data $work/gcs-gke.json"
+  "edge-private-gke demo-eg k3s $zot_registry -data $work/edge-private-gke.json"
   "code-index demo-ci k3s $zot_registry -data $work/code-index.json"
   "code-index-plain demo-cx k3s - -data $work/code-index-plain.json"
   "telemetry demo-tm k3s - -data $work/telemetry.json"
@@ -944,6 +975,7 @@ for v in "${variants[@]}"; do
   edge="$(sed -n -E 's/.*-edge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   stores=false cloud="" backup="" endpoint="" region="" provider="" domain="" host="" token_key="" disabled="[]"
   tunnel_id="" tunnel_key="" custom=false proof="" tunnel_mode="" publish=false private=false tunnel_hosts="" tunnel_hosts_json="[]"
+  edge_private=false
   forge="$(sed -n -E 's/.*-forge ([^ ]+).*/\1/p' <<<"${extra:-}")"
   grep -qw -- -stores <<<"${extra:-}" && stores=true
   capable=false
@@ -973,6 +1005,7 @@ for v in "${variants[@]}"; do
     tunnel_mode="$(jq -r '.TunnelMode // ""' "$data_file")"
     publish="$(jq -r '.TunnelPublish // false' "$data_file")"
     private="$(jq -r '.SignInPrivate // false' "$data_file")"
+    edge_private="$(jq -r '.PrivateEdge // false' "$data_file")"
     tunnel_hosts="$(jq -r '(.TunnelHostnames // []) | join(" ")' "$data_file")"
     tunnel_hosts_json="$(jq -c '.TunnelHostnames // []' "$data_file")"
     disabled="$(yq -p json -o json -I0 '.Disabled // []' "$data_file")"
@@ -1007,14 +1040,21 @@ for v in "${variants[@]}"; do
   if [ "$edge" = gateway ] && [ -n "$tunnel_id" ]; then
     if [ "$tunnel_mode" = beside ]; then beside=true; else tunnel=true; fi
   fi
+  # The private edge (ADR 0100), on a gateway edge: the tunnel's edge without
+  # cloudflared. inside: the edge on the authority inside the cluster, behind
+  # a tunnel or private (hack/render refuses the two together).
+  [ "$edge" = gateway ] || edge_private=false
+  inside="$tunnel" inside_said="behind the tunnel"
+  [ "$edge_private" = true ] && inside=true inside_said="with the edge private"
   # Infrared's own name on the edge: its host, unless the private sign-in
   # keeps it off (ADR 0090).
   ihost="$host"
   [ "$edge" = gateway ] && [ "$private" = true ] && ihost=""
   # The platform domain on a Cloudflare token of its own (ADR 0063): a
-  # gateway edge, a platform domain and the key, never behind a tunnel.
+  # gateway edge, a platform domain and the key, never behind a tunnel or with
+  # the edge private.
   split=false
-  [ "$edge" = gateway ] && [ -n "$domain" ] && [ -n "$token_key" ] && [ "$tunnel" = false ] && split=true
+  [ "$edge" = gateway ] && [ -n "$domain" ] && [ -n "$token_key" ] && [ "$inside" = false ] && split=true
   # Agent Substrate: the stores, the registry and the preflight's yes.
   substrate=false
   [ "$stores" = true ] && [ -n "$zot_addr" ] && [ "$capable" = true ] && substrate=true
@@ -1235,6 +1275,8 @@ for v in "${variants[@]}"; do
   want=""
   if [ "$edge" = gateway ]; then
     want="installation: {edge: gateway"
+    # The private edge (ADR 0100).
+    [ "$edge_private" = true ] && want="$want, privateEdge: true"
     signin_private=""
     [ "$private" = true ] && signin_private=", signInPrivate: true"
     [ -n "$domain" ] && [ -n "$host" ] \
@@ -1444,21 +1486,22 @@ for v in "${variants[@]}"; do
       "$out/components/platform-tokens" -name '*.yaml')"
   if [ "$edge" = gateway ]; then
     edge_apps="envoy-gateway:11 origin-ca-issuer:11 platform-tokens:11 external-dns:12 edge:13"
-    [ "$tunnel" = true ] && edge_apps="envoy-gateway:11 platform-tokens:11 edge:13"
+    [ "$inside" = true ] && edge_apps="envoy-gateway:11 platform-tokens:11 edge:13"
     for a in $edge_apps; do
       name="${a%%:*}" f="$reg/components/${a%%:*}.yaml"
       [ "$(sel "$f" '.metadata.name')" = "$name" ] && [ "$(sel "$f" '.metadata.annotations["argocd.argoproj.io/sync-wave"]')" = "${a#*:}" ] \
         && [ "$(sel "$f" '.spec.project')" = platform ] \
         && ok "$variant: $name Application (wave ${a#*:})" || bad "$variant: $name Application missing or wrong"
     done
-    if [ "$tunnel" = true ]; then
-      # Behind the tunnel nothing writes DNS or asks Cloudflare's Origin CA, so
-      # neither Application nor its components hold an object.
+    if [ "$inside" = true ]; then
+      # Behind the tunnel, or with the edge private (ADR 0100), nothing writes
+      # DNS or asks Cloudflare's Origin CA, so neither Application nor its
+      # components hold an object.
       left="$(for f in "$reg/components/origin-ca-issuer.yaml" "$reg/components/external-dns.yaml" "$reg/components/external-dns-domain.yaml" \
           $(find "$out/components/external-dns" "$out/components/external-dns-domain" -name '*.yaml'); do holds_objects "$f" && echo "$f"; done || true)"
       [ -z "$left" ] && [ ! -e "$work/$variant-built/external-dns.yaml" ] && [ ! -e "$work/$variant-built/external-dns-domain.yaml" ] \
-        && ok "$variant: behind the tunnel no origin issuer, external-dns or external-dns-domain, nor their components" \
-        || bad "$variant: behind the tunnel these still hold objects: $left"
+        && ok "$variant: $inside_said no origin issuer, external-dns or external-dns-domain, nor their components" \
+        || bad "$variant: $inside_said these still hold objects: $left"
     fi
     f="$reg/components/envoy-gateway.yaml"
     # The Gateway API CRDs: k3s on Linode brings them, so the chart leaves them out there; elsewhere (GKE) the chart installs them.
@@ -1469,14 +1512,15 @@ for v in "${variants[@]}"; do
       || bad "$variant: Envoy Gateway's Gateway API CRDs are not $gw_crds for cloud '$cloud', or gateway-helm's CRD subchart is on"
     e="$work/$variant-built/edge.yaml" t="$work/$variant-built/platform-tokens.yaml" x="$work/$variant-built/external-dns.yaml"
     dns="$reg/components/external-dns.yaml"
-    if [ "$tunnel" = true ]; then
-      # Behind the tunnel: Envoy on no node's ports, behind a ClusterIP.
+    if [ "$inside" = true ]; then
+      # Behind the tunnel, or with the edge private: Envoy on no node's ports,
+      # behind a ClusterIP.
       [ "$(sel "$e" 'select(.kind == "EnvoyProxy") | .spec.provider.kubernetes.envoyService | .name + " " + .type + " " + (.externalTrafficPolicy // "none")')" = "edge ClusterIP none" ] \
         && [ "$(sel "$e" 'select(.kind == "EnvoyProxy") | .spec.provider.kubernetes.envoyDaemonSet.patch // "none"')" = none ] \
         && ! grep -q hostPort "$e" \
         && [ "$(sel "$e" 'select(.kind == "GatewayClass") | .spec.parametersRef.name')" = "$(sel "$e" 'select(.kind == "EnvoyProxy") | .metadata.name')" ] \
-        && ok "$variant: behind the tunnel Envoy binds no node's port, behind the ClusterIP Service edge" \
-        || bad "$variant: behind the tunnel Envoy binds a host port, or its Service is not the ClusterIP edge"
+        && ok "$variant: $inside_said Envoy binds no node's port, behind the ClusterIP Service edge" \
+        || bad "$variant: $inside_said Envoy binds a host port, or its Service is not the ClusterIP edge"
     else
     # Envoy on each node's own ports, behind a NodePort Service.
     [ "$(sel "$e" 'select(.kind == "EnvoyProxy") | .spec.provider.kubernetes.envoyService.type')" = NodePort ] \
@@ -1527,18 +1571,24 @@ for v in "${variants[@]}"; do
     # private sign-in keeps it off the edge (ADR 0090).
     host_ref=""
     [ -n "$ihost" ] && host_ref="infrared-https>edge-tls"
-    if [ "$tunnel" = true ]; then
+    if [ "$inside" = true ]; then
       # Behind the tunnel (ADR 0064): one certificate, edge, from the cluster's
       # own authority edge-ca, on every HTTPS listener; no OriginIssuer, and
       # the one copy is the tunnel's credentials. The domain's own token, when
-      # the Installation names one, is not read.
+      # the Installation names one, is not read. With the edge private (ADR
+      # 0100) the same, and no copy at all.
       names="*.$domain"
       [ "$covered" = true ] || [ -z "$ihost" ] || names="$names,$ihost"
       want_certs="edge-ca=@Issuer/edge-self-signed>edge-ca edge=$names@Issuer/edge-ca>edge-tls"
       want_refs="https>edge-tls $host_ref"
       want_issuers=""
-      want_tokens="cloudflared-credentials<$store_copy/${tunnel_key:-cloudflare-tunnel-credentials}>cloudflared-credentials/credentials.json"
-      what="one certificate for $names from the cluster's own authority on every HTTPS listener, no origin issuer, the tunnel's credentials the one copy"
+      if [ "$tunnel" = true ]; then
+        want_tokens="cloudflared-credentials<$store_copy/${tunnel_key:-cloudflare-tunnel-credentials}>cloudflared-credentials/credentials.json"
+        what="one certificate for $names from the cluster's own authority on every HTTPS listener, no origin issuer, the tunnel's credentials the one copy"
+      else
+        want_tokens=""
+        what="with the edge private one certificate for $names from the cluster's own authority on every HTTPS listener, no origin issuer, no copy of any token"
+      fi
     elif [ "$split" = true ]; then
       # With the private sign-in, no certificate edge: Infrared's name was its one name.
       want_certs="edge-domain=*.$domain@OriginIssuer/cloudflare-origin-domain>edge-domain-tls"
@@ -1565,7 +1615,7 @@ for v in "${variants[@]}"; do
     [ "$certs" = "$want_certs" ] && [ "$refs" = "$want_refs" ] && [ "$issuers" = "$want_issuers" ] && [ "$tokens" = "$want_tokens" ] \
       && ok "$variant: $what" \
       || bad "$variant: the edge's certificates, listeners, issuers or tokens are wrong: '$certs' '$refs' '$issuers' '$tokens'; want '$want_certs' '$want_refs' '$want_issuers' '$want_tokens'"
-    if [ "$tunnel" = true ]; then
+    if [ "$inside" = true ]; then
       # The authority: self-signed, ten years, renewed on one key, so what it
       # signed before a renewal verifies after it; the CA Issuer on its Secret.
       [ "$(sorted "$e" 'select(.kind == "Issuer" and .metadata.name != "letsencrypt-http") | .metadata.name + ":" + (.spec | keys | join(",")) + "<" + (.spec.ca.secretName // "")')" \
@@ -1594,6 +1644,16 @@ for v in "${variants[@]}"; do
         && [ "$(wave ConfigMap cloudflared) $(wave PodDisruptionBudget cloudflared)" = "$(wave Deployment cloudflared) $(wave Deployment cloudflared)" ] \
         && ok "$variant: behind the tunnel the credentials, the authority, its issuer and the certificate come before the Gateway, cloudflared after it (waves $order)" \
         || bad "$variant: the tunnel's waves are not credentials < self-signed issuer < authority < its issuer < certificate < EnvoyProxy < GatewayClass < Gateway < cloudflared$acme: $order"
+    elif [ "$edge_private" = true ]; then
+      # With the edge private (ADR 0100): the self-signed issuer, the authority,
+      # its issuer and the certificate, each in a wave of its own, before the
+      # Envoy fleet and the Gateway; nothing after them.
+      wave() { sel "$e" "select(.kind == \"$1\" and .metadata.name == \"$2\") | .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] // \"0\""; }
+      order="$(wave Issuer edge-self-signed) $(wave Certificate edge-ca) $(wave Issuer edge-ca) $(wave Certificate edge)"
+      order="$order $(wave EnvoyProxy edge) $(wave GatewayClass edge) $(wave Gateway edge)"
+      awk '{ for (i = 2; i <= NF; i++) if ($i + 0 <= $(i - 1) + 0) exit 1; exit NF != 7 }' <<<"$order" \
+        && ok "$variant: with the edge private the authority, its issuer and the certificate come before the Gateway (waves $order)" \
+        || bad "$variant: the private edge's waves are not self-signed issuer < authority < its issuer < certificate < EnvoyProxy < GatewayClass < Gateway: $order"
     else
     order="$(for k in ExternalSecret OriginIssuer Certificate EnvoyProxy GatewayClass Gateway; do
         sel "$e" "select(.kind == \"$k\" and .metadata.name != \"cloudflared-credentials\") | .metadata.annotations[\"argocd.argoproj.io/sync-wave\"] // \"0\"" | sort -u; done | tr '\n' ' ')"
@@ -1686,6 +1746,15 @@ for v in "${variants[@]}"; do
       grep -qw -- issuers.cert-manager.io <<<"$waits" && ! grep -q originissuers <<<"$waits" \
         && ok "$variant: behind the tunnel the edge waits for cert-manager's Issuer CRD, not the origin issuer's" \
         || bad "$variant: behind the tunnel the edge waits for '$waits'"
+    elif [ "$edge_private" = true ]; then
+      # With the edge private (ADR 0100): no cloudflared, and the tunnel's wait,
+      # which asks for cert-manager's Issuer CRD, never the origin issuer's.
+      waits="$(sel "$e" 'select(.kind == "Job" and .metadata.name == "edge-wait") | .spec.template.spec.containers[0].env[] | select(.name == "WAIT_CRDS") | .value')"
+      [ -z "$(sel "$e" 'select(.metadata.name == "cloudflared" or .metadata.name == "cloudflared-credentials") | .kind')" ] \
+        && [ "$(sel "$out/components/edge/kustomization.yaml" '.resources | contains(["tunnel.yaml"])')" = false ] \
+        && grep -qw -- issuers.cert-manager.io <<<"$waits" && ! grep -q originissuers <<<"$waits" \
+        && ok "$variant: with the edge private no cloudflared, and the edge waits for cert-manager's Issuer CRD, not the origin issuer's" \
+        || bad "$variant: with the edge private cloudflared is there, or the edge waits for '$waits'"
     else
     # Beside the nodes' own ports (ADR 0090): cloudflared beside the edge.
     [ "$beside" = true ] && check_cloudflared "$e" "$variant" "$tunnel_id" "${tunnel_key:-cloudflare-tunnel-credentials}" "$ihost" "$domain" "$tunnel_hosts" beside
@@ -1727,10 +1796,10 @@ for v in "${variants[@]}"; do
     fi
     fi
     # The platform's tokens: one store, one Secret, two namespaces, or behind
-    # a tunnel one, the edge's; with Substrate and a pull secret, that Secret
-    # too, for Substrate's namespaces.
+    # a tunnel or with the edge private one, the edge's; with Substrate and a
+    # pull secret, that Secret too, for Substrate's namespaces.
     want_ns="external-dns envoy-gateway-system${backup:+ stores}"
-    [ "$tunnel" = true ] && want_ns="envoy-gateway-system${backup:+ stores}"
+    [ "$inside" = true ] && want_ns="envoy-gateway-system${backup:+ stores}"
     want_names="infrared-platform-tokens:get"
     if [ "$substrate" = true ] && [ -n "$pull_secret" ]; then
       want_ns="$want_ns podcertificate-controller-system ate-system ate-workers"
@@ -1746,7 +1815,7 @@ for v in "${variants[@]}"; do
       && [ "$(sel "$t" 'select(.kind == "ClusterSecretStore") | .spec.provider.kubernetes.remoteNamespace')" = infrared ] \
       && [ "$(line "$t" 'select(.kind == "Role") | .rules[] | .resourceNames[] + ":" + (.verbs | join(","))')" = "$want_names" ] \
       && ok "$variant: ClusterSecretStore infrared-platform reads only $want_names, for $want_ns" || bad "$variant: ClusterSecretStore infrared-platform is wrong"
-    if [ "$tunnel" = false ]; then
+    if [ "$inside" = false ]; then
     for es in "$x:external-dns" "$e:envoy-gateway-system"; do
       f="${es%%:*}" ns="${es#*:}"
       [ "$(line "$f" "select(.kind == \"ExternalSecret\" and .metadata.namespace == \"$ns\" and .metadata.name == \"cloudflare-api-token\") | .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name + \" \" + .spec.data[0].remoteRef.key + \"/\" + .spec.data[0].remoteRef.property")" \
@@ -2842,6 +2911,20 @@ left="$(fences "$work/fence-tunnel" | tr ' ' '\n' | grep -E '^(origin-ca-issuer|
 [ -z "$left" ] && [ -n "$(fences "$work/fence-tunnel" | tr ' ' '\n' | grep -x 'envoy-gateway-system/infrared-fence')" ] \
   && ok "fence-tunnel: the edge's namespace has its policy, and no namespace the tunnel leaves out has one" \
   || bad "fence-tunnel: policies for namespaces the tunnel leaves out: '$left', or none for the edge's"
+# With the edge private (ADR 0100), on an install conformance cluster's shape:
+# Envoy's policy is the tunnel's, no one from outside the cluster, and no
+# cloudflared runs to use its rule; and the fence names no namespace the
+# private edge leaves out.
+yq -p json -o json '. + {"NetworkPolicies": true}' "$work/edge-private-gke.json" >"$work/fence-private.json"
+"$work/render" -out "$work/fence-private" -cluster demo-fv -flavor k3s -build-registry "$zot_registry" -data "$work/fence-private.json" >/dev/null
+fence_built "$work/fence-private"
+[ "$(fence_policy "$work/fence-private" envoy-gateway-system infrared-edge)" = "$(yq -p json -o json -I0 'del(.ingress[0]) | sort_keys(..)' <<<"$want_edge")" ] \
+  && ok "fence-private: with the edge private Envoy admits the operator on 10443 and vmagent on its metrics, no one from outside the cluster" \
+  || bad "fence-private: with the edge private Envoy's policy is $(fence_policy "$work/fence-private" envoy-gateway-system infrared-edge)"
+left="$(fences "$work/fence-private" | tr ' ' '\n' | grep -E '^(origin-ca-issuer|external-dns)/' | tr '\n' ' ' | sed 's/ $//' || true)"
+[ -z "$left" ] && [ -n "$(fences "$work/fence-private" | tr ' ' '\n' | grep -x 'envoy-gateway-system/infrared-fence')" ] \
+  && ok "fence-private: the edge's namespace has its policy, and no namespace the private edge leaves out has one" \
+  || bad "fence-private: policies for namespaces the private edge leaves out: '$left', or none for the edge's"
 # The stores (ADR 0066 D3): Zot, Substrate, the backup and the restore,
 # CloudNativePG and vmagent, by port; nothing else outside the namespace.
 [ "$(fence_policy "$work/fence" stores infrared-fence | yq -p json -o json -I0 '[.ingress[] | ([.from[] | (.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] // "self") + ":" + ((.podSelector.matchLabels // {}) | to_entries | map(.value) | join("+"))] | join(",")) + "@" + ([.ports[]?.port | tostring] | join(","))]')" \
@@ -2879,7 +2962,7 @@ if kubectl kustomize "$work/fence-argocd/base" >"$work/fence-argocd-base.yaml" 2
 else
   bad "fence: Argo CD's patches do not apply: $(head -c 300 "$work/fence-argocd.err")"
 fi
-for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr" "$work/fence-tunnel"; do
+for out in "$work/fence" "$work/fence-telemetry" "$work/fence-ecr" "$work/fence-tunnel" "$work/fence-private"; do
   if kubeconform -strict -ignore-missing-schemas -summary -schema-location default "$out-built" >/dev/null; then
     ok "$(basename "$out"): kubeconform"
   else
@@ -4017,6 +4100,77 @@ for refused in "-edge gateway -platform-domain $split_domain -tunnel-mode beside
   i=$((i + 1))
   # shellcheck disable=SC2086 # the flags split on purpose
   if "$work/render" -out "$work/beside-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
+    bad "hack/render $refused: rendered, want a refusal"
+  else
+    ok "hack/render $refused: refused"
+  fi
+done
+# --- The private edge (ADR 0100) ------------------------------------------------------
+# The edge inside the cluster alone, with no tunnel and no public name: the
+# tunnel's edge without cloudflared. On the gateway's Data it changes exactly
+# the files the tunnel changes but the edge's kustomization and tunnel.yaml,
+# which render as without it; against the tunnel's render, the edge's built
+# objects are the tunnel's but cloudflared's four, and the store's objects
+# are the tunnel's. On the platform domain's own token it changes only the
+# infrared Application, which carries the key, and comments: the key is not
+# read. PrivateEdge false, spelled out, renders every file as none does.
+# hack/render refuses it without a gateway edge, with a tunnel, and with
+# custom hostnames; were either there all the same, the render tool's tests
+# prove every file renders as the private edge alone.
+"$work/render" -out "$work/edge-private-none" -cluster demo-ez -flavor k3s -build-registry "" -data "$work/gateway.json" >/dev/null
+"$work/render" -out "$work/edge-private-on" -cluster demo-ez -flavor k3s -build-registry "" -data "$work/edge-private.json" >/dev/null
+"$work/render" -out "$work/edge-private-tunnel" -cluster demo-ez -flavor k3s -build-registry "" -data "$work/tunnel.json" >/dev/null
+ez_reg=registry/clusters/demo-ez/components
+want="$(words "README.md components/edge/certificate.yaml components/edge/gateway.yaml components/edge/routes.yaml components/edge/wait.yaml
+  components/external-dns/cloudflare-api-token.yaml components/external-dns/kustomization.yaml components/external-dns/wait.yaml
+  components/platform-tokens/store.yaml $ez_reg/edge.yaml $ez_reg/envoy-gateway.yaml $ez_reg/external-dns.yaml
+  $ez_reg/infrared.yaml $ez_reg/origin-ca-issuer.yaml")"
+changed="$(changed_files "$work/edge-private-none" "$work/edge-private-on")"
+tunnel_changed="$(changed_files "$work/edge-private-none" "$work/edge-private-tunnel")"
+[ "$changed" = "$want" ] \
+  && [ "$(words "$changed components/edge/kustomization.yaml components/edge/tunnel.yaml")" = "$tunnel_changed" ] \
+  && ok "edge-private: the private edge changes exactly the files the tunnel changes but the edge's kustomization and tunnel.yaml ($(wc -w <<<"$changed" | tr -d ' ') files)" \
+  || bad "edge-private: the private edge changes '$changed', want '$want' (the tunnel changes '$tunnel_changed')"
+if kubectl kustomize "$work/edge-private-on/components/edge" >"$work/edge-private-on-edge.yaml" \
+  && kubectl kustomize "$work/edge-private-tunnel/components/edge" >"$work/edge-private-tunnel-edge.yaml"; then
+  cloudflared_objects="$(sorted "$work/edge-private-tunnel-edge.yaml" 'select(.metadata.name == "cloudflared" or .metadata.name == "cloudflared-credentials") | .kind + "/" + .metadata.name')"
+  [ "$(yq -o json -I0 'select(.metadata.name != "cloudflared" and .metadata.name != "cloudflared-credentials")' "$work/edge-private-tunnel-edge.yaml" | sort)" \
+      = "$(yq -o json -I0 '.' "$work/edge-private-on-edge.yaml" | sort)" ] \
+    && [ "$cloudflared_objects" = "$(words "ConfigMap/cloudflared Deployment/cloudflared ExternalSecret/cloudflared-credentials PodDisruptionBudget/cloudflared")" ] \
+    && objects_same "$work/edge-private-tunnel" "$work/edge-private-on" components/platform-tokens/store.yaml \
+    && ok "edge-private: the edge's $(sel "$work/edge-private-on-edge.yaml" '.kind' | grep -c .) built objects are the tunnel's but cloudflared's four ($cloudflared_objects), and the store's are the tunnel's" \
+    || bad "edge-private: the edge's built objects are not the tunnel's but cloudflared's, or the store's objects are not the tunnel's"
+else
+  bad "edge-private: kustomize build components/edge"
+fi
+yq -p json -o json 'del(.DomainTokenKey)' "$work/edge-private-split.json" >"$work/edge-private-split-nokey.json"
+"$work/render" -out "$work/edge-private-split-key" -cluster demo-ek -flavor k3s -build-registry "" -data "$work/edge-private-split.json" >/dev/null
+"$work/render" -out "$work/edge-private-split-nokey" -cluster demo-ek -flavor k3s -build-registry "" -data "$work/edge-private-split-nokey.json" >/dev/null
+changed="$(changed_files "$work/edge-private-split-nokey" "$work/edge-private-split-key")"
+objects_changed="$(for f in $changed; do [ "$f" = registry/clusters/demo-ek/components/infrared.yaml ] && continue
+  objects_same "$work/edge-private-split-key" "$work/edge-private-split-nokey" "$f" || echo "$f"; done || true)"
+[ -n "$changed" ] && [ -z "$objects_changed" ] \
+  && grep -qw registry/clusters/demo-ek/components/infrared.yaml <<<"$changed" \
+  && ok "edge-private: the platform domain's own token changes only the infrared Application, which carries it, and comments ($(wc -w <<<"$changed" | tr -d ' ') files)" \
+  || bad "edge-private: the platform domain's own token changes the objects of '$objects_changed' (of '$changed')"
+for base in gateway tunnel beside-publish private gateway-split; do
+  yq -p json -o json '. + {"PrivateEdge": false}' "$work/$base.json" >"$work/edge-private-false-$base.json"
+  "$work/render" -out "$work/edge-private-absent-$base" -cluster demo-ef -flavor k3s -build-registry "" -data "$work/$base.json" >/dev/null
+  "$work/render" -out "$work/edge-private-false-$base" -cluster demo-ef -flavor k3s -build-registry "" -data "$work/edge-private-false-$base.json" >/dev/null
+  diff -r "$work/edge-private-absent-$base" "$work/edge-private-false-$base" >/dev/null \
+    && ok "$base: PrivateEdge false renders every file as none does" \
+    || bad "$base: PrivateEdge false renders otherwise than none"
+done
+yq -p json -o json '. + {"PrivateEdge": true}' "$work/gateway-nocloud.json" >"$work/edge-private-custom.json"
+i=0
+for refused in "-private-edge" \
+    "-edge traefik -platform-domain $split_domain -infrared-host $split_host -private-edge" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -private-edge" \
+    "-edge gateway -platform-domain $split_domain -tunnel-id $tn_id -tunnel-mode beside -private-edge" \
+    "-data $work/edge-private-custom.json"; do
+  i=$((i + 1))
+  # shellcheck disable=SC2086 # the flags split on purpose
+  if "$work/render" -out "$work/edge-private-refused-$i" -cluster demo -flavor k3s -build-registry "" $refused >/dev/null 2>&1; then
     bad "hack/render $refused: rendered, want a refusal"
   else
     ok "hack/render $refused: refused"

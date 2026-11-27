@@ -200,6 +200,10 @@ spec:
           # Installation's alone, often set by hand, so they are not carried.
           installation:
             edge: gateway
+[[- if .PrivateEdge ]]
+            # The edge private: no tunnel and no public name (ADR 0100).
+            privateEdge: true
+[[- end ]]
 [[- if and .PlatformDomain .InfraredHost ]]
             previews:
               domain: [[ .PlatformDomain | quote ]]
@@ -213,7 +217,7 @@ spec:
               signInPrivate: true
 [[- end ]]
 [[- end ]]
-[[- if .TunnelID ]]
+[[- if and .TunnelID (not .PrivateEdge) ]]
             # The Cloudflare Tunnel the edge is reached through
             # (INFRARED_TUNNEL, ADR 0064); its credentials stay in the
             # install's Secret.

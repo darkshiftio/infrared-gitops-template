@@ -1,8 +1,11 @@
 [[- $oci := true ]][[ range .Disabled ]][[ if eq . "origin-ca-issuer" ]][[ $oci = false ]][[ end ]][[ end ]]
 [[- /* Behind a Cloudflare Tunnel (spec.tunnel, ADR 0064) no Application makes origin-ca-issuer's namespace, and no node's port reaches Envoy. */ -]]
 [[- if and .TunnelID (ne .TunnelMode "beside") ]][[ $oci = false ]][[ end ]]
+[[- /* Nor with the edge private (spec.privateEdge, ADR 0100), which wins over a tunnel. */ -]]
+[[- $private := and (eq .Edge "gateway") .PrivateEdge ]]
+[[- if $private ]][[ $oci = false ]][[ end ]]
 [[- /* Beside the nodes' own ports (spec.tunnel.mode beside, ADR 0090) Envoy keeps its host ports and cloudflared reaches it on both of its ports. */ -]]
-[[- $beside := and .TunnelID (eq .TunnelMode "beside") ]]
+[[- $beside := and .TunnelID (eq .TunnelMode "beside") (not $private) ]]
 [[- if and .NetworkPolicies (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 # =============================================================================
 # The network fence (INFRARED_NETWORK_POLICIES, infrared-docs-internal ADR 0066
@@ -13,7 +16,13 @@
 # operator (its HTTPS check of a zone's addresses goes to the Service edge, on
 # 443), and vmagent on the metrics port. Every other pod here admits the
 # platform, and the control plane on Envoy Gateway's topology injector.
-[[- if and .TunnelID (not $beside) ]]
+[[- if $private ]]
+#
+# The edge is private (spec.privateEdge, infrared-docs-internal ADR 0100):
+# Envoy binds no node's port and no cloudflared runs, so it admits no one from
+# outside the cluster. The origin issuer is left out, and its namespace with
+# it.
+[[- else if and .TunnelID (not $beside) ]]
 #
 # Behind the Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064)
 # Envoy binds no node's port, so it admits no one from outside the cluster:
@@ -69,7 +78,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-[[- if or (not .TunnelID) $beside ]]
+[[- if and (or (not .TunnelID) $beside) (not $private) ]]
     # Cloudflare, through the nodes' hostPorts 80 and 443 (Envoy's 10080 and
     # 10443): the world, which on Dataplane V2 is never a pod or a node.
     - from:

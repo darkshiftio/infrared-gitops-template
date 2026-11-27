@@ -1,4 +1,5 @@
-[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) .TunnelID -]]
+[[- /* The private edge (spec.privateEdge, infrared-docs-internal ADR 0100) has no tunnel, and wins over one: no cloudflared. */ -]]
+[[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) .TunnelID (not .PrivateEdge) -]]
 [[- $key := default "cloudflare-tunnel-credentials" .TunnelCredentialsKey ]]
 [[- $edge := "https://edge.envoy-gateway-system.svc.cluster.local:443" -]]
 [[- /* Beside the nodes' own ports (spec.tunnel.mode beside, ADR 0090) the edge keeps Cloudflare's Origin CA, which cloudflared trusts built in: no edge-ca, no caPool. */ -]]

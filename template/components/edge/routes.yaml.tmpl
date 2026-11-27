@@ -1,7 +1,9 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 [[- /* With mode beside (spec.tunnel.mode, ADR 0090) cloudflared runs beside an edge that routes as it does without a tunnel. */ -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
-[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") -]]
+[[- /* The private edge (spec.privateEdge, ADR 0100) routes as it does anywhere, and nothing publishes DNS from its routes; it wins over a tunnel. */ -]]
+[[- $private := and (eq .Edge "gateway") .PrivateEdge -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") (not .PrivateEdge) -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") (not .PrivateEdge) -]]
 [[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090). */ -]]
 [[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
 # =============================================================================
@@ -11,7 +13,13 @@
 # =============================================================================
 # Plain HTTP, every name: a redirect to HTTPS, nothing served in the clear,
 # a zone's own addresses too (on the listener http-any, which names no host).
-[[- if $tunnel ]]
+[[- if $private ]]
+#
+# The edge is private (spec.privateEdge, infrared-docs-internal ADR 0100): no
+# request from outside the cluster reaches it, and nothing publishes DNS from
+# these routes: external-dns does not run, and no record names the edge. The
+# label below stays, so the routes are the same either way.
+[[- else if $tunnel ]]
 #
 # Behind the Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064)
 # no plain HTTP from outside reaches it: cloudflared sends every request to
@@ -45,7 +53,7 @@
 # addresses: the ExternalIP of each node with a ready Envoy (gateway.yaml).
 [[- end ]]
 [[- end ]]
-[[- if and .PlatformDomain .DomainTokenKey (not $tunnel) ]]
+[[- if and .PlatformDomain .DomainTokenKey (not $tunnel) (not $private) ]]
 # Two of them read these routes, one for each Cloudflare zone (ADR 0063):
 # external-dns-domain, on the platform domain's own token, publishes
 # *.[[ .PlatformDomain ]] and edge.[[ .PlatformDomain ]][[ if $infrared ]], and external-dns, on
@@ -89,7 +97,12 @@ spec:
             statusCode: 301
 [[- if .PlatformDomain ]]
 ---
-[[- if $tunnel ]]
+[[- if $private ]]
+# The edge's own name, [[ printf "edge.%s" .PlatformDomain ]], the target Infrared points
+# a zone's own addresses at. With the edge private no record publishes it, nor
+# the wildcard. Plain HTTP only, a redirect like the one above: on HTTPS the
+# name is the wildcard listener's.
+[[- else if $tunnel ]]
 # The edge's own name, [[ printf "edge.%s" .PlatformDomain ]], the target Infrared points
 # a zone's own addresses at (a proxied CNAME each; Cloudflare flattens one at
 # a zone's apex). Behind the tunnel the wildcard's CNAME to the tunnel answers

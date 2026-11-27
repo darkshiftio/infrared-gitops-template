@@ -1,4 +1,8 @@
-[[- if and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") .PlatformDomain .DomainTokenKey -]]
+[[- if and (eq .Edge "gateway") .PrivateEdge .PlatformDomain .DomainTokenKey -]]
+# external-dns-domain does not run with the edge private (the Installation's
+# spec.privateEdge, infrared-docs-internal ADR 0100): no record names the
+# platform domain's wildcard. Nothing to wait for.
+[[- else if and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") .PlatformDomain .DomainTokenKey -]]
 # external-dns-domain does not run behind a Cloudflare Tunnel (the
 # Installation's spec.tunnel, infrared-docs-internal ADR 0064): the platform
 # domain's wildcard is a proxied CNAME to the tunnel, made once by a person.
