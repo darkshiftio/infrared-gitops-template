@@ -1362,17 +1362,37 @@ spec:
                       labels:
                         severity: warning
                         infrared_platform: "true"
+                        infrared_investigate: "false"
                       annotations:
                         summary: "A conformance run of {{ `{{ $labels.template }}` }} is more than 30 minutes past its time limit."
                         description: "Suite {{ `{{ $labels.suite }}` }}. The run may still hold a cluster that bills: read its steps and its cluster's deletion on the Clusters page. The alert ends when the run does."
                     - alert: InfraredTemplateConformanceStale
-                      expr: time() - max by (suite, template) (infrared_conformance_last_passed_timestamp_seconds{job="infrared-operator", platform="[[ $platform ]]"}) > 36 * 3600
+                      expr: time() - max by (suite, template) (infrared_conformance_last_passed_timestamp_seconds{job="infrared-operator", platform="[[ $platform ]]", suite!="installs"}) > 36 * 3600
                       labels:
                         severity: warning
                         infrared_platform: "true"
+                        infrared_investigate: "false"
                       annotations:
                         summary: "No conformance run of {{ `{{ $labels.template }}` }} has passed in 36 hours."
                         description: "Suite {{ `{{ $labels.suite }}` }}. Its runs fail, are refused by the monthly cap, are skipped while one still goes, or are suspended: read the suite on the Clusters page. The alert ends when a run passes."
+                    - alert: InfraredInstallConformanceFailed
+                      expr: max by (suite, template) (infrared_conformance_last_result{job="infrared-operator", platform="[[ $platform ]]", suite="installs"}) == 0
+                      labels:
+                        severity: warning
+                        infrared_platform: "true"
+                        infrared_investigate: "false"
+                      annotations:
+                        summary: "The last install conformance run of {{ `{{ $labels.template }}` }} failed: backup and restore are not proven on this version."
+                        description: "Suite {{ `{{ $labels.suite }}` }}. Read the run's steps, its window and its checks on the Clusters page; whatever step failed, the run deleted both its clusters. The alert ends when a run passes."
+                    - alert: InfraredInstallConformanceStale
+                      expr: time() - max by (suite, template) (infrared_conformance_last_passed_timestamp_seconds{job="infrared-operator", platform="[[ $platform ]]", suite="installs"}) > 60 * 3600
+                      labels:
+                        severity: warning
+                        infrared_platform: "true"
+                        infrared_investigate: "false"
+                      annotations:
+                        summary: "No install conformance run of {{ `{{ $labels.template }}` }} has passed in 60 hours."
+                        description: "Suite {{ `{{ $labels.suite }}` }}, which runs every other day. Its runs fail, are refused by the monthly cap, are skipped while one still goes, or are suspended: read the suite on the Clusters page. The alert ends when a run passes."
 [[- if .MetricsAuth ]]
                     - alert: InfraredMetricsDoorDown
                       expr: max(up{job="vmauth-victoria-metrics-k8s-stack", platform="[[ $platform ]]"}) == 0 or absent(up{job="vmauth-victoria-metrics-k8s-stack", platform="[[ $platform ]]"})
