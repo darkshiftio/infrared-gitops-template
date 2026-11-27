@@ -1795,16 +1795,20 @@ metrics' copy's `MetricsBackupStale` and `MetricsBackupNeverRan` carry
 | `InfraredOperatorReconcileErrors` | the operator's `controller_runtime_reconcile_total{result="error"}` rate is above 0 for 15 minutes, by controller | warning |
 | `InfraredMetricsStoreDown` | `up` of this install's VMSingle's own scrape (the job `vmsingle-victoria-metrics-k8s-stack`, alone: another VMSingle beside it, such as the home's telemetry store, alerts on its own) is 0 or absent for 3 minutes | critical |
 | `InfraredConformanceRunStuck` | a conformance run still going (Pending, Running or Deleting) is more than 30 minutes past its suite's time limit, counted from its start: the operator's `infrared_conformance_run_overdue_seconds` over 1800, by `suite` and `template`, at once | warning |
-| `InfraredTemplateConformanceStale` | no conformance run of a template its suite names has passed in 36 hours: `time()` less the operator's `infrared_conformance_last_passed_timestamp_seconds` over 36 hours, by `suite` and `template`, at once | warning |
+| `InfraredTemplateConformanceStale` | no conformance run of a template its suite names has passed in 36 hours: `time()` less the operator's `infrared_conformance_last_passed_timestamp_seconds` over 36 hours, by `suite` and `template`, at once, for every suite but `installs` | warning |
+| `InfraredInstallConformanceFailed` | the last run of the suite `installs` (install conformance, infrared-docs-internal ADR 0100: an install backed up, its cluster lost, restored onto another) failed: the operator's `infrared_conformance_last_result` is 0, by `suite` and `template`, at once, until a run passes | warning |
+| `InfraredInstallConformanceStale` | no run of the suite `installs` has passed in 60 hours, since it runs every other day: as `InfraredTemplateConformanceStale`, over 60 hours | warning |
 | `InfraredTelemetryWritesFailing` | with `.Telemetry.URL` only: a remote write of this vmagent (the plane's, or VMSingle's own) answers other than 2xx (`vmagent_remotewrite_requests_total`, by `url`) for 15 minutes | warning |
 
 The conformance alerts (workspace TODO 832: a run stood in its deletion for a
 day before anyone saw) read series the operator writes only once a run has: a
 template with no run has no overdue, and one no run has passed has no last pass.
-So neither fires on an install with no `ConformanceSuite`, and a template that has
+So none fires on an install with no `ConformanceSuite`, and a template that has
 never passed is never stale; a run of it that stands past its limit is still
 stuck. Each Incident's title is the alert's `summary`, and its `description`
-names the suite.
+names the suite. Each carries `infrared_investigate: "false"`: its Incident goes
+to a person, and Infrared starts no investigation of it (the owner's answer to
+ADR 0100's question 8, as for failed template runs).
 
 The chart's own `ServiceDown` and `TargetDown` fire beside these for the
 stack's components, and take the same route.
