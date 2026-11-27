@@ -224,9 +224,12 @@
 #     root route to the API's platform receiver with the operator's token
 #     mounted, which the org routes merge into, and a builds namespace's
 #     waiting or unready pods routed to none; the VMRule infrared-platform
-#     (the API, the operator, the store, and with a URL the writes), every
-#     rule with severity and infrared_platform and none with
-#     infrared_product, the metrics' copy's alerts labelled the same; the
+#     (the API, the operator, the store, the conformance runs, and with a URL
+#     the writes), every rule with severity and infrared_platform and none
+#     with infrared_product, the conformance runs' two (a run 30 minutes past
+#     its time limit, no pass in 36 hours) on the operator's series alone, at
+#     once and with no absent(), so a series no run has written alerts
+#     nothing, the metrics' copy's alerts labelled the same; the
 #     Fleet dashboard split by provider with its model-call row, and the
 #     installs dashboard; the keep lists (the component's and the stack's
 #     write relabeling) keep every series every dashboard names; the chart
@@ -837,6 +840,7 @@ for v in "${variants[@]}"; do
     fi
     vmrule_json="$(sel "$vm_app" "$vo.extraObjects[] | select(.kind == \"VMRule\" and .metadata.name == \"infrared-platform\") | tojson")"
     want_rules="InfraredAPIDown:critical InfraredOperatorDown:critical InfraredOperatorReconcileErrors:warning InfraredMetricsStoreDown:critical"
+    want_rules="$want_rules InfraredConformanceRunStuck:warning InfraredTemplateConformanceStale:warning"
     [ -n "$tele_url" ] && want_rules="$want_rules InfraredTelemetryWritesFailing:warning"
     if [ "$(jq -r '[.spec.groups[0].rules[] | .alert + ":" + .labels.severity] | join(" ")' <<<"$vmrule_json")" = "$want_rules" ] \
       && jq -e '[.spec.groups[0].rules[] | select(.labels.infrared_platform != "true" or has("labels") and (.labels | has("infrared_product")))] | length == 0' <<<"$vmrule_json" >/dev/null \
@@ -846,9 +850,31 @@ for v in "${variants[@]}"; do
       && jq -e '[.spec.groups[0].rules[] | select(.alert | test("ReconcileErrors|WritesFailing")) | .for] | unique == ["15m"]' <<<"$vmrule_json" >/dev/null \
       && jq -e '[.spec.groups[0].rules[] | select(.alert == "InfraredMetricsStoreDown") | .expr | select(contains("job=\"vmsingle-victoria-metrics-k8s-stack\"") and (contains("=~") | not))] | length == 1' <<<"$vmrule_json" >/dev/null \
       && [ "$(jq -r '.metadata.namespace' <<<"$vmrule_json")" = monitoring ]; then
-      ok "$variant: the platform VMRule carries the API's, the operator's and the store's alerts$([ -n "$tele_url" ] && echo ", and the writes to the plane,") on platform $want_platform, each with severity and infrared_platform and no infrared_product, the store's on this install's own VMSingle alone"
+      ok "$variant: the platform VMRule carries the API's, the operator's, the store's and the conformance runs' alerts$([ -n "$tele_url" ] && echo ", and the writes to the plane,") on platform $want_platform, each with severity and infrared_platform and no infrared_product, the store's on this install's own VMSingle alone"
     else
       bad "$variant: the platform VMRule is wrong: $(jq -c '[.spec.groups[0].rules[] | {alert, for, labels, expr}]' <<<"$vmrule_json")"
+    fi
+    # The conformance runs' alerts (workspace TODO 832), on the operator's own
+    # series by suite and template: a run more than 30 minutes past its time
+    # limit, and no pass in 36 hours. They fire at once, with no for, and no
+    # absent(): a series no run has written alerts nothing, so an install with
+    # no conformance suite never fires them. The summary and description name
+    # the template and the suite through the chart's tpl. eks-1125-1500, which
+    # started at 15:00:12 UTC on 2026-11-25 and stood in its deletion for a
+    # day, had the default 90 minutes: the stuck alert fires on it by 17:01.
+    want_stuck="max by (suite, template) (infrared_conformance_run_overdue_seconds{job=\"infrared-operator\", platform=\"$want_platform\"}) > 1800"
+    want_stale="time() - max by (suite, template) (infrared_conformance_last_passed_timestamp_seconds{job=\"infrared-operator\", platform=\"$want_platform\"}) > 36 * 3600"
+    conformance_rules="$(jq -c '[.spec.groups[0].rules[] | select(.alert | test("^Infrared(ConformanceRunStuck|TemplateConformanceStale)$"))]' <<<"$vmrule_json")"
+    stuck_after="$(jq -r '.[0].expr | capture("> (?<s>[0-9]+)$").s // ""' <<<"$conformance_rules" 2>/dev/null || true)"
+    if [ "$(jq -r '[.[] | .alert + " " + .expr] | join("\n")' <<<"$conformance_rules")" \
+        = "InfraredConformanceRunStuck $want_stuck"$'\n'"InfraredTemplateConformanceStale $want_stale" ] \
+      && jq -e 'all(.[]; (has("for") | not) and (.expr | contains("absent") | not)
+          and (.annotations.summary | contains("{{ `{{ $labels.template }}` }}"))
+          and (.annotations.description | contains("{{ `{{ $labels.suite }}` }}")))' <<<"$conformance_rules" >/dev/null \
+      && [ -n "$stuck_after" ] && [ $((12 + 90 * 60 + stuck_after)) -le $((121 * 60)) ]; then
+      ok "$variant: the conformance runs' alerts fire at once on the operator's series, by suite and template: a run more than $stuck_after seconds past its time limit (eks-1125-1500 by 17:01 on 2026-11-25), no pass in 36 hours; a series no run has written alerts nothing"
+    else
+      bad "$variant: the conformance runs' alerts are wrong: $conformance_rules"
     fi
     installs_json="$(sel "$vm_app" "$vo.extraObjects[] | select(.kind == \"ConfigMap\" and .metadata.name == \"infrared-installs-dashboard\") | .data[\"infrared-installs.json\"]")"
     if [ "$(sel "$vm_app" "$vo.extraObjects[] | select(.kind == \"ConfigMap\" and .metadata.name == \"infrared-installs-dashboard\") | .metadata.namespace + \" \" + .metadata.labels.grafana_dashboard")" = "monitoring 1" ] \
@@ -4526,7 +4552,7 @@ fi
 # the stack differs in the remote write (its URL shown on vmagent's own
 # series), the platform name (vmagent's label and the platform rules'
 # selectors) and the writes-failing rule alone. Text
-# first, comments aside: the five lines that go are the label and the four
+# first, comments aside: the seven lines that go are the label and the six
 # rules' expressions, each the platform; then the values as JSON with those
 # taken out or put back, equal.
 "$work/render" -out "$work/plane-on" -cluster demo-pn -flavor k3s -build-registry "" -data "$work/telemetry-metrics.json" >/dev/null
@@ -4534,7 +4560,7 @@ fi
 plane_app="registry/clusters/demo-pn/components/victoria-metrics-k8s-stack.yaml"
 plane_gone="$({ diff <(grep -v '^ *#' "$work/plane-off/$plane_app") <(grep -v '^ *#' "$work/plane-on/$plane_app") || true; } | { grep '^<' || true; })"
 if [ "$(d3_diff "$work/plane-off" "$work/plane-on")" = "README.md $plane_app" ] \
-  && [ "$(grep -c . <<<"$plane_gone")" = 5 ] \
+  && [ "$(grep -c . <<<"$plane_gone")" = 7 ] \
   && [ "$(grep -vcE '^< +(platform: demo-pn|expr: .*platform="demo-pn".*)$' <<<"$plane_gone")" = 0 ] \
   && [ "$(yq -o json -I0 '.spec.source.helm.valuesObject' "$work/plane-on/$plane_app" \
         | jq -c -S 'del(.vmagent.additionalRemoteWrites, .vmagent.spec.remoteWriteSettings) | .vmagent.spec.externalLabels.platform = "demo-pn"
@@ -4738,8 +4764,13 @@ if helm pull victoria-metrics-k8s-stack --repo https://victoriametrics.github.io
         | jq -r '[.maxLabelsPerTimeseries, .["storage.maxHourlySeries"], .["storage.maxDailySeries"], ((.["vmalert.proxyURL"] | length) > 0 | tostring)] | join(" ")')" = "40 2000000 5000000 true" ] \
       && ok "telemetry-metrics: VMSingle gets the caps beside the chart's own vmalert argument" \
       || bad "telemetry-metrics: VMSingle's caps are lost or replace the chart's own argument after tpl"
+    # Four summaries name a label (a reconcile's controller, the two
+    # conformance alerts' template, the writes' URL) and two descriptions the
+    # conformance alerts' suite, each as vmalert reads it, the escape gone.
     [ "$(yq -N -o json -I0 'select(.kind == "VMRule" and .metadata.name == "infrared-platform") | .spec.groups[0].rules' "$work/vmks-plane.yaml" \
-        | jq '[.[].annotations.summary | select(contains("{{ $labels."))] | length')" = 2 ] \
+        | jq -r '[([.[].annotations.summary | select(contains("{{ $labels."))] | length),
+            ([.[].annotations.description // empty | select(contains("{{ $labels."))] | length),
+            ([.[] | (.annotations // {})[] | select(contains("`"))] | length)] | map(tostring) | join(" ")')" = "4 2 0" ] \
       && ok "telemetry-metrics: the platform rules' label templates survive the chart's tpl" \
       || bad "telemetry-metrics: the platform rules' label templates are wrong after tpl"
     installs_legends="$(yq -N -r 'select(.metadata.name == "infrared-installs-dashboard") | .data["infrared-installs.json"]' "$work/vmks-plane.yaml" \
