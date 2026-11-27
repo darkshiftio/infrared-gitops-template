@@ -61,8 +61,8 @@ type Data struct {
 
 	// Edge is the Installation's spec.edge: "" or "traefik" (as before), or
 	// "gateway", which turns on the edge components (Envoy Gateway, and without
-	// a TunnelID external-dns and Cloudflare's origin issuer). "" means
-	// traefik.
+	// a TunnelID or PrivateEdge external-dns and Cloudflare's origin issuer).
+	// "" means traefik.
 	Edge string `json:"Edge"`
 	// PlatformDomain is the Installation's spec.previews.domain, "" when unset.
 	// In gateway mode zones answer at <zone>.<PlatformDomain>.
@@ -167,6 +167,19 @@ type Data struct {
 	// and the ClientTrafficPolicy edge strips any copy a client sent. ""
 	// renders as before, and an operator leaves it out of the data.
 	EdgeProofSecret string `json:"EdgeProofSecret,omitempty"`
+	// PrivateEdge is the Installation's spec.privateEdge on a gateway edge
+	// (infrared-docs-internal ADR 0100 D2): the edge serves its names inside
+	// the cluster alone, with no Cloudflare Tunnel and no public name. It
+	// renders as behind a tunnel without cloudflared: Envoy binds no node's
+	// ports and its Service is a ClusterIP, the edge's certificate comes from
+	// the certificate authority inside the cluster (edge-ca), and external-dns,
+	// external-dns-domain and Cloudflare's origin issuer are left out, so no
+	// Cloudflare token is read; the infrared Application carries
+	// installation.privateEdge. The operator hands it only on a gateway edge,
+	// with no tunnel and no custom hostnames; were a tunnel there all the same,
+	// the private edge wins and no cloudflared renders. false renders as
+	// before, and an operator leaves it out of the data.
+	PrivateEdge bool `json:"PrivateEdge,omitempty"`
 	// ImageRegistry is the registry of Infrared's own images (the operator's
 	// INFRARED_IMAGE_REGISTRY), e.g. ghcr.io/darkshiftio; "" keeps the chart's.
 	ImageRegistry string `json:"ImageRegistry"`
@@ -838,6 +851,8 @@ func main() {
 		"SignInPrivate: Infrared's own name kept off the edge; needs -edge gateway, -platform-domain and -infrared-host")
 	flag.StringVar(&d.EdgeProofSecret, "edge-proof-secret", "",
 		"EdgeProofSecret: the Secret in -namespace whose key credential the edge stamps on requests for Infrared's API (INFRARED_EDGE_PROOF_SECRET); needs -edge gateway and -infrared-host (empty: no stamp)")
+	flag.BoolVar(&d.PrivateEdge, "private-edge", false,
+		"PrivateEdge: the edge inside the cluster alone, on its own certificate authority, with no tunnel and no public name; needs -edge gateway, never with -tunnel-id")
 	flag.StringVar(&d.ImageRegistry, "image-registry", "", "ImageRegistry: the registry of Infrared's images, e.g. ghcr.io/darkshiftio (empty keeps the chart's)")
 	flag.Var(imagesFlag{&d.Images}, "images", `Images, as JSON: {"api": {"tag": "v1.2.3", "digest": "sha256:..."}, ...} (empty keeps the chart's)`)
 	flag.StringVar(&d.Cloud, "cloud", "", `Cloud: "", "aws", "linode" or "gcp"`)
@@ -916,8 +931,8 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, tunnel %q, stores %t, backup bucket %q, disabled %q, forge %q, registry %q, substrate capable %t, recipients %d, restore point %q)\n",
-		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.TunnelID, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge, d.Registry, d.SubstrateCapable,
+	fmt.Printf("rendered %d files from %s into %s (cluster %s, flavor %s, build registry %q, edge %q, tunnel %q, private edge %t, stores %t, backup bucket %q, disabled %q, forge %q, registry %q, substrate capable %t, recipients %d, restore point %q)\n",
+		n, src, out, d.ClusterName, d.ClusterFlavor, d.BuildRegistry, d.Edge, d.TunnelID, d.PrivateEdge, d.Stores, d.Backup.Bucket, d.Disabled, d.Forge, d.Registry, d.SubstrateCapable,
 		len(d.Copies.Recipients), d.Restore.Point)
 }
 
@@ -966,6 +981,7 @@ func mergeDataFile(d *Data, path string) error {
 		"org-labels":             func() { d.OrgLabels = explicit.OrgLabels },
 		"sign-in-private":        func() { d.SignInPrivate = explicit.SignInPrivate },
 		"edge-proof-secret":      func() { d.EdgeProofSecret = explicit.EdgeProofSecret },
+		"private-edge":           func() { d.PrivateEdge = explicit.PrivateEdge },
 		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
 		"images":                 func() { d.Images = explicit.Images },
 		"cloud":                  func() { d.Cloud = explicit.Cloud },
@@ -1061,6 +1077,7 @@ func validate(d Data) error {
 	errs = append(errs, validateSignInPrivate(d)...)
 	errs = append(errs, validateOrgLabels(d)...)
 	errs = append(errs, validateEdgeProof(d)...)
+	errs = append(errs, validatePrivateEdge(d)...)
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
 			errs = append(errs, fmt.Errorf("%s must be a bare DNS name, got %q", name, v))
@@ -1375,6 +1392,29 @@ func validateEdgeProof(d Data) []error {
 	}
 	if d.SignInPrivate {
 		errs = append(errs, errors.New("EdgeProofSecret takes no SignInPrivate: with Infrared's own name off the edge, no route of Infrared's stamps the proof"))
+	}
+	return errs
+}
+
+// validatePrivateEdge checks PrivateEdge (infrared-docs-internal ADR 0100):
+// only on a gateway edge, the one edge it keeps inside the cluster, and never
+// beside what reaches an edge from outside, which the operator leaves out of
+// its data with it: a Cloudflare Tunnel (TunnelID, and so its mode, publish
+// and hostnames, which need one) and custom hostnames, which Cloudflare's
+// proxy serves.
+func validatePrivateEdge(d Data) []error {
+	if !d.PrivateEdge {
+		return nil
+	}
+	var errs []error
+	if d.Edge != "gateway" {
+		errs = append(errs, errors.New("PrivateEdge needs Edge gateway: it keeps the Gateway edge inside the cluster"))
+	}
+	if d.TunnelID != "" {
+		errs = append(errs, errors.New("PrivateEdge takes no TunnelID: the private edge has no tunnel, and the operator leaves the tunnel out of its data with it"))
+	}
+	if d.CustomHostnames {
+		errs = append(errs, errors.New("PrivateEdge takes no CustomHostnames: a custom hostname reaches the edge through Cloudflare's proxy, which nothing does on a private edge"))
 	}
 	return errs
 }

@@ -10,12 +10,16 @@
 # into its own namespace with an ExternalSecret:
 #
 #   key                    copied to
-[[- if and (eq .Edge "gateway") .TunnelID ]]
+[[- if and (eq .Edge "gateway") .PrivateEdge ]]
+#   (none)                 envoy-gateway-system: the edge is private
+#                          (spec.privateEdge) and copies no token
+[[- end ]]
+[[- if and (eq .Edge "gateway") .TunnelID (not .PrivateEdge) ]]
 #   [[ default "cloudflare-tunnel-credentials" .TunnelCredentialsKey ]], the Cloudflare Tunnel's credentials (spec.tunnel)
 #                          envoy-gateway-system/cloudflared-credentials
 #                          (cloudflared's, components/edge/tunnel.yaml)
 [[- end ]]
-[[- if and (eq .Edge "gateway") (or (not .TunnelID) (eq .TunnelMode "beside")) ]]
+[[- if and (eq .Edge "gateway") (or (not .TunnelID) (eq .TunnelMode "beside")) (not .PrivateEdge) ]]
 #   cloudflare-api-token   external-dns/cloudflare-api-token (DNS records)
 #                          envoy-gateway-system/cloudflare-api-token (origin
 #                          certificates)
@@ -100,7 +104,7 @@ spec:
   conditions:
     - namespaces:
 [[- if eq .Edge "gateway" ]]
-[[- if or (not .TunnelID) (eq .TunnelMode "beside") ]]
+[[- if and (or (not .TunnelID) (eq .TunnelMode "beside")) (not .PrivateEdge) ]]
         - external-dns
 [[- end ]]
         - envoy-gateway-system

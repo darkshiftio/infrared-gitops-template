@@ -3,7 +3,14 @@
 # edge is left out: the Installation names it among its disabled
 # components (INFRARED_DISABLED_COMPONENTS), so this file holds no objects.
 [[- else if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
-[[- if and .TunnelID (eq .TunnelMode "beside") -]]
+[[- if .PrivateEdge -]]
+# The edge (components/edge), private (the Installation's spec.privateEdge,
+# infrared-docs-internal ADR 0100): one Gateway inside the cluster alone, with
+# no Cloudflare Tunnel and no public name, the Gateway's certificate from a
+# certificate authority inside the cluster, the redirect from port 80, and
+# Infrared's own route. Wave 13, after Envoy Gateway (11); with the edge
+# private no origin issuer or external-dns runs.
+[[- else if and .TunnelID (eq .TunnelMode "beside") -]]
 # The edge (components/edge): one Gateway behind Cloudflare's proxy, its origin
 # certificate, the redirect from port 80, Infrared's own route, and cloudflared
 # beside it (the Installation's spec.tunnel, mode beside, infrared-docs-internal
@@ -73,8 +80,9 @@ spec:
 [[- else if eq .Edge "gateway" -]]
 # The edge's Gateway needs a name to serve: the Installation's
 # spec.previews.domain (zones) or spec.previews.signInURL (Infrared). Neither is
-# set, so this file holds no objects. Envoy Gateway, external-dns and the origin
-# issuer run, idle.
+# set, so this file holds no objects. [[ if .PrivateEdge ]]Envoy Gateway runs, idle: with the edge private
+# neither external-dns nor the origin issuer does.[[ else ]]Envoy Gateway, external-dns and the origin
+# issuer run, idle.[[ end ]]
 [[- else -]]
 # The edge's Gateway, certificate and routes are rendered only when the edge is
 # a Gateway (the Installation's spec.edge: gateway). This cluster's edge is

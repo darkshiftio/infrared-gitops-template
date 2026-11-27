@@ -2,12 +2,31 @@
 [[- /* The platform domain on a Cloudflare token of its own (ADR 0063): the zones' wildcard listener takes the certificate edge-domain (certificate.yaml). */ -]]
 [[- /* Behind a Cloudflare Tunnel (spec.tunnel, ADR 0064) Envoy binds no node's ports, its Service is a ClusterIP, and one certificate from the cluster's own authority serves every listener: no token splits it. */ -]]
 [[- /* With mode beside (spec.tunnel.mode, ADR 0090) cloudflared runs beside an edge that renders as it does without a tunnel. */ -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
-[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") -]]
+[[- /* The private edge (spec.privateEdge, ADR 0100) is the tunnel's Envoy with no tunnel and no public name; it wins over a tunnel. */ -]]
+[[- $private := and (eq .Edge "gateway") .PrivateEdge -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") (not .PrivateEdge) -]]
+[[- $inside := or $tunnel $private -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") (not .PrivateEdge) -]]
 [[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090). */ -]]
 [[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
-[[- $split := and .PlatformDomain .DomainTokenKey (not $tunnel) -]]
-[[- if $tunnel -]]
+[[- $split := and .PlatformDomain .DomainTokenKey (not $inside) -]]
+[[- if $private -]]
+# =============================================================================
+# The private Envoy fleet: one Envoy on every node, on no node's ports, and no
+# way in from outside the cluster.
+# =============================================================================
+# The edge is private (the Installation's spec.privateEdge,
+# infrared-docs-internal ADR 0100): no Cloudflare Tunnel, no public name and no
+# DNS record. Its Service edge below is a ClusterIP, so only what runs in the
+# cluster reaches Envoy (Infrared's operator, a port-forward), and the nodes
+# take no traffic for it from outside.
+#
+# Envoy keeps its DaemonSet and its listeners but binds no host port. Envoy
+# listens on 10080 and 10443 inside its pod (Envoy Gateway adds 10000 to a
+# port below 1024), and the Service maps 80 and 443 to those. A rollout
+# replaces one node's Envoy at a time, while the Service sends to the others.
+# =============================================================================
+[[- else if $tunnel -]]
 # =============================================================================
 # The Envoy fleet behind the cluster's Cloudflare Tunnel: one Envoy on every
 # node, on no node's ports.
@@ -76,7 +95,7 @@ spec:
           rollingUpdate:
             maxUnavailable: 1
             maxSurge: 0
-[[- if not $tunnel ]]
+[[- if not $inside ]]
         patch:
           type: StrategicMerge
           value:
@@ -102,7 +121,7 @@ spec:
 [[- end ]]
       envoyService:
         name: edge
-[[- if $tunnel ]]
+[[- if $inside ]]
         type: ClusterIP
 [[- else ]]
         type: NodePort
@@ -145,6 +164,9 @@ spec:
 # Behind the tunnel cloudflared sends every request to the HTTPS port, so plain
 # HTTP from outside never reaches these listeners: only Cloudflare's edge can
 # redirect it, with each zone's Always Use HTTPS on.
+[[- else if $private ]]
+# The edge is private, so no request from outside the cluster reaches these
+# listeners, plain HTTP or not.
 [[- end ]]
 #
 # A zone's own addresses (a name outside the platform domain, under a Domain

@@ -3,10 +3,11 @@
 [[- $restore := and .Stores .Backup.Bucket .Restore.Point -]]
 [[- $prefix := default .ClusterName .Backup.Prefix -]]
 [[- $ci := index .Images "code-index" ]][[ $codeIndex := and .ImageRegistry (or $ci.Tag $ci.Digest) -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") -]]
-[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") -]]
+[[- $private := and (eq .Edge "gateway") .PrivateEdge -]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") (not .PrivateEdge) -]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") (not .PrivateEdge) -]]
 [[- $infrared := and (not .SignInPrivate) .InfraredHost -]]
-[[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey (not $tunnel) -]]
+[[- $split := and (eq .Edge "gateway") .PlatformDomain .DomainTokenKey (not $tunnel) (not $private) -]]
 [[- $layout := and .Stores .Registry .StoresOrgLayout -]]
 # [[ .GitopsRepoName ]]
 
@@ -34,7 +35,9 @@ components/
 [[- if $codeIndex ]]
   code-index/              Infrared's code index: Zoekt and the code service, the cache on the pod's own disk
 [[- end ]]
-[[- if $tunnel ]]
+[[- if $private ]]
+  edge/                    the Gateway, private, its certificate from a certificate authority inside the cluster, and the edge's routes
+[[- else if $tunnel ]]
   edge/                    the Gateway, its certificate from a certificate authority inside the cluster, cloudflared and the edge's routes
 [[- else if eq .Edge "gateway" ]]
   edge/                    the Gateway, its origin certificate[[ if $split ]]s, one for each Cloudflare zone,[[ end ]] and the edge's routes[[ if $beside ]]; cloudflared beside them[[ end ]]
@@ -95,17 +98,19 @@ products/                  yours: one directory per product (see "Products")
 [[- if not (contains " envoy-gateway " $disabled) ]]
 | 11 | `envoy-gateway` | Envoy Gateway, the edge's controller, and its CRDs |
 [[- end ]]
-[[- if and (not $tunnel) (not (contains " origin-ca-issuer " $disabled)) ]]
+[[- if and (not $tunnel) (not $private) (not (contains " origin-ca-issuer " $disabled)) ]]
 | 11 | `origin-ca-issuer` | Cloudflare's origin issuer, for the edge's certificate |
 [[- end ]]
-[[- if and (not $tunnel) (not (contains " external-dns " $disabled)) ]]
+[[- if and (not $tunnel) (not $private) (not (contains " external-dns " $disabled)) ]]
 | 12 | `external-dns` | the edge's DNS records in Cloudflare[[ if $split ]] outside the platform domain's own zone, Infrared's name among them[[ end ]], proxied, owned by `[[ .ClusterName ]]` |
 [[- if and $split (not (contains " external-dns-domain " $disabled)) ]]
 | 12 | `external-dns-domain` | the platform domain's records, `*.[[ .PlatformDomain ]]` and `edge.[[ .PlatformDomain ]]`, in its own Cloudflare zone with that zone's own token, proxied, owned by `[[ .ClusterName ]]` |
 [[- end ]]
 [[- end ]]
 [[- if and (or .PlatformDomain .InfraredHost) (not (contains " edge " $disabled)) ]]
-[[- if $tunnel ]]
+[[- if $private ]]
+| 13 | `edge` | Gateway `edge`, private: no Cloudflare Tunnel and no public name; the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if $infrared ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
+[[- else if $tunnel ]]
 | 13 | `edge` | Gateway `edge` behind the Cloudflare Tunnel `[[ .TunnelID ]]`: cloudflared, the Gateway's certificate from a certificate authority inside the cluster, the redirect from port 80[[ if $infrared ]] and Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] |
 [[- else if $beside ]]
 | 13 | `edge` | Gateway `edge`, its origin certificate[[ if $split ]]s, one for each Cloudflare zone[[ end ]], the redirect from port 80[[ if $infrared ]], Infrared's route[[ if .EdgeProofSecret ]], which stamps the edge's proof on the API's paths[[ end ]][[ end ]] and, beside the nodes' own ports, cloudflared for the Cloudflare Tunnel `[[ .TunnelID ]]`[[ if .TunnelPublish ]], where external-dns points the edge's names[[ end ]] |
@@ -184,7 +189,19 @@ Every Application here carries the label
 `app.kubernetes.io/part-of: infrared-gitops`; Infrared finds them by it.
 
 ## Getting in
-[[ if and (eq .Edge "gateway") $infrared ]]
+[[ if $private ]]
+The edge is private (the Installation's `spec.privateEdge`): no Cloudflare
+Tunnel, no public name and no DNS record, so nothing outside the cluster
+reaches it.[[ if $infrared ]] It serves Infrared's name, `[[ .InfraredHost ]]`,[[ if .PlatformDomain ]] and the zones, `<zone>.[[ .PlatformDomain ]]`,[[ end ]] inside the cluster alone.[[ else if .PlatformDomain ]] It serves the zones, `<zone>.[[ .PlatformDomain ]]`, inside the cluster alone.[[ end ]][[ if and .InfraredHost (not $infrared) ]] Infrared's own name, `[[ .InfraredHost ]]`, is kept off the edge (`spec.previews.signInPrivate`).[[ end ]]
+Everything is reached by port-forward.
+[[- if .EdgeProofSecret ]]
+
+The edge stamps every request for Infrared's API with the value of the Secret
+`[[ .InfraredNamespace ]]/[[ .EdgeProofSecret ]]` (key `credential`), which Infrared makes. To
+rotate it, replace the value in place; never delete the Secret, or every API
+request through the edge answers 500 until Infrared makes it again.
+[[- end ]]
+[[- else if and (eq .Edge "gateway") $infrared ]]
 Infrared answers at **https://[[ .InfraredHost ]]**, through Cloudflare's
 proxy[[ if $tunnel ]] and the cluster's Cloudflare Tunnel[[ else if $beside ]], and the cluster's Cloudflare Tunnel once the name's record points there[[ end ]].[[ if .PlatformDomain ]] Zones answer at `https://<zone>.[[ .PlatformDomain ]]`.[[ end ]]
 Everything else is reached by port-forward.
@@ -211,7 +228,12 @@ kubectl -n [[ .InfraredNamespace ]] port-forward svc/infrared 8080:80        # h
 # Argo CD (user admin)
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 kubectl -n argocd port-forward svc/argocd-server 8081:80                     # http://localhost:8081
-[[ if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
+[[ if $private ]]
+# The edge, private: any name it serves, checked against its own authority
+kubectl -n envoy-gateway-system get secret edge-ca -o jsonpath='{.data.ca\.crt}' | base64 -d >edge-ca.crt
+kubectl -n envoy-gateway-system port-forward svc/edge 8443:443
+curl --cacert edge-ca.crt --resolve <name>:8443:127.0.0.1 https://<name>:8443/
+[[ end ]][[ if not (contains " victoria-metrics-k8s-stack " $disabled) ]]
 # Grafana (user admin)
 kubectl -n monitoring get secret victoria-metrics-k8s-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 kubectl -n monitoring port-forward svc/victoria-metrics-k8s-stack-grafana 3000:80

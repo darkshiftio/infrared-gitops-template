@@ -1,22 +1,54 @@
 [[- if and (eq .Edge "gateway") (or .PlatformDomain .InfraredHost) -]]
 [[- /* Behind a Cloudflare Tunnel (spec.tunnel, infrared-docs-internal ADR 0064) the edge's certificate comes from a certificate authority inside the cluster, which cloudflared trusts: no origin issuer, no Cloudflare token, and no split by zone. */ -]]
-[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") ]]
+[[- /* The private edge (spec.privateEdge, infrared-docs-internal ADR 0100) takes the same certificate with no tunnel and no public name, and wins over a tunnel, which it leaves unread. */ -]]
+[[- $private := and (eq .Edge "gateway") .PrivateEdge ]]
+[[- $tunnel := and (eq .Edge "gateway") .TunnelID (ne .TunnelMode "beside") (not .PrivateEdge) ]]
+[[- $inside := or $tunnel $private ]]
 [[- /* Beside the nodes' own ports (spec.tunnel.mode beside, ADR 0090) the edge keeps the certificates it has without a tunnel, which cloudflared trusts as Cloudflare does. */ -]]
-[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") ]]
+[[- $beside := and (eq .Edge "gateway") .TunnelID (eq .TunnelMode "beside") (not .PrivateEdge) ]]
 [[- /* Infrared's own name, unless spec.previews.signInPrivate keeps it off the edge (ADR 0090): then no certificate names it. */ -]]
 [[- $infrared := and (not .SignInPrivate) .InfraredHost ]]
 [[- /* The platform domain in a Cloudflare zone of its own, on a token of its own (spec.previews.domainTokenKey, infrared-docs-internal ADR 0063): its wildcard takes a copy of that token, an issuer and a certificate of their own, and the certificate edge keeps Infrared's name alone. */ -]]
-[[- $split := and .PlatformDomain .DomainTokenKey (not $tunnel) ]]
+[[- $split := and .PlatformDomain .DomainTokenKey (not $inside) ]]
 [[- /* Infrared's name needs a name of its own on the certificate only when the wildcard does not cover it: one label under the platform domain. A wildcard on a certificate of its own covers it nowhere. */ -]]
 [[- $covered := false ]]
 [[- if and .PlatformDomain .InfraredHost (not $split) ]]
 [[- $label := trimSuffix (printf ".%s" .PlatformDomain) .InfraredHost ]]
 [[- if and (hasSuffix (printf ".%s" .PlatformDomain) .InfraredHost) (not (contains "." $label)) ]][[ $covered = true ]][[ end ]]
 [[- end -]]
-[[- if $tunnel -]]
+[[- if $inside -]]
 # =============================================================================
 # The edge's certificate, from a certificate authority inside the cluster.
 # =============================================================================
+[[- if $private ]]
+# The edge is private (the Installation's spec.privateEdge,
+# infrared-docs-internal ADR 0100): no Cloudflare Tunnel and no public name.
+# Nothing outside the cluster reaches this Gateway and no DNS record names it:
+# what reaches it is inside the cluster (Infrared's operator, a port-forward),
+# and a client that checks this certificate checks it against the authority
+# below, the Secret edge-ca's ca.crt. No name needs Cloudflare's Origin CA, so
+# there is no OriginIssuer and no copy of a Cloudflare token: the install
+# holds none, and external-dns does not run.
+[[- if .DomainTokenKey ]]
+#
+# With the edge private spec.previews.domainTokenKey ([[ .DomainTokenKey ]])
+# is not read: with no issuer and no external-dns, no Cloudflare token signs
+# or publishes a name, so one certificate, edge, serves every zone's names.
+[[- end ]]
+#
+# A self-signed issuer makes the authority, edge-ca (Secret edge-ca), for ten
+# years, and cert-manager renews it on the same key, so a client that trusts
+# it keeps trusting what it signs after a renewal. The CA Issuer edge-ca on it
+# signs the Certificate edge (Secret edge-tls), which cert-manager renews at
+# two thirds of its 90 days; Envoy reloads it by itself.
+#
+# Waves: the self-signed issuer (-6), the authority (-5), its issuer (-4) and
+# the certificate (-3), then the Envoy fleet and the Gateway (gateway.yaml, -2
+# to 0). cert-manager's webhook admits all four, so each has a wave of its
+# own, before everything whose health depends on it, and each waits for the
+# one before it to be Healthy: the authority's issuer needs the authority's
+# Secret, and the certificate the issuer.
+[[- else ]]
 # Behind the cluster's Cloudflare Tunnel (the Installation's spec.tunnel,
 # infrared-docs-internal ADR 0064) cloudflared is this Gateway's only client
 # (tunnel.yaml). Cloudflare's edge shows visitors its own certificate, which
@@ -47,6 +79,7 @@
 # depends on it, and each waits for the one before it to be Healthy: the
 # authority's issuer needs the authority's Secret, and the certificate the
 # issuer.
+[[- end ]]
 # =============================================================================
 apiVersion: cert-manager.io/v1
 kind: Issuer
@@ -296,7 +329,8 @@ spec:
     name: cloudflare-origin-domain
 [[- end ]]
 [[- end ]]
-[[- if .CustomHostnames ]]
+[[- /* A private edge serves no custom hostname: Cloudflare's proxy, which brings one, reaches no private edge. */ -]]
+[[- if and .CustomHostnames (not $private) ]]
 ---
 # =============================================================================
 # Origin certificates for custom hostnames, from Let's Encrypt.

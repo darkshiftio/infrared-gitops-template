@@ -1640,6 +1640,7 @@ func TestOrgLabels(t *testing.T) {
 		{"on the nodes' own ports", func(*Data) {}, "edge-tls"},
 		{"beside a tunnel", func(d *Data) { d.TunnelID, d.TunnelMode = tunnel, "beside" }, "edge-tls"},
 		{"the domain on a token of its own", func(d *Data) { d.DomainTokenKey = "cloudflare-domain-api-token" }, "edge-domain-tls"},
+		{"the private edge, the cluster's own authority", func(d *Data) { d.PrivateEdge = true }, "edge-tls"},
 	} {
 		without := base
 		c.change(&without)
@@ -1657,6 +1658,121 @@ func TestOrgLabels(t *testing.T) {
 		i := strings.Index(labelled, wildcards)
 		if j := strings.LastIndex(labelled[:i], "secretName: "); j < 0 || !strings.HasPrefix(labelled[j:], "secretName: "+c.certificate+"\n") {
 			t.Errorf("%s: the labels are not on %s", c.name, c.certificate)
+		}
+	}
+}
+
+// The private edge (infrared-docs-internal ADR 0100): the operator hands
+// PrivateEdge by its Go name, absent is off, as an operator from before it
+// leaves it out; it needs a gateway edge, and takes no tunnel and no custom
+// hostnames, which reach an edge from outside. Were either there all the
+// same, the private edge wins: every file renders as with the private edge
+// alone, so no cloudflared, tunnel or Let's Encrypt issuer renders.
+func TestPrivateEdge(t *testing.T) {
+	const tunnel = "6ff42ae2-765d-4adf-8112-31c55c1551ef"
+	path := filepath.Join(t.TempDir(), "data.json")
+	body := `{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "conformance.example.com",
+		"InfraredHost": "conf-irgke-1127-1600.conformance.example.com", "PrivateEdge": true}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil || !d.PrivateEdge {
+		t.Errorf("loaded PrivateEdge %t, %v", d.PrivateEdge, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d = Data{}
+	if err := mergeDataFile(&d, path); err != nil || d.PrivateEdge {
+		t.Errorf("an operator's data without it loaded PrivateEdge %t, %v; want off", d.PrivateEdge, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0", Edge: "gateway", PlatformDomain: "conformance.example.com",
+		InfraredHost: "conf-irgke-1127-1600.conformance.example.com", PrivateEdge: true}
+	for _, c := range []struct {
+		name          string
+		change        func(*Data)
+		wantValidated bool
+	}{
+		{"on a gateway edge", func(*Data) {}, true},
+		{"with no name to serve", func(d *Data) { d.PlatformDomain, d.InfraredHost = "", "" }, true},
+		{"with Infrared's name kept off it", func(d *Data) {
+			d.InfraredHost, d.SignInPrivate = "infrared.demo.private.example.com", true
+		}, true},
+		{"with the platform domain's own token, unread", func(d *Data) { d.DomainTokenKey = "cloudflare-domain-api-token" }, true},
+		{"with the edge's proof", func(d *Data) { d.EdgeProofSecret = "infrared-edge-proof" }, true},
+		{"with the network fence", func(d *Data) { d.NetworkPolicies = true }, true},
+		{"on Traefik", func(d *Data) { d.Edge = "traefik" }, false},
+		{"on the default edge, Traefik", func(d *Data) { d.Edge = "" }, false},
+		{"behind a tunnel", func(d *Data) { d.TunnelID = tunnel }, false},
+		{"beside a tunnel", func(d *Data) { d.TunnelID, d.TunnelMode = tunnel, "beside" }, false},
+		{"with custom hostnames", func(d *Data) { d.CustomHostnames = true }, false},
+	} {
+		d := base
+		c.change(&d)
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+
+	// tree renders the whole template, as Render does and without validate's
+	// refusals: each file's path and bytes.
+	tree := func(d Data) map[string]string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "out")
+		if _, err := Render(filepath.Join("..", "..", "template"), out, d); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{}
+		if err := filepath.Walk(out, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			files[strings.TrimPrefix(p, out+string(filepath.Separator))] = string(b)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	alone := tree(base)
+	// Each file: what it holds, and what it must not.
+	for f, want := range map[string][2]string{
+		"components/edge/certificate.yaml":                      {"  name: edge-self-signed\n", "kind: OriginIssuer"},
+		"components/edge/gateway.yaml":                          {"        type: ClusterIP\n", "hostPort"},
+		"components/edge/kustomization.yaml":                    {"  - routes.yaml\n", "tunnel.yaml"},
+		"components/edge/tunnel.yaml":                           {"no cloudflared", "kind:"},
+		"registry/clusters/c1/components/external-dns.yaml":     {"spec.privateEdge", "kind:"},
+		"registry/clusters/c1/components/origin-ca-issuer.yaml": {"spec.privateEdge", "kind:"},
+		"registry/clusters/c1/components/infrared.yaml":         {"            privateEdge: true\n", "            tunnel:\n"},
+	} {
+		if !strings.Contains(alone[f], want[0]) || strings.Contains(alone[f], want[1]) {
+			t.Errorf("the private edge alone: %s holds no %q, or holds %q:\n%s", f, want[0], want[1], alone[f])
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		change func(*Data)
+	}{
+		{"a tunnel of its own", func(d *Data) { d.TunnelID, d.TunnelCredentialsKey = tunnel, "tunnel-saas2" }},
+		{"a tunnel beside the nodes' ports, publishing, with hostnames", func(d *Data) {
+			d.TunnelID, d.TunnelMode, d.TunnelPublish, d.TunnelHostnames = tunnel, "beside", true, []string{"support.example.org"}
+		}},
+		{"custom hostnames", func(d *Data) { d.CustomHostnames, d.ACMEEmail = true, "alerts@example.com" }},
+	} {
+		d := base
+		c.change(&d)
+		got := tree(d)
+		if len(got) != len(alone) {
+			t.Errorf("the private edge with %s renders %d files, alone %d", c.name, len(got), len(alone))
+		}
+		for f, want := range alone {
+			if got[f] != want {
+				t.Errorf("the private edge with %s: %s is not what the private edge alone renders", c.name, f)
+			}
 		}
 	}
 }
