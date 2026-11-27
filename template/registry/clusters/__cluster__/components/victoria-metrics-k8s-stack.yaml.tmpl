@@ -1304,8 +1304,12 @@ spec:
           # median of 5 minutes each, the pods restarting in a release; a
           # rollout takes a few minutes, a component really down stays down), the
           # operator failing reconciles for 15 minutes, the store's own target
-          # down[[ if .Telemetry.URL ]], and a remote write of this vmagent (the plane's, or
-          # VMSingle's own) refused for 15 minutes[[ end ]]. Each carries severity and
+          # down, a conformance run more than 30 minutes past its time limit or a
+          # template no conformance run has passed in 36 hours[[ if .Telemetry.URL ]], and a remote write of this vmagent (the plane's, or
+          # VMSingle's own) refused for 15 minutes[[ end ]]. The operator writes the
+          # conformance series only once a run has (workspace TODO 832: a run stood
+          # in its deletion for a day before anyone saw), so an install with no
+          # conformance suite alerts nothing of them. Each carries severity and
           # infrared_platform, as the metrics' copy's alerts do, and no
           # infrared_product, so the root route above takes it to the API's
           # platform receiver. The platform label keeps every rule to this
@@ -1353,6 +1357,22 @@ spec:
                         infrared_platform: "true"
                       annotations:
                         summary: VMSingle, the install's metrics store, has not answered its scrape for 3 minutes.
+                    - alert: InfraredConformanceRunStuck
+                      expr: max by (suite, template) (infrared_conformance_run_overdue_seconds{job="infrared-operator", platform="[[ $platform ]]"}) > 1800
+                      labels:
+                        severity: warning
+                        infrared_platform: "true"
+                      annotations:
+                        summary: "A conformance run of {{ `{{ $labels.template }}` }} is more than 30 minutes past its time limit."
+                        description: "Suite {{ `{{ $labels.suite }}` }}. The run may still hold a cluster that bills: read its steps and its cluster's deletion on the Clusters page. The alert ends when the run does."
+                    - alert: InfraredTemplateConformanceStale
+                      expr: time() - max by (suite, template) (infrared_conformance_last_passed_timestamp_seconds{job="infrared-operator", platform="[[ $platform ]]"}) > 36 * 3600
+                      labels:
+                        severity: warning
+                        infrared_platform: "true"
+                      annotations:
+                        summary: "No conformance run of {{ `{{ $labels.template }}` }} has passed in 36 hours."
+                        description: "Suite {{ `{{ $labels.suite }}` }}. Its runs fail, are refused by the monthly cap, are skipped while one still goes, or are suspended: read the suite on the Clusters page. The alert ends when a run passes."
 [[- if .MetricsAuth ]]
                     - alert: InfraredMetricsDoorDown
                       expr: max(up{job="vmauth-victoria-metrics-k8s-stack", platform="[[ $platform ]]"}) == 0 or absent(up{job="vmauth-victoria-metrics-k8s-stack", platform="[[ $platform ]]"})
