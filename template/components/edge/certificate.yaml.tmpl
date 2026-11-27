@@ -106,6 +106,9 @@ spec:
   dnsNames:
 [[- if .PlatformDomain ]]
     - [[ printf "*.%s" .PlatformDomain | quote ]]
+[[- range .OrgLabels ]]
+    - [[ printf "*.%s.%s" . $.PlatformDomain | quote ]]
+[[- end ]]
 [[- end ]]
 [[- if and $infrared (not $covered) ]]
     - [[ .InfraredHost | quote ]]
@@ -213,6 +216,9 @@ spec:
   dnsNames:
 [[- if and .PlatformDomain (not $split) ]]
     - [[ printf "*.%s" .PlatformDomain | quote ]]
+[[- range .OrgLabels ]]
+    - [[ printf "*.%s.%s" . $.PlatformDomain | quote ]]
+[[- end ]]
 [[- end ]]
 [[- if and $infrared (not $covered) ]]
     - [[ .InfraredHost | quote ]]
@@ -278,6 +284,9 @@ spec:
   secretName: edge-domain-tls
   dnsNames:
     - [[ printf "*.%s" .PlatformDomain | quote ]]
+[[- range .OrgLabels ]]
+    - [[ printf "*.%s.%s" . $.PlatformDomain | quote ]]
+[[- end ]]
   privateKey:
     algorithm: RSA
     size: 2048

@@ -1556,3 +1556,107 @@ func TestAgentPoolElastic(t *testing.T) {
 		}
 	}
 }
+
+// The orgs' labels (infrared-docs-internal ADR 0097): the operator hands
+// OrgLabels by its Go name, absent is none; -org-labels takes a JSON array;
+// they need a gateway edge with a platform domain, and each is one DNS label,
+// lower case, of 3 to 32 characters, listed once. Rendered, the certificate
+// that names the platform domain's wildcard names each label's wildcard too,
+// behind a tunnel, on the nodes' own ports and with the domain's own token,
+// and without labels every file is what it was.
+func TestOrgLabels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	if err := os.WriteFile(path, []byte(`{"clusterName": "c1", "Edge": "gateway", "PlatformDomain": "darkshift.cloud", "OrgLabels": ["acme", "k7m2xq4d"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var d Data
+	if err := mergeDataFile(&d, path); err != nil || !slices.Equal(d.OrgLabels, []string{"acme", "k7m2xq4d"}) {
+		t.Fatalf("loaded OrgLabels %q, %v", d.OrgLabels, err)
+	}
+	var names []string
+	f := namesFlag{&names, "org-labels"}
+	if err := f.Set(`["acme"]`); err != nil || !slices.Equal(names, []string{"acme"}) {
+		t.Errorf("-org-labels [\"acme\"]: %q, %v", names, err)
+	}
+	base := Data{ClusterName: "c1", ClusterFlavor: "k3s", GitopsRepoURL: "https://github.com/acme/gitops",
+		DefaultBranch: "main", InfraredChartRepo: "ghcr.io/darkshiftio/charts", InfraredChartVersion: "0.1.0",
+		InfraredNamespace: "infrared", TemplateVersion: "v0.1.0", Edge: "gateway", PlatformDomain: "darkshift.cloud",
+		InfraredHost: "infrared.darkshift.io"}
+	for _, c := range []struct {
+		name          string
+		change        func(*Data)
+		wantValidated bool
+	}{
+		{"none", func(*Data) {}, true},
+		{"an empty list", func(d *Data) { d.OrgLabels = []string{} }, true},
+		{"two", func(d *Data) { d.OrgLabels = []string{"acme", "k7m2xq4d"} }, true},
+		{"32 characters", func(d *Data) { d.OrgLabels = []string{strings.Repeat("a", 32)} }, true},
+		{"on Traefik", func(d *Data) { d.Edge, d.OrgLabels = "traefik", []string{"acme"} }, false},
+		{"without a platform domain", func(d *Data) { d.PlatformDomain, d.OrgLabels = "", []string{"acme"} }, false},
+		{"in capitals", func(d *Data) { d.OrgLabels = []string{"Acme"} }, false},
+		{"two labels", func(d *Data) { d.OrgLabels = []string{"a.cme"} }, false},
+		{"a wildcard", func(d *Data) { d.OrgLabels = []string{"*"} }, false},
+		{"too short", func(d *Data) { d.OrgLabels = []string{"ab"} }, false},
+		{"past 32", func(d *Data) { d.OrgLabels = []string{strings.Repeat("a", 33)} }, false},
+		{"a trailing dash", func(d *Data) { d.OrgLabels = []string{"acme-"} }, false},
+		{"twice", func(d *Data) { d.OrgLabels = []string{"acme", "acme"} }, false},
+	} {
+		d := base
+		c.change(&d)
+		if err := validate(d); (err == nil) != c.wantValidated {
+			t.Errorf("%s: validate = %v, want validated %t", c.name, err, c.wantValidated)
+		}
+	}
+
+	src, err := os.ReadFile(filepath.Join("..", "..", "template", "components", "edge", "certificate.yaml.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// renderCert renders the edge's certificates alone, as Render does.
+	renderCert := func(d Data) string {
+		t.Helper()
+		in, out := t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(in, "certificate.yaml.tmpl"), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Render(in, out, d); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(out, "certificate.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	const tunnel = "6ff42ae2-765d-4adf-8112-31c55c1551ef"
+	wildcards := "    - \"*.darkshift.cloud\"\n    - \"*.acme.darkshift.cloud\"\n    - \"*.k7m2xq4d.darkshift.cloud\"\n"
+	for _, c := range []struct {
+		name   string
+		change func(*Data)
+		// certificate is the Secret of the certificate that takes the labels.
+		certificate string
+	}{
+		{"behind a tunnel, the cluster's own authority", func(d *Data) { d.TunnelID = tunnel }, "edge-tls"},
+		{"on the nodes' own ports", func(*Data) {}, "edge-tls"},
+		{"beside a tunnel", func(d *Data) { d.TunnelID, d.TunnelMode = tunnel, "beside" }, "edge-tls"},
+		{"the domain on a token of its own", func(d *Data) { d.DomainTokenKey = "cloudflare-domain-api-token" }, "edge-domain-tls"},
+	} {
+		without := base
+		c.change(&without)
+		with := without
+		with.OrgLabels = []string{"acme", "k7m2xq4d"}
+		plain, labelled := renderCert(without), renderCert(with)
+		if strings.Contains(plain, ".acme.") || strings.Count(plain, "\"*.darkshift.cloud\"\n") != 1 {
+			t.Errorf("%s: without labels the certificates name:\n%s", c.name, plain)
+		}
+		// One certificate takes the labels, right after the domain's own
+		// wildcard, and nothing else in the file changes.
+		if strings.Count(labelled, wildcards) != 1 || strings.Replace(labelled, wildcards, "    - \"*.darkshift.cloud\"\n", 1) != plain {
+			t.Errorf("%s: with labels the file is not the plain one plus the labels' wildcards:\n%s", c.name, labelled)
+		}
+		i := strings.Index(labelled, wildcards)
+		if j := strings.LastIndex(labelled[:i], "secretName: "); j < 0 || !strings.HasPrefix(labelled[j:], "secretName: "+c.certificate+"\n") {
+			t.Errorf("%s: the labels are not on %s", c.name, c.certificate)
+		}
+	}
+}

@@ -128,6 +128,17 @@ type Data struct {
 	// sorted, each once, lower case and without InfraredHost; empty, it
 	// leaves them out of the data.
 	TunnelHostnames []string `json:"TunnelHostnames,omitempty"`
+	// OrgLabels are the Organizations' labels under PlatformDomain, on a
+	// gateway edge where the Installation's spec.previews.orgLabels is on
+	// (infrared-docs-internal ADR 0097): zone z of the org labelled acme
+	// answers at <z>.acme.<PlatformDomain>. The zones' listener and
+	// cloudflared's route, both *.<PlatformDomain>, take a name at any depth,
+	// but a wildcard certificate covers one label, and cloudflared checks
+	// Envoy's certificate against each request's own name (matchSNItoHost):
+	// so the certificate that names *.<PlatformDomain> names
+	// *.<label>.<PlatformDomain> for each label too. The operator hands them
+	// sorted, each once; empty, it leaves them out of the data.
+	OrgLabels []string `json:"OrgLabels,omitempty"`
 	// TunnelPublish is spec.tunnel.publish with TunnelMode beside: the
 	// Gateway edge carries external-dns's target annotation under both
 	// prefixes (external-dns.alpha.kubernetes.io/ and external-dns.kubernetes.io/),
@@ -821,6 +832,8 @@ func main() {
 		"TunnelPublish: external-dns publishes the edge's names to the tunnel; needs -tunnel-mode beside")
 	flag.Var(namesFlag{&d.TunnelHostnames, "tunnel-hostnames"}, "tunnel-hostnames",
 		`TunnelHostnames, as a JSON array: ["support.example.com"], the other names that reach the edge through the tunnel, each by its own route; needs -tunnel-id (empty: none)`)
+	flag.Var(namesFlag{&d.OrgLabels, "org-labels"}, "org-labels",
+		`OrgLabels, as a JSON array: ["acme"], the orgs' labels under the platform domain, each a wildcard name on the zones' certificate; needs -edge gateway and -platform-domain (empty: none)`)
 	flag.BoolVar(&d.SignInPrivate, "sign-in-private", false,
 		"SignInPrivate: Infrared's own name kept off the edge; needs -edge gateway, -platform-domain and -infrared-host")
 	flag.StringVar(&d.EdgeProofSecret, "edge-proof-secret", "",
@@ -950,6 +963,7 @@ func mergeDataFile(d *Data, path string) error {
 		"tunnel-mode":            func() { d.TunnelMode = explicit.TunnelMode },
 		"tunnel-publish":         func() { d.TunnelPublish = explicit.TunnelPublish },
 		"tunnel-hostnames":       func() { d.TunnelHostnames = explicit.TunnelHostnames },
+		"org-labels":             func() { d.OrgLabels = explicit.OrgLabels },
 		"sign-in-private":        func() { d.SignInPrivate = explicit.SignInPrivate },
 		"edge-proof-secret":      func() { d.EdgeProofSecret = explicit.EdgeProofSecret },
 		"image-registry":         func() { d.ImageRegistry = explicit.ImageRegistry },
@@ -1045,6 +1059,7 @@ func validate(d Data) error {
 	errs = append(errs, validateDomainTokenKey(d)...)
 	errs = append(errs, validateTunnel(d)...)
 	errs = append(errs, validateSignInPrivate(d)...)
+	errs = append(errs, validateOrgLabels(d)...)
 	errs = append(errs, validateEdgeProof(d)...)
 	for name, v := range map[string]string{"PlatformDomain": d.PlatformDomain, "InfraredHost": d.InfraredHost} {
 		if strings.ContainsAny(v, "/: *") || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") {
@@ -1304,6 +1319,32 @@ func validateTunnelHostnames(d Data) []error {
 	return errs
 }
 
+// maxOrgLabelLength is the most characters an org's label takes, as the
+// Organization's spec.addressLabel does.
+const maxOrgLabelLength = 32
+
+// validateOrgLabels checks OrgLabels as the operator hands them (ADR 0097):
+// only on a gateway edge with a PlatformDomain, the one edge whose
+// certificate names the domain's wildcard, each a DNS label, lower case, of
+// 3 to maxOrgLabelLength characters, listed once.
+func validateOrgLabels(d Data) []error {
+	var errs []error
+	if len(d.OrgLabels) > 0 && (d.Edge != "gateway" || d.PlatformDomain == "") {
+		errs = append(errs, errors.New("OrgLabels needs Edge gateway and a PlatformDomain: they are names under that domain on the edge's certificate"))
+	}
+	seen := map[string]bool{}
+	for _, l := range d.OrgLabels {
+		switch {
+		case len(l) < 3 || len(l) > maxOrgLabelLength || !orgLabel.MatchString(l):
+			errs = append(errs, fmt.Errorf("OrgLabels: %q must be a DNS label, lower case, of 3 to %d characters, e.g. acme", l, maxOrgLabelLength))
+		case seen[l]:
+			errs = append(errs, fmt.Errorf("OrgLabels: %q is listed twice", l))
+		}
+		seen[l] = true
+	}
+	return errs
+}
+
 // validateSignInPrivate checks SignInPrivate: only on a gateway edge with an
 // InfraredHost, the one edge that serves the name, and a PlatformDomain,
 // which the Installation's previews always carry with it (ADR 0090).
@@ -1450,6 +1491,9 @@ var (
 	// more, lower case, with no wildcard (the CRD's pattern for
 	// spec.tunnel.hostnames).
 	hostname = regexp.MustCompile(`^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	// orgLabel is a label of OrgLabels: one DNS label, lower case (the CRD's
+	// pattern for an Organization's spec.addressLabel).
+	orgLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	// tunnelID is a Cloudflare Tunnel's UUID, lower case.
 	tunnelID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	// dnsSubdomain is an object's name, such as a Secret's: DNS labels joined
